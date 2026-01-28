@@ -1391,133 +1391,195 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             url_queue.task_done()
             break
         
-        # Handle both old format (just URL) and new format (URL, index)
-        if isinstance(item, tuple):
-            original_url, url_index = item
-        else:
-            original_url = item
-            url_index = None
-        
-        # Normalize URL (add https:// if missing)
-        normalized_url = normalize_url(original_url)
-        
-        # Get lead data from map if available
-        lead_data = None
-        if lead_data_map and url_index is not None and url_index in lead_data_map:
-            lead_data = lead_data_map[url_index].copy()
-            lead_data['url'] = original_url  # Ensure URL is set
-        else:
-            # Fallback: extract company name from URL
-            lead_data = {
-                'url': original_url,
-                'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
-            }
-        
-        # Be lenient with URL validation - let the actual HTTP request determine validity
-        # Only reject obviously invalid URLs (empty or completely malformed)
-        if not normalized_url or len(normalized_url.strip()) < 4:
-            scraped_text = "❌ Invalid URL: URL is empty or too short"
-            ai_summary = "❌ Invalid URL: URL is empty or too short"
-        else:
-            # Try to scrape - let the fetch function handle validation
-            # This is more lenient and will catch URLs that are accessible but slightly malformed
-            try:
-                scraped_text = await scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout)
-            except Exception as e:
-                # If scraping fails with an exception, try once more with a more lenient approach
-                try:
-                    # Try with http:// if https:// failed
-                    if normalized_url.startswith("https://"):
-                        fallback_url = normalized_url.replace("https://", "http://", 1)
-                        scraped_text = await scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout)
-                    else:
-                        scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
-                except:
-                    scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
-            
-            # CRITICAL VALIDATION: Verify scraped content matches the URL
-            # Extract the first PAGE: URL from scraped content to verify
-            if scraped_text and not scraped_text.startswith("❌"):
-                # Check if scraped content contains PAGE: header
-                page_header_match = re.search(r'PAGE:\s*(https?://[^\s\n]+)', scraped_text[:5000])
-                if page_header_match:
-                    actual_scraped_url = page_header_match.group(1)
-                    # Normalize both URLs for comparison
-                    actual_domain = urlparse(actual_scraped_url).netloc.replace('www.', '').lower()
-                    expected_domain = urlparse(normalized_url).netloc.replace('www.', '').lower()
-                    
-                    # Verify domains match
-                    if actual_domain != expected_domain:
-                        if not (actual_domain.endswith('.' + expected_domain) or expected_domain.endswith('.' + actual_domain)):
-                            # Domain mismatch - content doesn't match URL!
-                            scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
-            
-            # Generate AI summary if enabled
-            if ai_enabled and ai_api_key and ai_provider and ai_model:
-                # Create URL-specific status callback
-                def url_status_callback(msg):
-                    if ai_status_callback:
-                        ai_status_callback(original_url, msg)
-                
-                ai_summary = await generate_ai_summary(
-                    ai_api_key, ai_provider, ai_model, ai_prompt or "",
-                    lead_data, scraped_text, status_callback=url_status_callback
-                )
+        # CRITICAL: Wrap entire processing in try-finally to ensure task_done() is always called
+        try:
+            # Handle both old format (just URL) and new format (URL, index)
+            if isinstance(item, tuple):
+                original_url, url_index = item
             else:
-                ai_summary = ""  # Empty if AI not enabled
-        
-        # PERFECT CSV CLEANING - Zero tolerance for formatting errors
-        def clean_csv_field(field_value):
-            """
-            Perfect CSV field cleaning:
-            - Removes all newlines, carriage returns, tabs
-            - Removes null bytes and control characters
-            - Normalizes whitespace
-            - Ensures valid UTF-8 encoding
-            - Returns empty string for None/invalid values
-            """
-            if field_value is None:
-                return ""
+                original_url = item
+                url_index = None
             
-            # Convert to string
-            field_str = str(field_value)
+            # Normalize URL (add https:// if missing)
+            normalized_url = normalize_url(original_url)
             
-            # Remove null bytes and control characters (except space, tab)
-            # Keep only printable characters and whitespace
-            import re
-            # Remove null bytes
-            field_str = field_str.replace('\x00', '')
-            # Replace all newlines, carriage returns, form feeds, vertical tabs with space
-            field_str = re.sub(r'[\n\r\f\v]', ' ', field_str)
-            # Replace tabs with space
-            field_str = field_str.replace('\t', ' ')
-            # Remove other control characters (0x00-0x1F except space)
-            field_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', field_str)
+            # Get lead data from map if available
+            lead_data = None
+            if lead_data_map and url_index is not None and url_index in lead_data_map:
+                lead_data = lead_data_map[url_index].copy()
+                lead_data['url'] = original_url  # Ensure URL is set
+            else:
+                # Fallback: extract company name from URL
+                lead_data = {
+                    'url': original_url,
+                    'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
+                }
             
-            # Normalize whitespace: collapse multiple spaces/tabs into single space
-            field_str = re.sub(r'\s+', ' ', field_str)
+            # Be lenient with URL validation - let the actual HTTP request determine validity
+            # Only reject obviously invalid URLs (empty or completely malformed)
+            if not normalized_url or len(normalized_url.strip()) < 4:
+                scraped_text = "❌ Invalid URL: URL is empty or too short"
+                ai_summary = "❌ Invalid URL: URL is empty or too short"
+            else:
+                # CRITICAL: Add a global timeout wrapper to prevent workers from hanging indefinitely
+                # Calculate max time: timeout per request * (retries + 1) * (depth + 1) URLs * 2 (for variations)
+                # Add extra buffer for processing time
+                max_total_time = (timeout * (retries + 1) * (depth + 1) * 2) + 30  # Extra 30s buffer
+                
+                try:
+                    # Wrap scraping in a timeout to prevent infinite hangs
+                    scraped_text = await asyncio.wait_for(
+                        scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout),
+                        timeout=max_total_time
+                    )
+                except asyncio.TimeoutError:
+                    # Global timeout exceeded - this URL is taking too long
+                    scraped_text = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
+                except Exception as e:
+                    # If scraping fails with an exception, try once more with a more lenient approach
+                    try:
+                        # Try with http:// if https:// failed, but also wrap in timeout
+                        if normalized_url.startswith("https://"):
+                            fallback_url = normalized_url.replace("https://", "http://", 1)
+                            try:
+                                scraped_text = await asyncio.wait_for(
+                                    scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout),
+                                    timeout=max_total_time
+                                )
+                            except asyncio.TimeoutError:
+                                scraped_text = f"❌ Timeout: Scraping {fallback_url} exceeded maximum time limit ({max_total_time}s)"
+                        else:
+                            scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
+                    except Exception as e2:
+                        scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
+                
+                # CRITICAL VALIDATION: Verify scraped content matches the URL
+                # Extract the first PAGE: URL from scraped content to verify
+                if scraped_text and not scraped_text.startswith("❌"):
+                    # Check if scraped content contains PAGE: header
+                    page_header_match = re.search(r'PAGE:\s*(https?://[^\s\n]+)', scraped_text[:5000])
+                    if page_header_match:
+                        actual_scraped_url = page_header_match.group(1)
+                        # Normalize both URLs for comparison
+                        actual_domain = urlparse(actual_scraped_url).netloc.replace('www.', '').lower()
+                        expected_domain = urlparse(normalized_url).netloc.replace('www.', '').lower()
+                        
+                        # Verify domains match
+                        if actual_domain != expected_domain:
+                            if not (actual_domain.endswith('.' + expected_domain) or expected_domain.endswith('.' + actual_domain)):
+                                # Domain mismatch - content doesn't match URL!
+                                scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
+                
+                # Generate AI summary if enabled
+                if ai_enabled and ai_api_key and ai_provider and ai_model:
+                    # Create URL-specific status callback
+                    def url_status_callback(msg):
+                        if ai_status_callback:
+                            ai_status_callback(original_url, msg)
+                    
+                    try:
+                        ai_summary = await asyncio.wait_for(
+                            generate_ai_summary(
+                                ai_api_key, ai_provider, ai_model, ai_prompt or "",
+                                lead_data, scraped_text, status_callback=url_status_callback
+                            ),
+                            timeout=120  # 2 minute timeout for AI summary
+                        )
+                    except asyncio.TimeoutError:
+                        ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
+                    except Exception as e:
+                        ai_summary = f"❌ AI Summary error: {str(e)}"
+                else:
+                    ai_summary = ""  # Empty if AI not enabled
             
-            # Strip leading/trailing whitespace
-            field_str = field_str.strip()
+            # PERFECT CSV CLEANING - Zero tolerance for formatting errors
+            def clean_csv_field(field_value):
+                """
+                Perfect CSV field cleaning:
+                - Removes all newlines, carriage returns, tabs
+                - Removes null bytes and control characters
+                - Normalizes whitespace
+                - Ensures valid UTF-8 encoding
+                - Returns empty string for None/invalid values
+                """
+                if field_value is None:
+                    return ""
+                
+                # Convert to string
+                field_str = str(field_value)
+                
+                # Remove null bytes and control characters (except space, tab)
+                # Keep only printable characters and whitespace
+                import re
+                # Remove null bytes
+                field_str = field_str.replace('\x00', '')
+                # Replace all newlines, carriage returns, form feeds, vertical tabs with space
+                field_str = re.sub(r'[\n\r\f\v]', ' ', field_str)
+                # Replace tabs with space
+                field_str = field_str.replace('\t', ' ')
+                # Remove other control characters (0x00-0x1F except space)
+                field_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', field_str)
+                
+                # Normalize whitespace: collapse multiple spaces/tabs into single space
+                field_str = re.sub(r'\s+', ' ', field_str)
+                
+                # Strip leading/trailing whitespace
+                field_str = field_str.strip()
+                
+                # Ensure valid UTF-8 encoding (replace invalid sequences)
+                try:
+                    field_str = field_str.encode('utf-8', errors='replace').decode('utf-8')
+                except:
+                    field_str = ""
+                
+                return field_str
             
-            # Ensure valid UTF-8 encoding (replace invalid sequences)
+            # Clean all fields perfectly
+            cleaned_url = clean_csv_field(original_url)
+            cleaned_scraped_text = clean_csv_field(scraped_text)
+            cleaned_ai_summary = clean_csv_field(ai_summary)
+            
+            # Output format: (url, scraped_text, ai_summary)
+            # Use original_url to maintain consistency with input CSV
+            out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
+            await result_queue.put(out)
+        except Exception as e:
+            # If anything goes wrong, still output an error row
             try:
-                field_str = field_str.encode('utf-8', errors='replace').decode('utf-8')
+                # Helper function for cleaning (defined here since it might not be in scope)
+                def clean_csv_field(field_value):
+                    if field_value is None:
+                        return ""
+                    field_str = str(field_value)
+                    import re
+                    field_str = field_str.replace('\x00', '')
+                    field_str = re.sub(r'[\n\r\f\v]', ' ', field_str)
+                    field_str = field_str.replace('\t', ' ')
+                    field_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', field_str)
+                    field_str = re.sub(r'\s+', ' ', field_str)
+                    field_str = field_str.strip()
+                    try:
+                        field_str = field_str.encode('utf-8', errors='replace').decode('utf-8')
+                    except:
+                        field_str = ""
+                    return field_str
+                
+                original_url_val = original_url if 'original_url' in locals() else "unknown URL"
+                error_msg = f"❌ Worker error processing {original_url_val}: {str(e)}"
+                cleaned_url = clean_csv_field(original_url_val)
+                cleaned_scraped_text = clean_csv_field(error_msg)
+                cleaned_ai_summary = clean_csv_field("")
+                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
+                await result_queue.put(out)
             except:
-                field_str = ""
-            
-            return field_str
-        
-        # Clean all fields perfectly
-        cleaned_url = clean_csv_field(original_url)
-        cleaned_scraped_text = clean_csv_field(scraped_text)
-        cleaned_ai_summary = clean_csv_field(ai_summary)
-        
-        # Output format: (url, scraped_text, ai_summary)
-        # Use original_url to maintain consistency with input CSV
-        out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
-        await result_queue.put(out)
-        url_queue.task_done()
+                # Last resort: put minimal error info
+                try:
+                    await result_queue.put(("", f"❌ Critical worker error: {str(e)}", ""))
+                except:
+                    pass  # If even this fails, just continue
+        finally:
+            # CRITICAL: Always mark task as done, even if there was an error
+            url_queue.task_done()
 
 
 async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, output_dir: str,
