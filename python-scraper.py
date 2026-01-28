@@ -974,110 +974,179 @@ def extract_links(html: str, base_url: str):
 
 
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int):
-    """Fetch URL with improved error handling and encoding detection."""
+    """Fetch URL with improved error handling, bot detection avoidance, and encoding support."""
     from urllib.parse import urlparse
     
-    for attempt in range(retries + 1):
-        try:
-            # Use proper headers to avoid being blocked or getting different content
-            headers = {
-                "User-Agent": session.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Cache-Control": "max-age=0"
-            }
+    # Try different URL variations and header combinations for better success rate
+    url_variations = [url]
+    parsed = urlparse(url)
+    
+    # Generate URL variations to try
+    if parsed.netloc:
+        domain = parsed.netloc
+        path = parsed.path or '/'
+        # Try with/without www
+        if domain.startswith('www.'):
+            url_variations.append(url.replace('www.', ''))
+        else:
+            url_variations.append(url.replace(domain, 'www.' + domain))
+        # Try http if https
+        if url.startswith('https://'):
+            url_variations.append(url.replace('https://', 'http://'))
+    
+    # Try different header combinations
+    header_variations = [
+        # Modern Chrome headers
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",  # Try with brotli first
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "DNT": "1"
+        },
+        # Fallback: without brotli
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",  # No brotli
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        },
+        # Simple headers (less bot-like)
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+    ]
+    
+    last_error = None
+    
+    # Try URL variations and header combinations
+    for url_to_try in url_variations:
+        for headers in header_variations:
+            # Use session's user agent if available
+            if session.headers.get("User-Agent"):
+                headers["User-Agent"] = session.headers.get("User-Agent")
             
-            # Parse original URL to extract domain - be more lenient
-            parsed_original = urlparse(url)
-            if not parsed_original.netloc:
-                # Try to fix URL if netloc is missing
-                if '/' in url and not url.startswith(('http://', 'https://')):
-                    url = "https://" + url
-                    parsed_original = urlparse(url)
-                if not parsed_original.netloc:
-                    return f"❌ Invalid URL format: {url}"
-            
-            original_domain = parsed_original.netloc.replace('www.', '').lower()
-            
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers) as resp:
-                # Handle redirects properly - use the final URL after redirects
-                final_url = str(resp.url)
-                parsed_final = urlparse(final_url)
-                final_domain = parsed_final.netloc.replace('www.', '').lower()
-                
-                # More lenient domain validation - allow common redirect patterns
-                # Extract base domains for comparison
-                original_base = '.'.join(original_domain.split('.')[-2:]) if '.' in original_domain else original_domain
-                final_base = '.'.join(final_domain.split('.')[-2:]) if '.' in final_domain else final_domain
-                
-                # Only reject if base domains are completely different
-                if final_domain != original_domain:
-                    # Check if it's a subdomain variation
-                    if not (final_domain.endswith('.' + original_domain) or original_domain.endswith('.' + final_domain)):
-                        # Check if base domains match (e.g., www.example.com -> example.com)
-                        if original_base != final_base:
-                            # Completely different domain - but be lenient, allow it
-                            # Many sites redirect to different domains (e.g., country-specific domains)
-                            # Only log for debugging, don't block
-                            pass
-                
-                # Check status code
-                if resp.status >= 400:
-                    return f"HTTP {resp.status} at {final_url}"
-                
-                # Read content once
-                html = await resp.text(errors="replace")
-                
-                # Validate it's actually HTML
-                html_lower = html.lower()
-                if '<html' not in html_lower and '<!doctype' not in html_lower:
-                    # Check if it's a redirect page or error
-                    if 'redirect' in html_lower[:500] or 'location.replace' in html_lower[:500] or 'window.location' in html_lower[:500]:
-                        return f"❌ JavaScript redirect detected at {final_url}"
-                    # Might be valid content without HTML tags (rare), but check length
-                    if len(html.strip()) < 100:
-                        return f"❌ Non-HTML or empty content at {final_url}"
-                
-                # Additional validation: Check if content seems wrong (e.g., contains common e-commerce patterns when we expect a business site)
-                # This is a safety check - if URL doesn't match content, warn
-                if len(html) > 1000:
-                    # Check for common indicators of wrong content
-                    suspicious_patterns = [
-                        'amazon.com', 'ebay.com', 'etsy.com', 'shopify',
-                        'add to cart', 'buy now', 'shopping cart',
-                        'product reviews', 'customer reviews'
-                    ]
-                    html_lower_sample = html_lower[:5000]  # Check first 5k chars
-                    suspicious_count = sum(1 for pattern in suspicious_patterns if pattern in html_lower_sample)
+            for attempt in range(retries + 1):
+                try:
+                    # Parse URL
+                    parsed_original = urlparse(url_to_try)
+                    if not parsed_original.netloc:
+                        continue
                     
-                    # If multiple suspicious patterns found, it might be wrong content
-                    # But don't block it - just log for debugging
-                    if suspicious_count >= 3:
-                        # This might be wrong content, but continue anyway
-                        pass
-                
-                # Return final URL (after redirects) and HTML
-                return (final_url, html)
-                
-        except asyncio.TimeoutError:
-            if attempt == retries:
-                return f"Timeout fetching {url} (exceeded {timeout}s)"
-            await asyncio.sleep(1 + attempt * 0.5)
-        except (aiohttp.ClientError, ConnectionResetError, UnicodeDecodeError) as e:
-            if attempt == retries:
-                return f"Error fetching {url}: {str(e)}"
-            await asyncio.sleep(1 + attempt * 0.5)
-        except Exception as e:
-            # Catch any other unexpected errors
-            if attempt == retries:
-                return f"Unexpected error fetching {url}: {str(e)}"
-            await asyncio.sleep(1 + attempt * 0.5)
+                    original_domain = parsed_original.netloc.replace('www.', '').lower()
+                    
+                    async with session.get(url_to_try, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers) as resp:
+                        # Handle redirects properly - use the final URL after redirects
+                        final_url = str(resp.url)
+                        parsed_final = urlparse(final_url)
+                        final_domain = parsed_final.netloc.replace('www.', '').lower()
+                        
+                        # More lenient domain validation - allow common redirect patterns
+                        # Extract base domains for comparison
+                        original_base = '.'.join(original_domain.split('.')[-2:]) if '.' in original_domain else original_domain
+                        final_base = '.'.join(final_domain.split('.')[-2:]) if '.' in final_domain else final_domain
+                        
+                        # Only reject if base domains are completely different
+                        if final_domain != original_domain:
+                            # Check if it's a subdomain variation
+                            if not (final_domain.endswith('.' + original_domain) or original_domain.endswith('.' + final_domain)):
+                                # Check if base domains match (e.g., www.example.com -> example.com)
+                                if original_base != final_base:
+                                    # Completely different domain - but be lenient, allow it
+                                    # Many sites redirect to different domains (e.g., country-specific domains)
+                                    # Only log for debugging, don't block
+                                    pass
+                        
+                        # Check status code - handle 403 specially
+                        if resp.status == 403:
+                            # 403 Forbidden - try next URL variation or header combination
+                            last_error = f"HTTP 403 at {final_url}"
+                            break  # Try next variation
+                        elif resp.status >= 400:
+                            # Other 4xx/5xx errors
+                            last_error = f"HTTP {resp.status} at {final_url}"
+                            if resp.status == 404:
+                                # 404 is final, don't retry
+                                return last_error
+                            break  # Try next variation
+                        
+                        # Success! Read content
+                        try:
+                            html = await resp.text(errors="replace")
+                        except Exception as decode_error:
+                            error_str = str(decode_error).lower()
+                            # Handle brotli encoding error
+                            if 'brotli' in error_str or 'br' in error_str or 'content-encoding' in error_str:
+                                # Retry without brotli
+                                headers_no_br = headers.copy()
+                                headers_no_br["Accept-Encoding"] = "gzip, deflate"
+                                # Try once more with different encoding
+                                async with session.get(url_to_try, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers_no_br) as resp2:
+                                    if resp2.status < 400:
+                                        html = await resp2.text(errors="replace")
+                                    else:
+                                        last_error = f"HTTP {resp2.status} at {str(resp2.url)}"
+                                        break
+                            else:
+                                last_error = f"Error decoding content: {str(decode_error)}"
+                                break
+                        
+                        # Validate it's actually HTML
+                        html_lower = html.lower()
+                        if '<html' not in html_lower and '<!doctype' not in html_lower:
+                            # Check if it's a redirect page or error
+                            if 'redirect' in html_lower[:500] or 'location.replace' in html_lower[:500] or 'window.location' in html_lower[:500]:
+                                last_error = f"JavaScript redirect detected at {final_url}"
+                                break
+                            # Might be valid content without HTML tags (rare), but check length
+                            if len(html.strip()) < 100:
+                                last_error = f"Non-HTML or empty content at {final_url}"
+                                break
+                        
+                        # Success! Return the content
+                        return (final_url, html)
+                        
+                except asyncio.TimeoutError:
+                    last_error = f"Timeout fetching {url_to_try} (exceeded {timeout}s)"
+                    if attempt < retries:
+                        await asyncio.sleep(1 + attempt * 0.5)
+                    continue
+                except (aiohttp.ClientError, ConnectionResetError) as e:
+                    error_str = str(e).lower()
+                    # Handle brotli encoding error specifically
+                    if 'brotli' in error_str or 'br' in error_str or 'content-encoding' in error_str:
+                        # Try without brotli in next iteration
+                        last_error = f"Brotli encoding error: {str(e)}"
+                        continue
+                    last_error = f"Error fetching {url_to_try}: {str(e)}"
+                    if attempt < retries:
+                        await asyncio.sleep(1 + attempt * 0.5)
+                    continue
+                except UnicodeDecodeError as e:
+                    last_error = f"Encoding error: {str(e)}"
+                    if attempt < retries:
+                        await asyncio.sleep(1 + attempt * 0.5)
+                    continue
+                except Exception as e:
+                    # Catch any other unexpected errors
+                    last_error = f"Unexpected error fetching {url_to_try}: {str(e)}"
+                    if attempt < retries:
+                        await asyncio.sleep(1 + attempt * 0.5)
+                    continue
+    
+    # If we get here, all variations failed
+    return last_error or f"Failed to fetch {url} after trying all variations"
 
 
 async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int):
@@ -1475,25 +1544,39 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             buffer = buffer[rows_per_file:]
             
             try:
-                # Filter out empty rows before creating DataFrame
+                # Filter out ONLY truly empty rows (keep error messages as they are valid data)
                 filtered_rows = []
                 for row in chunk_rows:
                     if len(row) >= 2:
                         url = str(row[0]).strip() if row[0] else ""
                         scraped_text = str(row[1]).strip() if row[1] else ""
-                        # Only include rows with valid URL and scraped text
-                        if url and scraped_text and len(scraped_text) > 0:
+                        # Include rows with valid URL - keep error messages (they start with ❌)
+                        # Only exclude rows where URL is empty or scraped_text is completely empty
+                        if url and url != "":
+                            # Include even if scraped_text is empty or is an error message
+                            # Error messages are valid data that should be preserved
                             filtered_rows.append(row)
                 
                 if not filtered_rows:
                     # Skip writing if no valid rows
                     continue
                 
-                # Determine columns based on data structure (2 or 3 columns)
-                if len(filtered_rows[0]) == 3:
-                    df = pd.DataFrame(filtered_rows, columns=["Website", "ScrapedText", "CompanySummary"])
-                else:
-                    df = pd.DataFrame(filtered_rows, columns=["Website", "ScrapedText"])
+                # Normalize all rows to have 3 columns for consistency
+                normalized_rows = []
+                for row in filtered_rows:
+                    if len(row) == 2:
+                        normalized_rows.append((row[0], row[1], ""))
+                    elif len(row) == 3:
+                        normalized_rows.append(row)
+                    else:
+                        # Handle unexpected structure - take first 3 elements or pad
+                        normalized_row = list(row[:3])
+                        while len(normalized_row) < 3:
+                            normalized_row.append("")
+                        normalized_rows.append(tuple(normalized_row))
+                
+                # Always create DataFrame with 3 columns
+                df = pd.DataFrame(normalized_rows, columns=["Website", "ScrapedText", "CompanySummary"])
                 
                 # PERFECT CSV CLEANING - Clean all DataFrame columns before writing
                 def clean_dataframe_for_csv(df):
@@ -1519,10 +1602,18 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 # Clean DataFrame
                 df = clean_dataframe_for_csv(df.copy())
                 
-                # Remove any remaining empty rows from DataFrame
-                df = df.dropna(subset=["Website", "ScrapedText"], how="all")
+                # Remove ONLY rows with empty URLs (keep error messages)
                 df = df[df["Website"].astype(str).str.strip() != ""]
-                df = df[df["ScrapedText"].astype(str).str.strip() != ""]
+                
+                # Ensure CompanySummary column exists (for consistency)
+                if "CompanySummary" not in df.columns:
+                    df["CompanySummary"] = ""
+                
+                # Ensure correct column order
+                if "CompanySummary" in df.columns:
+                    df = df[["Website", "ScrapedText", "CompanySummary"]]
+                else:
+                    df = df[["Website", "ScrapedText"]]
                 
                 if len(df) == 0:
                     # Skip writing if DataFrame is empty after filtering
@@ -1537,16 +1628,32 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 # - lineterminator='\n': Standard Unix line endings
                 # - doublequote=True: Escape quotes by doubling them (CSV standard)
                 try:
-                    df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                              quoting=csv.QUOTE_ALL, 
-                              lineterminator="\n",
-                              doublequote=True,
-                              escapechar=None,
-                              chunksize=1000 if len(df) > 5000 else None)
+                    # CRITICAL: Use manual CSV writer to ensure ALL fields are properly quoted
+                    # pandas to_csv sometimes doesn't quote correctly, causing data to split across columns
+                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                        # Write header
+                        writer.writerow(df.columns.tolist())
+                        # Write rows - ensure all values are strings and properly cleaned
+                        for _, row in df.iterrows():
+                            row_values = []
+                            for val in row:
+                                if pd.isna(val):
+                                    row_values.append('')
+                                else:
+                                    # Convert to string and ensure it's properly formatted
+                                    val_str = str(val)
+                                    # Remove any embedded newlines that might break CSV
+                                    val_str = val_str.replace('\n', ' ').replace('\r', ' ')
+                                    # Collapse multiple spaces
+                                    import re
+                                    val_str = re.sub(r'\s+', ' ', val_str).strip()
+                                    row_values.append(val_str)
+                            writer.writerow(row_values)
                     
                     # VALIDATION: Verify CSV file is valid by reading it back
                     try:
-                        test_df = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
+                        test_df = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
                         # Check row count matches
                         if len(test_df) != len(df):
                             raise ValueError(f"CSV validation failed: row count mismatch")
@@ -1554,16 +1661,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         if len(test_df.columns) != len(df.columns):
                             raise ValueError(f"CSV validation failed: column count mismatch")
                     except Exception as e:
-                        # If validation fails, rewrite with manual CSV writer for maximum control
+                        # If validation fails, log but don't rewrite (already used manual writer)
                         import logging
-                        logging.warning(f"CSV validation warning: {e}. Rewriting with manual writer...")
-                        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
-                            # Write header
-                            writer.writerow(df.columns.tolist())
-                            # Write rows
-                            for _, row in df.iterrows():
-                                writer.writerow([str(val) if pd.notna(val) else '' for val in row])
+                        logging.warning(f"CSV validation warning: {e}")
                 except Exception as e:
                     # Final fallback: manual CSV writing
                     import logging
@@ -1620,11 +1720,21 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         return df
                     df = clean_dataframe_for_csv(df.copy())
                     
-                    df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                              quoting=csv.QUOTE_ALL, 
-                              lineterminator="\n",
-                              doublequote=True,
-                              escapechar=None)
+                    # Use manual CSV writer for perfect quoting
+                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                        writer.writerow(df.columns.tolist())
+                        for _, row in df.iterrows():
+                            row_values = []
+                            for val in row:
+                                if pd.isna(val):
+                                    row_values.append('')
+                                else:
+                                    val_str = str(val).replace('\n', ' ').replace('\r', ' ')
+                                    import re
+                                    val_str = re.sub(r'\s+', ' ', val_str).strip()
+                                    row_values.append(val_str)
+                            writer.writerow(row_values)
                 except:
                     # Ultimate fallback: manual writer
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
@@ -1637,29 +1747,42 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
 
     # Write remaining buffer
     if buffer:
-        # Filter out empty rows before creating DataFrame
+        # Filter out ONLY rows with empty URLs (keep error messages as they are valid data)
         filtered_buffer = []
         for row in buffer:
             if len(row) >= 2:
                 url = str(row[0]).strip() if row[0] else ""
                 scraped_text = str(row[1]).strip() if row[1] else ""
-                # Only include rows with valid URL and scraped text
-                if url and scraped_text and len(scraped_text) > 0:
+                # Include rows with valid URL - keep error messages (they start with ❌)
+                # Only exclude rows where URL is empty
+                if url and url != "":
+                    # Ensure row has correct structure (pad with empty CompanySummary if needed)
+                    if len(row) == 2:
+                        row = (row[0], row[1], "")
                     filtered_buffer.append(row)
         
         if filtered_buffer:
             part += 1
             try:
-                # Determine columns based on data structure
-                if len(filtered_buffer[0]) == 3:
-                    df = pd.DataFrame(filtered_buffer, columns=["Website", "ScrapedText", "CompanySummary"])
-                else:
-                    df = pd.DataFrame(filtered_buffer, columns=["Website", "ScrapedText"])
+                # Normalize all rows to have 3 columns for consistency
+                normalized_buffer = []
+                for row in filtered_buffer:
+                    if len(row) == 2:
+                        normalized_buffer.append((row[0], row[1], ""))
+                    elif len(row) == 3:
+                        normalized_buffer.append(row)
+                    else:
+                        # Handle unexpected structure - take first 3 elements or pad
+                        normalized_row = list(row[:3])
+                        while len(normalized_row) < 3:
+                            normalized_row.append("")
+                        normalized_buffer.append(tuple(normalized_row))
                 
-                # Remove any remaining empty rows from DataFrame
-                df = df.dropna(subset=["Website", "ScrapedText"], how="all")
+                # Always create DataFrame with 3 columns
+                df = pd.DataFrame(normalized_buffer, columns=["Website", "ScrapedText", "CompanySummary"])
+                
+                # Remove ONLY rows with empty URLs (keep error messages)
                 df = df[df["Website"].astype(str).str.strip() != ""]
-                df = df[df["ScrapedText"].astype(str).str.strip() != ""]
                 
                 if len(df) == 0:
                     # Skip writing if DataFrame is empty after filtering
@@ -1667,9 +1790,21 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 else:
                     # Save CSV with Excel/Google Sheets compatibility
                     csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
-                    # QUOTE_ALL ensures all fields are quoted, preventing issues with commas and newlines
-                    df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                              quoting=csv.QUOTE_ALL, lineterminator="\n")
+                    # Use manual CSV writer for perfect quoting
+                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                        writer.writerow(df.columns.tolist())
+                        for _, row in df.iterrows():
+                            row_values = []
+                            for val in row:
+                                if pd.isna(val):
+                                    row_values.append('')
+                                else:
+                                    val_str = str(val).replace('\n', ' ').replace('\r', ' ')
+                                    import re
+                                    val_str = re.sub(r'\s+', ' ', val_str).strip()
+                                    row_values.append(val_str)
+                            writer.writerow(row_values)
                     
                     # Save Excel file (optimized for large files)
                     excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
@@ -2527,10 +2662,45 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 for excel_file in sorted(excel_files):
                     excel_path = os.path.join(output_dir, excel_file)
                     df_part = pd.read_excel(excel_path, engine='openpyxl')
+                    
+                    # Normalize column structure: ensure all DataFrames have same columns
+                    # Standard columns: Website, ScrapedText, CompanySummary
+                    if "CompanySummary" not in df_part.columns:
+                        df_part["CompanySummary"] = ""
+                    
+                    # Ensure correct column order
+                    if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
+                        if "CompanySummary" in df_part.columns:
+                            df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                        else:
+                            df_part = df_part[["Website", "ScrapedText"]]
+                    
+                    # Remove any extra columns that might cause issues
+                    expected_cols = ["Website", "ScrapedText", "CompanySummary"]
+                    df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
+                    
                     all_data.append(df_part)
                 
                 if all_data:
                     combined_df = pd.concat(all_data, ignore_index=True)
+                    
+                    # Ensure final DataFrame has correct structure
+                    if "CompanySummary" not in combined_df.columns:
+                        combined_df["CompanySummary"] = ""
+                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    
+                    # Clean the combined DataFrame
+                    def clean_dataframe_for_excel(df):
+                        """Clean all string columns in DataFrame for Excel"""
+                        import re
+                        for col in df.columns:
+                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                            df[col] = df[col].str.replace('\x00', '', regex=False)
+                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                            df[col] = df[col].str.strip()
+                        return df
+                    combined_df = clean_dataframe_for_excel(combined_df.copy())
+                    
                     excel_buffer = BytesIO()
                     combined_df.to_excel(excel_buffer, index=False, engine='openpyxl')
                     excel_buffer.seek(0)
@@ -2539,6 +2709,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     # Store in session_state for persistence
                     st.session_state['combined_excel_data'] = excel_data
                     st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
+                    st.session_state['combined_df'] = combined_df  # Store for CSV too
                     
                     st.download_button(
                         label="⬇️ Download Combined Excel",
@@ -2551,6 +2722,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     st.caption(f"{len(combined_df)} total rows")
             except Exception as e:
                 st.warning(f"Could not create combined Excel: {e}")
+                import traceback
+                st.error(f"Error details: {traceback.format_exc()}")
         else:
             st.info("No Excel files generated")
     
@@ -2562,12 +2735,35 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 all_data = []
                 for csv_file in sorted(csv_files):
                     csv_path = os.path.join(output_dir, csv_file)
-                    df_part = pd.read_csv(csv_path, encoding='utf-8-sig')
+                    # Read CSV with proper quoting handling
+                    df_part = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
+                    
+                    # Normalize column structure: ensure all DataFrames have same columns
+                    # Standard columns: Website, ScrapedText, CompanySummary
+                    if "CompanySummary" not in df_part.columns:
+                        df_part["CompanySummary"] = ""
+                    
+                    # Ensure correct column order
+                    if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
+                        if "CompanySummary" in df_part.columns:
+                            df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                        else:
+                            df_part = df_part[["Website", "ScrapedText"]]
+                    
+                    # Remove any extra columns that might cause issues
+                    expected_cols = ["Website", "ScrapedText", "CompanySummary"]
+                    df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
+                    
                     all_data.append(df_part)
                 
                 if all_data:
                     combined_df = pd.concat(all_data, ignore_index=True)
-                    csv_buffer = BytesIO()
+                    
+                    # Ensure final DataFrame has correct structure (always 3 columns)
+                    if "CompanySummary" not in combined_df.columns:
+                        combined_df["CompanySummary"] = ""
+                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    
                     # PERFECT CSV CLEANING for combined CSV
                     def clean_dataframe_for_csv(df):
                         """Clean all string columns in DataFrame for perfect CSV formatting"""
@@ -2583,12 +2779,27 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         return df
                     combined_df = clean_dataframe_for_csv(combined_df.copy())
                     
-                    # PERFECT CSV WRITING with all safety measures
-                    combined_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig', 
-                                      quoting=csv.QUOTE_ALL, 
-                                      lineterminator="\n",
-                                      doublequote=True,
-                                      escapechar=None)
+                    # PERFECT CSV WRITING with manual writer for absolute control
+                    csv_buffer = BytesIO()
+                    csv_writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                    # Write header - ALWAYS 3 columns
+                    csv_writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                    # Write rows - ensure exactly 3 values per row
+                    for _, row in combined_df.iterrows():
+                        row_values = []
+                        # Always extract exactly 3 values in correct order
+                        website = str(row["Website"]) if "Website" in row and pd.notna(row["Website"]) else ""
+                        scraped_text = str(row["ScrapedText"]) if "ScrapedText" in row and pd.notna(row["ScrapedText"]) else ""
+                        company_summary = str(row["CompanySummary"]) if "CompanySummary" in row and pd.notna(row["CompanySummary"]) else ""
+                        
+                        # Clean each value
+                        for val in [website, scraped_text, company_summary]:
+                            val_str = val.replace('\n', ' ').replace('\r', ' ')
+                            import re
+                            val_str = re.sub(r'\s+', ' ', val_str).strip()
+                            row_values.append(val_str)
+                        
+                        csv_writer.writerow(row_values)
                     csv_buffer.seek(0)
                     
                     csv_data = csv_buffer.getvalue()
@@ -2609,6 +2820,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     st.caption(f"{len(combined_df)} total rows")
             except Exception as e:
                 st.warning(f"Could not create combined CSV: {e}")
+                import traceback
+                st.error(f"Error details: {traceback.format_exc()}")
         else:
             st.info("No CSV files generated")
     
