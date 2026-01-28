@@ -722,9 +722,33 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
     """Fetch URL with improved error handling and encoding detection."""
     for attempt in range(retries + 1):
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True) as resp:
-                # Handle redirects properly
+            # Use proper headers to avoid being blocked or getting different content
+            headers = {
+                "User-Agent": session.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers) as resp:
+                # Handle redirects properly - use the final URL after redirects
                 final_url = str(resp.url)
+                
+                # Verify we're on the correct domain (prevent redirects to wrong sites)
+                from urllib.parse import urlparse
+                parsed_final = urlparse(final_url)
+                parsed_original = urlparse(url)
+                
+                # Check if redirect went to a completely different domain (not just subdomain)
+                if parsed_final.netloc != parsed_original.netloc:
+                    # Allow subdomains and www variations, but warn about major redirects
+                    original_domain = parsed_original.netloc.replace('www.', '')
+                    final_domain = parsed_final.netloc.replace('www.', '')
+                    if not (final_domain == original_domain or final_domain.endswith('.' + original_domain)):
+                        # Major redirect detected - log but continue
+                        pass
                 
                 # Check status code
                 if resp.status >= 400:
@@ -732,24 +756,21 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 
                 # Check content type more flexibly
                 content_type = resp.headers.get("Content-Type", "").lower()
-                if "text/html" not in content_type and "application/xhtml" not in content_type:
-                    # Some sites don't set proper content-type, check first bytes
-                    try:
-                        first_bytes = await resp.read(512)
-                        await resp.release()
-                        # Check if it looks like HTML
-                        text_start = first_bytes.decode('utf-8', errors='ignore')[:100].lower()
-                        if '<html' not in text_start and '<!doctype' not in text_start:
-                            return f"Non-HTML content at {final_url}"
-                        # Re-read full content
-                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp2:
-                            html = await resp2.text(errors="replace")  # Use 'replace' instead of 'ignore' to preserve structure
-                            return (final_url, html)
-                    except:
-                        return f"Non-HTML content at {final_url}"
                 
-                # Try to detect encoding from headers or content
-                html = await resp.text(errors="replace")  # Use 'replace' to handle encoding issues better
+                # Read content once
+                html = await resp.text(errors="replace")
+                
+                # Validate it's actually HTML
+                html_lower = html.lower()
+                if '<html' not in html_lower and '<!doctype' not in html_lower:
+                    # Check if it's a redirect page or error
+                    if 'redirect' in html_lower[:500] or 'location.replace' in html_lower[:500]:
+                        return f"JavaScript redirect detected at {final_url}"
+                    # Might be valid content without HTML tags (rare), but check length
+                    if len(html.strip()) < 100:
+                        return f"Non-HTML or empty content at {final_url}"
+                
+                # Return final URL (after redirects) and HTML
                 return (final_url, html)
                 
         except asyncio.TimeoutError:
@@ -773,11 +794,18 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     separator = "\n\n" + "─" * 80 + "\n\n"  # Better visual separator between pages
     separator_len = len(separator)
 
-    homepage = await fetch(session, url, timeout, retries)
+    # Normalize URL before fetching
+    normalized_url = normalize_url(url)
+    
+    homepage = await fetch(session, normalized_url, timeout, retries)
     if isinstance(homepage, str):
         return f"❌ {homepage}"
 
     page_url, html = homepage
+    
+    # Log the actual URL we fetched (useful for debugging redirects)
+    if page_url != normalized_url:
+        errors.append(f"ℹ️ Redirected from {normalized_url} to {page_url}")
     
     # Validate HTML content before processing
     if not html or len(html.strip()) < 50:
@@ -785,9 +813,22 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     
     # Check if HTML looks valid (has some HTML structure)
     html_lower = html.lower()
-    if '<html' not in html_lower and '<!doctype' not in html_lower and '<body' not in html_lower:
-        # Might be a redirect or error page, but still try to extract content
-        pass
+    
+    # More robust validation - check for common content indicators
+    has_content = (
+        '<html' in html_lower or 
+        '<!doctype' in html_lower or 
+        '<body' in html_lower or
+        '<main' in html_lower or
+        '<article' in html_lower or
+        '<div' in html_lower[:2000]  # Check first 2000 chars for div tags
+    )
+    
+    if not has_content:
+        # Check if it's a redirect page
+        if 'location.href' in html_lower or 'window.location' in html_lower or 'meta http-equiv="refresh"' in html_lower:
+            return f"❌ JavaScript/Meta redirect detected at {page_url}. Content may not be accessible."
+        # Might still have content, continue
     
     cleaned = cleanup_html(html)
     
@@ -815,7 +856,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         else:
             errors.append(f"❌ No extractable text content on homepage: {page_url}")
 
-    links = extract_links(html, url)
+    # Use the actual fetched URL (after redirects) for link extraction
+    links = extract_links(html, page_url)
     # Improved keyword matching - case-insensitive, handles hyphens/underscores
     if keywords:  # Only process if keywords are provided
         for kw in keywords:
@@ -1165,22 +1207,20 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 st.set_page_config(page_title="Web Scraper", layout="wide", page_icon="🌐")
 
 # Clean header
-col_header1, col_header2 = st.columns([3, 1])
-with col_header1:
-    st.title("🌐 Web Scraper")
-    st.caption("Upload CSV → Configure → Scrape → Download Results")
-with col_header2:
-    st.write("")  # Spacing
+st.title("🌐 Website Scraper")
+st.caption("Scrape websites from your CSV file and get clean text content")
 
-# Main tabs for better organization
-tab1, tab2, tab3 = st.tabs(["📁 Upload & Configure", "⚙️ Settings", "🤖 AI Summaries"])
+# Main tabs - Step by step flow
+tab1, tab2, tab3 = st.tabs(["📁 Step 1: Upload CSV", "⚙️ Step 2: Settings", "🤖 Step 3: AI (Optional)"])
 
 with tab1:
-    # File Upload Section
+    st.markdown("### Upload Your CSV File")
+    st.info("💡 Your CSV should have a column with website URLs (one per row)")
+    
     uploaded_file = st.file_uploader(
-        "📤 Upload CSV File", 
+        "Choose CSV file", 
         type=["csv"],
-        help="Upload your CSV file with URLs"
+        help="Upload a CSV file with website URLs"
     )
 
 # CSV Configuration (shown after file upload)
@@ -1207,57 +1247,58 @@ if uploaded_file is not None:
         
         with col_csv1:
             csv_has_headers = st.radio(
-                "Does your CSV have headers?",
-                ["Yes, has headers", "No headers"],
-                help="Select whether the first row contains column names",
+                "First row has column names?",
+                ["Yes", "No"],
+                help="Does the first row contain column names like 'URL', 'Website', etc?",
                 key="csv_headers_radio"
             )
         
         with col_csv2:
-            st.caption("💡 **Tip:** Headers make column selection easier!")
+            st.caption("💡 **Tip:** If yes, you'll see column names to choose from")
         
         # Read CSV based on header selection
         uploaded_file.seek(0)  # Reset file pointer
-        if csv_has_headers == "Yes, has headers":
+        if csv_has_headers == "Yes":
             df_preview = pd.read_csv(uploaded_file, nrows=10)
-            st.success(f"✅ Detected {len(df_preview.columns)} columns with headers: {', '.join(df_preview.columns.tolist()[:5])}{'...' if len(df_preview.columns) > 5 else ''}")
+            st.success(f"✅ Found {len(df_preview.columns)} columns: {', '.join(df_preview.columns.tolist()[:5])}{'...' if len(df_preview.columns) > 5 else ''}")
         else:
             df_preview = pd.read_csv(uploaded_file, header=None, nrows=10)
-            st.info(f"ℹ️ Detected {len(df_preview.columns)} columns (no headers)")
+            st.info(f"ℹ️ Found {len(df_preview.columns)} columns (no headers)")
         
-        # Column selection - Compact layout
-        st.markdown("#### Column Selection")
+        # Column selection
+        st.markdown("#### Select Columns")
         
         col_sel1, col_sel2 = st.columns(2)
         
         with col_sel1:
             # URL column selection
-            if csv_has_headers == "Yes, has headers":
+            if csv_has_headers == "Yes":
                 url_column = st.selectbox(
-                    "Select column with URLs",
+                    "Which column has URLs?",
                     options=list(df_preview.columns),
                     index=0,
-                    help="Choose which column contains the website URLs"
+                    help="Select the column that contains website URLs"
                 )
             else:
                 url_column = st.selectbox(
-                    "Select column with URLs",
+                    "Which column has URLs?",
                     options=[f"Column {i+1}" for i in range(len(df_preview.columns))],
                     index=0,
-                    help="Choose which column contains the website URLs"
+                    help="Select the column that contains website URLs"
                 )
         
         with col_sel2:
-            st.caption("📌 Required column")
+            st.caption("📌 **Required** - Must select this")
         
-        # Additional lead data columns (optional) - Collapsed by default
-        with st.expander("📊 Additional Lead Data (Optional)", expanded=False):
-            st.caption("For AI summaries - select columns with company info")
+        # Additional lead data columns (optional)
+        st.markdown("---")
+        with st.expander("📊 Extra Info for AI (Optional)", expanded=False):
+            st.caption("Only needed if you're using AI summaries. Select columns with company names, industry, etc.")
         
         col_lead1, col_lead2, col_lead3 = st.columns(3)
         
         with col_lead1:
-            if csv_has_headers == "Yes, has headers":
+            if csv_has_headers == "Yes":
                 company_name_col = st.selectbox(
                     "Company Name Column (optional)",
                     options=["None"] + list(df_preview.columns),
@@ -1274,7 +1315,7 @@ if uploaded_file is not None:
                 lead_data_columns['company_name'] = company_name_col
         
         with col_lead2:
-            if csv_has_headers == "Yes, has headers":
+            if csv_has_headers == "Yes":
                 industry_col = st.selectbox(
                     "Industry Column (optional)",
                     options=["None"] + list(df_preview.columns),
@@ -1291,7 +1332,7 @@ if uploaded_file is not None:
                 lead_data_columns['industry'] = industry_col
         
         with col_lead3:
-            if csv_has_headers == "Yes, has headers":
+            if csv_has_headers == "Yes":
                 other_col = st.selectbox(
                     "Other Column (optional)",
                     options=["None"] + list(df_preview.columns),
@@ -1309,7 +1350,7 @@ if uploaded_file is not None:
         
         # Store in session state for use during scraping
         st.session_state['csv_config'] = {
-            'has_headers': csv_has_headers == "Yes, has headers",
+            'has_headers': csv_has_headers == "Yes",
             'url_column': url_column,
             'lead_data_columns': lead_data_columns,
             'df_preview': df_preview
@@ -1320,242 +1361,225 @@ if uploaded_file is not None:
         st.info("Please check your CSV file format and try again.")
 
 with tab2:
-    st.markdown("### ⚙️ Scraping Settings")
+    st.markdown("### Configure Scraping Settings")
+    st.info("💡 Most settings have good defaults. You can leave them as-is or adjust if needed.")
     
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("#### 🔍 Scraping")
+        st.markdown("#### Basic Settings")
         
         # Keywords - Simplified
         keywords_input = st.text_input(
-            "Keywords (comma separated)",
+            "Keywords to find (optional)",
             value=st.session_state.get('keywords_input', "about,service,product"),
-            help="Keywords to find in URLs (e.g., about,service,product)",
+            help="Comma-separated keywords. The scraper will look for pages with these in the URL (e.g., 'about', 'service', 'product')",
             key="keywords_input"
         )
         keywords = process_keywords(keywords_input)
         st.session_state['keywords'] = keywords
         
         if keywords:
-            st.caption(f"✅ {len(keywords)} keyword(s)")
+            st.caption(f"✅ Looking for: {', '.join(keywords)}")
+        else:
+            st.caption("💡 Leave empty to scrape homepage only")
         
-        # Concurrency - Simplified
-        # Note: When using key= parameter, Streamlit manages session_state automatically
+        # Speed
         concurrency = st.slider(
-            "Concurrency (workers)", 
+            "Speed (parallel workers)", 
             1, 50, st.session_state.get('concurrency', 20),
-            help="Parallel workers (20-30 recommended)",
+            help="How many websites to scrape at the same time. Higher = faster but may cause errors. 20-30 is usually best.",
             key="concurrency"
         )
-        # Don't manually set - Streamlit handles it via key=
         
-        # Retries - Simplified
-        retries = st.number_input(
-            "Retry Attempts", 
-            0, 5, st.session_state.get('retries', 2),
-            help="Retries for failed requests",
-            key="retries"
-        )
-        # Don't manually set - Streamlit handles it via key=
-        
-        # Depth - Simplified
+        # Pages to scrape
         depth = st.slider(
-            "Depth (link follow)", 
+            "Pages to scrape per site", 
             0, 5, st.session_state.get('depth', 3),
-            help="Link depth (2-3 recommended)",
+            help="How many pages to scrape from each website. 0 = homepage only, 3 = homepage + 3 more pages",
             key="depth"
         )
-        # Don't manually set - Streamlit handles it via key=
+        
+        # Retries
+        retries = st.number_input(
+            "Retries if failed", 
+            0, 5, st.session_state.get('retries', 2),
+            help="If a website fails, how many times to try again. 2 is usually enough.",
+            key="retries"
+        )
     
     with col2:
-        st.markdown("#### ⏱️ Performance")
+        st.markdown("#### Advanced Settings")
         
-        # Timeout - Simplified
+        # Timeout
         timeout = st.number_input(
-            "Timeout (seconds)", 
+            "Wait time per site (seconds)", 
             2, 60, st.session_state.get('timeout', 15),
-            help="Request timeout",
+            help="How long to wait for each website before giving up. 15 seconds is usually fine.",
             key="timeout"
         )
-        # Don't manually set - Streamlit handles it via key=
         
-        # Max chars - Simplified
+        # Max chars
         max_chars = st.number_input(
-            "Max Characters per Site", 
+            "Text limit per site", 
             1000, 200000, st.session_state.get('max_chars', 50000),
             step=5000,
-            help="Character limit per website",
+            help="Maximum characters to scrape from each website. Higher = more content but larger files.",
             key="max_chars"
         )
-        # Don't manually set - Streamlit handles it via key=
         
-        # Rows per file - Simplified
+        # Rows per file
         rows_per_file = st.number_input(
-            "Rows per CSV file", 
+            "Split files every X rows", 
             1000, 50000, st.session_state.get('rows_per_file', 2000), step=1000,
-            help="Rows before splitting files",
+            help="Large results will be split into multiple files. 2000 rows per file is usually good.",
             key="rows_per_file"
         )
-        # Don't manually set - Streamlit handles it via key=
         
-        # User Agent - Simplified
-        user_agent = st.text_input(
-            "User-Agent", 
-            value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
-            help="Browser identifier",
-            key="user_agent"
-        )
-        # Don't manually set - Streamlit handles it via key=
+        # User Agent - Hidden in expander
+        with st.expander("🔧 User-Agent (Advanced)", expanded=False):
+            user_agent = st.text_input(
+                "User-Agent", 
+                value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+                help="Browser identifier sent to websites. Usually don't need to change this.",
+                key="user_agent"
+            )
     
-    # Detailed explanations in collapsed expander
-    with st.expander("ℹ️ Detailed Help", expanded=False):
-        st.markdown("""
-        **Keywords:** Separate with commas. Case-insensitive. Finds URLs containing these keywords.
-        
-        **Concurrency:** Number of parallel workers. Higher = faster but may cause timeouts.
-        
-        **Retries:** How many times to retry failed requests. 2-3 recommended.
-        
-        **Depth:** How many levels of links to follow. 2-3 recommended for most cases.
-        
-        **Timeout:** Maximum seconds to wait for a website. 15s recommended.
-        
-        **Max Characters:** Limit content per website. 50k recommended for large datasets.
-        
-        **Rows per File:** Split large outputs into multiple files. 2000-5000 recommended.
-        """)
-    
-    # Output Settings - Simplified
+    # Output Settings
     st.markdown("---")
-    st.markdown("#### 📂 Output Settings")
+    st.markdown("#### Output Folder")
     
     run_name = st.text_input(
-        "Output folder name (optional)", 
+        "Folder name (optional)", 
         value=st.session_state.get('run_name', ""),
-        help="Custom name for output folder. Leave empty for auto-generated.",
+        help="Give your results folder a custom name. Leave empty for automatic name.",
         key="run_name"
     )
 
 with tab3:
-    st.markdown("### 🤖 AI Company Summary")
+    st.markdown("### Generate AI Summaries (Optional)")
+    st.info("💡 Use AI to automatically create company summaries from scraped content. Requires an API key.")
     
     ai_enabled = st.checkbox(
-        "Enable AI summaries",
+        "Generate AI summaries",
         value=st.session_state.get('ai_enabled', False),
-        help="Generate AI summaries for each company",
+        help="Check this to enable AI-powered company summary generation",
         key="ai_enabled_checkbox"
     )
     st.session_state['ai_enabled'] = ai_enabled
     
     if ai_enabled:
-        col_ai1, col_ai2 = st.columns(2)
+        st.markdown("---")
+        # Step 1: Choose AI service
+        st.markdown("#### Step 1: Choose AI Service")
+        ai_provider = st.selectbox(
+            "Which AI service?",
+            ["OpenAI", "Gemini"],
+            help="OpenAI (GPT models) or Google Gemini",
+            key="ai_provider_select"
+        )
+        st.session_state['ai_provider'] = ai_provider
         
-        with col_ai1:
-            st.markdown("#### Configuration")
-            
-            ai_provider = st.selectbox(
-                "AI Provider",
-                ["OpenAI", "Gemini"],
-                help="Choose OpenAI or Gemini",
-                key="ai_provider_select"
-            )
-            st.session_state['ai_provider'] = ai_provider
-            
-            # API Key - Simplified
-            api_key_key = f"{ai_provider.lower()}_api_key"
-            stored_api_key = st.session_state.get(api_key_key, "")
-            
-            ai_api_key = st.text_input(
-                f"{ai_provider} API Key",
-                value=stored_api_key,
-                type="password",
-                help=f"Enter your {ai_provider} API key"
-            )
-            
-            # Save API key
-            if ai_api_key:
-                if ai_api_key != stored_api_key:
-                    st.session_state[api_key_key] = ai_api_key
-                    st.session_state[f"{ai_provider.lower()}_models"] = None
-                st.caption(f"✅ Saved")
-            elif stored_api_key and not ai_api_key:
-                st.session_state[api_key_key] = ""
+        # Step 2: Enter API key
+        st.markdown("#### Step 2: Enter API Key")
+        api_key_key = f"{ai_provider.lower()}_api_key"
+        stored_api_key = st.session_state.get(api_key_key, "")
+        
+        if ai_provider == "OpenAI":
+            st.caption("Get your API key from: https://platform.openai.com/api-keys")
+        else:
+            st.caption("Get your API key from: https://makersuite.google.com/app/apikey")
+        
+        ai_api_key = st.text_input(
+            f"{ai_provider} API Key",
+            value=stored_api_key,
+            type="password",
+            help=f"Paste your {ai_provider} API key here"
+        )
+        
+        # Save API key
+        if ai_api_key:
+            if ai_api_key != stored_api_key:
+                st.session_state[api_key_key] = ai_api_key
+                st.session_state['ai_api_key'] = ai_api_key
                 st.session_state[f"{ai_provider.lower()}_models"] = None
-            
-            # Model selection - Simplified
-            models_cache_key = f"{ai_provider.lower()}_models"
-            cached_models = st.session_state.get(models_cache_key)
-            
-            if ai_api_key and ai_api_key.strip():
-                if cached_models is None:
-                    with st.spinner(f"Fetching {ai_provider} models..."):
-                        try:
-                            if os.name == "nt":
-                                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-                            
-                            if ai_provider == "OpenAI":
-                                models = asyncio.run(fetch_openai_models(ai_api_key))
-                            else:
-                                models = asyncio.run(fetch_gemini_models(ai_api_key))
-                            
-                            if models:
-                                st.session_state[models_cache_key] = models
-                                cached_models = models
-                            else:
-                                cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
-                                st.session_state[models_cache_key] = cached_models
-                        except Exception as e:
-                            st.warning(f"Using default models")
+            st.success("✅ API key saved")
+        elif stored_api_key and not ai_api_key:
+            st.session_state[api_key_key] = ""
+            st.session_state['ai_api_key'] = ""
+            st.session_state[f"{ai_provider.lower()}_models"] = None
+        
+        # Always sync generic key
+        st.session_state['ai_api_key'] = st.session_state.get(api_key_key, "")
+        
+        # Step 3: Choose model
+        st.markdown("#### Step 3: Choose Model")
+        models_cache_key = f"{ai_provider.lower()}_models"
+        cached_models = st.session_state.get(models_cache_key)
+        
+        if ai_api_key and ai_api_key.strip():
+            if cached_models is None:
+                with st.spinner(f"Loading available models..."):
+                    try:
+                        if os.name == "nt":
+                            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                        
+                        if ai_provider == "OpenAI":
+                            models = asyncio.run(fetch_openai_models(ai_api_key))
+                        else:
+                            models = asyncio.run(fetch_gemini_models(ai_api_key))
+                        
+                        if models:
+                            st.session_state[models_cache_key] = models
+                            cached_models = models
+                        else:
                             cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
                             st.session_state[models_cache_key] = cached_models
-                
-                if cached_models:
-                    default_index = 0
-                    if ai_provider == "OpenAI":
-                        if "gpt-4o-mini" in cached_models:
-                            default_index = cached_models.index("gpt-4o-mini")
-                        elif "gpt-4o" in cached_models:
-                            default_index = cached_models.index("gpt-4o")
-                    else:
-                        if "gemini-1.5-flash" in cached_models:
-                            default_index = cached_models.index("gemini-1.5-flash")
-                        elif "gemini-1.5-pro" in cached_models:
-                            default_index = cached_models.index("gemini-1.5-pro")
-                    
-                    ai_model = st.selectbox(
-                        "Model",
-                        options=cached_models,
-                        index=default_index,
-                        help=f"Select {ai_provider} model - Showing ALL available models from API",
-                        key=f"{ai_provider}_model_select"
-                    )
-                    # Store in session_state for use in scraping
-                    st.session_state['ai_model'] = ai_model
-                    st.session_state['ai_provider'] = ai_provider
-                    
-                    st.caption(f"📋 {len(cached_models)} model(s) available - All GPT models fetched from API")
-                    
-                    with st.expander(f"View All Models", expanded=False):
-                        for i, model in enumerate(cached_models, 1):
-                            is_selected = "✅" if model == ai_model else ""
-                            st.markdown(f"{i}. `{model}` {is_selected}")
+                    except Exception as e:
+                        st.warning("⚠️ Could not load models. Using defaults.")
+                        cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                        st.session_state[models_cache_key] = cached_models
+            
+            if cached_models:
+                default_index = 0
+                if ai_provider == "OpenAI":
+                    if "gpt-4o-mini" in cached_models:
+                        default_index = cached_models.index("gpt-4o-mini")
+                    elif "gpt-4o" in cached_models:
+                        default_index = cached_models.index("gpt-4o")
                 else:
-                    ai_model = None
+                    if "gemini-1.5-flash" in cached_models:
+                        default_index = cached_models.index("gemini-1.5-flash")
+                    elif "gemini-1.5-pro" in cached_models:
+                        default_index = cached_models.index("gemini-1.5-pro")
+                
+                ai_model = st.selectbox(
+                    "Select model",
+                    options=cached_models,
+                    index=default_index,
+                    help="Choose which AI model to use. Defaults are usually best.",
+                    key=f"{ai_provider}_model_select"
+                )
+                st.session_state['ai_model'] = ai_model
+                st.session_state['ai_provider'] = ai_provider
+                
+                st.caption(f"✅ {len(cached_models)} models available")
             else:
-                st.info("Enter API key to see models")
                 ai_model = None
+        else:
+            st.info("👆 Enter your API key above to see available models")
+            ai_model = None
         
-        with col_ai2:
-            st.markdown("#### Prompt")
-            
-            prompt_mode = st.radio(
-                "Prompt Mode",
-                ["Use Default", "Edit Prompt"],
-                horizontal=True
-            )
-            
-            default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
+        # Step 4: Prompt (simplified)
+        st.markdown("#### Step 4: Prompt (Optional)")
+        prompt_mode = st.radio(
+            "Prompt options",
+            ["Use default prompt", "Customize prompt"],
+            horizontal=True,
+            help="Default prompt works great for most cases"
+        )
+        
+        default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
 INPUT
 You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
@@ -1631,31 +1655,31 @@ Hypothesis: … (obs)
 Signal: "…"
 Commercial implication: …
 Confidence: High or Medium or Low"""
-            
-            if 'master_prompt' not in st.session_state:
-                st.session_state['master_prompt'] = default_prompt_template
-            
-            if prompt_mode == "Edit Prompt":
-                ai_prompt = st.text_area(
-                    "Master Prompt Template",
-                    value=st.session_state.get('master_prompt', default_prompt_template),
-                    height=300,
-                    help="Edit prompt. Use: {url}, {company_name}, {scraped_content}",
-                    key="ai_prompt_edit"
-                )
-                st.session_state['master_prompt'] = ai_prompt
-            else:
-                ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
-            
-            # Store prompt in session_state (not managed by widget key)
-            st.session_state['ai_prompt'] = ai_prompt
-            
-            with st.expander("Preview Prompt", expanded=False):
-                sample_url = "https://example.com"
-                sample_company = "Example Company"
-                sample_content = "Sample website content..."
-                preview = ai_prompt.replace('{url}', sample_url).replace('{company_name}', sample_company).replace('{scraped_content}', sample_content[:200])
-                st.code(preview, language=None)
+        
+        if 'master_prompt' not in st.session_state:
+            st.session_state['master_prompt'] = default_prompt_template
+        
+        if prompt_mode == "Customize prompt":
+            st.caption("💡 Use {url}, {company_name}, and {scraped_content} as placeholders")
+            ai_prompt = st.text_area(
+                "Custom prompt",
+                value=st.session_state.get('master_prompt', default_prompt_template),
+                height=300,
+                help="Edit the prompt that will be sent to AI",
+                key="ai_prompt_edit"
+            )
+            st.session_state['master_prompt'] = ai_prompt
+        else:
+            ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
+        
+        st.session_state['ai_prompt'] = ai_prompt
+        
+        with st.expander("👁️ Preview how prompt will look", expanded=False):
+            sample_url = "https://example.com"
+            sample_company = "Example Company"
+            sample_content = "Sample website content..."
+            preview = ai_prompt.replace('{url}', sample_url).replace('{company_name}', sample_company).replace('{scraped_content}', sample_content[:200])
+            st.code(preview, language=None)
     
     else:
         ai_api_key = None
@@ -1665,7 +1689,8 @@ Confidence: High or Medium or Low"""
 
 # Main action button - Outside tabs
 st.markdown("---")
-st.markdown("### 🚀 Start Scraping")
+st.markdown("### 🚀 Ready to Start")
+st.info("💡 Make sure you've uploaded your CSV and configured settings above. Then click the button below to start scraping!")
 
 # Get variables from tabs - Use session_state (proper Streamlit way)
 keywords = st.session_state.get('keywords', [])
@@ -1678,8 +1703,13 @@ rows_per_file = st.session_state.get('rows_per_file', 2000)
 user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 run_name = st.session_state.get('run_name', "")
 ai_enabled = st.session_state.get('ai_enabled', False)
-ai_api_key = st.session_state.get('ai_api_key', None)
 ai_provider = st.session_state.get('ai_provider', None)
+# Get API key - check provider-specific key first, then generic
+if ai_provider:
+    api_key_key = f"{ai_provider.lower()}_api_key"
+    ai_api_key = st.session_state.get(api_key_key) or st.session_state.get('ai_api_key', None)
+else:
+    ai_api_key = st.session_state.get('ai_api_key', None)
 ai_model = st.session_state.get('ai_model', None)
 ai_prompt = st.session_state.get('ai_prompt', None)
 
