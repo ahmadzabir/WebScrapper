@@ -455,7 +455,8 @@ async def generate_ai_summary(
     model: str,
     prompt: str,
     lead_data: dict,
-    scraped_content: str
+    scraped_content: str,
+    status_callback=None
 ) -> str:
     """
     Generate AI summary for a company.
@@ -560,37 +561,44 @@ def cleanup_html(html: str) -> str:
     html = re.sub(r'^\s+', '', html, flags=re.MULTILINE)  # Leading whitespace
     html = re.sub(r'\s+$', '', html, flags=re.MULTILINE)  # Trailing whitespace
     
-    # Remove common noise phrases
+    # Remove common noise phrases (more conservative - only remove standalone phrases)
+    # This prevents removing legitimate content that might contain these words
     noise_patterns = [
-        r'cookie\s+policy',
-        r'privacy\s+policy',
-        r'terms\s+of\s+service',
-        r'accept\s+cookies',
-        r'we\s+use\s+cookies',
-        r'skip\s+to\s+content',
-        r'jump\s+to\s+content',
-        r'menu',
-        r'close',
-        r'share\s+on',
-        r'follow\s+us',
-        r'subscribe\s+to',
+        r'^\s*cookie\s+policy\s*$',
+        r'^\s*privacy\s+policy\s*$',
+        r'^\s*terms\s+of\s+service\s*$',
+        r'^\s*accept\s+cookies\s*$',
+        r'^\s*we\s+use\s+cookies\s*$',
+        r'^\s*skip\s+to\s+content\s*$',
+        r'^\s*jump\s+to\s+content\s*$',
+        r'^\s*menu\s*$',
+        r'^\s*close\s*$',
+        r'^\s*share\s+on\s*$',
+        r'^\s*follow\s+us\s*$',
+        r'^\s*subscribe\s+to\s*$',
     ]
     for pattern in noise_patterns:
-        html = re.sub(pattern, '', html, flags=re.IGNORECASE)
+        html = re.sub(pattern, '', html, flags=re.IGNORECASE | re.MULTILINE)
     
     # Final cleanup
     html = html.strip()
     
-    # Split into lines and clean each line
+    # Split into lines and clean each line (more conservative filtering)
     lines = html.split('\n')
     cleaned_lines = []
     for line in lines:
         line = line.strip()
-        # Skip very short lines that are likely noise
-        if len(line) < 3:
+        # Skip empty lines
+        if not line:
             continue
-        # Skip lines that are just punctuation or symbols
-        if re.match(r'^[^\w\s]+$', line):
+        # Skip very short lines that are likely noise (but keep single characters if they're meaningful)
+        if len(line) < 2:
+            continue
+        # Skip lines that are ONLY punctuation or symbols (but allow lines with some punctuation)
+        if re.match(r'^[^\w\s]+$', line) and len(line) < 5:
+            continue
+        # Skip lines that are just numbers (likely page numbers or IDs)
+        if re.match(r'^\d+$', line) and len(line) < 10:
             continue
         cleaned_lines.append(line)
     
@@ -604,20 +612,66 @@ def cleanup_html(html: str) -> str:
 
 
 def extract_links(html: str, base_url: str):
+    """Extract links from HTML with improved accuracy and URL resolution."""
+    from urllib.parse import urljoin, urlparse
+    
+    # More robust regex pattern for href extraction
     matches = re.findall(
-        r'<a\s+(?:[^>]*?\s+)?href=(["\'])(.*?)\1', html, flags=re.IGNORECASE)
+        r'<a\s+(?:[^>]*?\s+)?href\s*=\s*(["\']?)([^"\'>\s]+)\1', html, flags=re.IGNORECASE)
+    
     base_domain = "/".join(base_url.split("/")[:3])
+    parsed_base = urlparse(base_url)
+    base_scheme = parsed_base.scheme or "https"
+    base_netloc = parsed_base.netloc or parsed_base.path.split("/")[0] if "/" in parsed_base.path else ""
+    
     urls = []
-    for _, href in matches:
-        if href.startswith(("#", "mailto:", "javascript:")):
+    seen = set()
+    
+    for quote_char, href in matches:
+        href = href.strip()
+        if not href:
             continue
-        if href.startswith("/"):
-            href = base_domain + href
-        elif not href.startswith("http"):
+            
+        # Skip anchors, mailto, javascript, and other non-HTTP links
+        if href.startswith(("#", "mailto:", "javascript:", "tel:", "sms:", "data:")):
             continue
-        if href.startswith(base_domain):
-            urls.append(href)
-    return list(dict.fromkeys(urls))
+        
+        # Resolve relative URLs properly
+        try:
+            if href.startswith("//"):
+                # Protocol-relative URL
+                resolved_url = base_scheme + ":" + href
+            elif href.startswith("/"):
+                # Absolute path
+                resolved_url = base_scheme + "://" + base_netloc + href
+            elif href.startswith("http://") or href.startswith("https://"):
+                # Absolute URL
+                resolved_url = href
+            else:
+                # Relative URL - use urljoin for proper resolution
+                resolved_url = urljoin(base_url, href)
+            
+            # Parse to validate and normalize
+            parsed = urlparse(resolved_url)
+            if not parsed.netloc:
+                continue
+            
+            # Only include URLs from the same domain
+            if parsed.netloc == base_netloc or parsed.netloc.endswith("." + base_netloc):
+                # Normalize URL (remove fragment, normalize path)
+                normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if parsed.query:
+                    normalized += "?" + parsed.query
+                
+                # Avoid duplicates
+                if normalized not in seen:
+                    seen.add(normalized)
+                    urls.append(normalized)
+        except Exception:
+            # Skip invalid URLs silently
+            continue
+    
+    return urls
 
 # -------------------------
 # Network fetch + scraping
@@ -625,18 +679,51 @@ def extract_links(html: str, base_url: str):
 
 
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int):
+    """Fetch URL with improved error handling and encoding detection."""
     for attempt in range(retries + 1):
         try:
-            async with session.get(url, timeout=timeout) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True) as resp:
+                # Handle redirects properly
+                final_url = str(resp.url)
+                
+                # Check status code
                 if resp.status >= 400:
-                    return f"HTTP {resp.status} at {url}"
-                if "text/html" not in resp.headers.get("Content-Type", ""):
-                    return f"Non-HTML content at {url}"
-                html = await resp.text(errors="ignore")
-                return (str(resp.url), html)
-        except (aiohttp.ClientError, ConnectionResetError, asyncio.TimeoutError) as e:
+                    return f"HTTP {resp.status} at {final_url}"
+                
+                # Check content type more flexibly
+                content_type = resp.headers.get("Content-Type", "").lower()
+                if "text/html" not in content_type and "application/xhtml" not in content_type:
+                    # Some sites don't set proper content-type, check first bytes
+                    try:
+                        first_bytes = await resp.read(512)
+                        await resp.release()
+                        # Check if it looks like HTML
+                        text_start = first_bytes.decode('utf-8', errors='ignore')[:100].lower()
+                        if '<html' not in text_start and '<!doctype' not in text_start:
+                            return f"Non-HTML content at {final_url}"
+                        # Re-read full content
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp2:
+                            html = await resp2.text(errors="replace")  # Use 'replace' instead of 'ignore' to preserve structure
+                            return (final_url, html)
+                    except:
+                        return f"Non-HTML content at {final_url}"
+                
+                # Try to detect encoding from headers or content
+                html = await resp.text(errors="replace")  # Use 'replace' to handle encoding issues better
+                return (final_url, html)
+                
+        except asyncio.TimeoutError:
             if attempt == retries:
-                return f"Error fetching {url}: {e}"
+                return f"Timeout fetching {url} (exceeded {timeout}s)"
+            await asyncio.sleep(1 + attempt * 0.5)
+        except (aiohttp.ClientError, ConnectionResetError, UnicodeDecodeError) as e:
+            if attempt == retries:
+                return f"Error fetching {url}: {str(e)}"
+            await asyncio.sleep(1 + attempt * 0.5)
+        except Exception as e:
+            # Catch any other unexpected errors
+            if attempt == retries:
+                return f"Unexpected error fetching {url}: {str(e)}"
             await asyncio.sleep(1 + attempt * 0.5)
 
 
@@ -651,8 +738,21 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         return f"❌ {homepage}"
 
     page_url, html = homepage
+    
+    # Validate HTML content before processing
+    if not html or len(html.strip()) < 50:
+        return f"❌ Empty or too short HTML content from {page_url}"
+    
+    # Check if HTML looks valid (has some HTML structure)
+    html_lower = html.lower()
+    if '<html' not in html_lower and '<!doctype' not in html_lower and '<body' not in html_lower:
+        # Might be a redirect or error page, but still try to extract content
+        pass
+    
     cleaned = cleanup_html(html)
-    if cleaned:
+    
+    # Validate cleaned content
+    if cleaned and len(cleaned.strip()) > 10:  # Ensure meaningful content
         # Better page header with clear separation
         page_header = f"\n{'='*80}\nPAGE: {page_url}\n{'='*80}\n\n"
         page_content = page_header + cleaned
@@ -669,7 +769,11 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 total_chars = max_chars
         # If total_chars > 0 and adding would exceed, skip
     else:
-        errors.append(f"❌ No visible text on homepage: {page_url}")
+        # Check if it's an error page or redirect
+        if 'error' in html_lower[:500] or '404' in html_lower[:500] or 'not found' in html_lower[:500]:
+            errors.append(f"❌ Error page detected: {page_url}")
+        else:
+            errors.append(f"❌ No extractable text content on homepage: {page_url}")
 
     links = extract_links(html, url)
     # Improved keyword matching - case-insensitive, handles hyphens/underscores
@@ -694,8 +798,22 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             errors.append(f"❌ {res}")
         elif isinstance(res, tuple):
             link_url, html2 = res
+            
+            # Validate HTML content
+            if not html2 or len(html2.strip()) < 50:
+                errors.append(f"❌ Empty or invalid HTML from: {link_url}")
+                continue
+            
+            # Check for error pages
+            html2_lower = html2.lower()
+            if 'error' in html2_lower[:500] or '404' in html2_lower[:500] or 'not found' in html2_lower[:500]:
+                errors.append(f"❌ Error page detected: {link_url}")
+                continue
+            
             cleaned2 = cleanup_html(html2)
-            if cleaned2:
+            
+            # Validate cleaned content (must have meaningful text)
+            if cleaned2 and len(cleaned2.strip()) > 10:
                 # Better page header with clear separation
                 page_header = f"\n{'='*80}\nPAGE: {link_url}\n{'='*80}\n\n"
                 page_content = page_header + cleaned2
@@ -712,7 +830,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                         total_chars = max_chars
                     break  # No more space
             else:
-                errors.append(f"❌ No visible text on page: {link_url}")
+                errors.append(f"❌ No extractable text content on page: {link_url}")
 
     if not results:
         return errors[0] if errors else f"❌ Unknown error on site: {url}"
@@ -724,15 +842,46 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     if errors and len(final_text) + len("\n".join(errors)) + 20 <= max_chars:
         final_text += "\n\n" + "\n".join(errors)
     
-    # Final safety check - ensure we don't exceed max_chars
+    # Final safety check - ensure we don't exceed max_chars (improved truncation)
     if len(final_text) > max_chars:
-        final_text = final_text[:max_chars]
-        # Try to cut at a reasonable point (end of sentence or line)
-        last_period = final_text.rfind('.')
-        last_newline = final_text.rfind('\n')
-        cut_point = max(last_period, last_newline)
-        if cut_point > max_chars * 0.9:  # Only use if it's not too early
-            final_text = final_text[:cut_point + 1]
+        # Try to cut at a reasonable point (prefer sentence boundaries)
+        truncated = final_text[:max_chars]
+        
+        # Look for sentence endings (period, exclamation, question mark followed by space/newline)
+        sentence_endings = []
+        for i in range(len(truncated) - 1, max(0, len(truncated) - 200), -1):
+            if truncated[i] in '.!?' and i < len(truncated) - 1:
+                next_char = truncated[i + 1]
+                if next_char in ' \n\t':
+                    sentence_endings.append(i + 1)
+                    if len(sentence_endings) >= 3:  # Get a few options
+                        break
+        
+        # Also look for paragraph boundaries
+        paragraph_endings = []
+        for i in range(len(truncated) - 1, max(0, len(truncated) - 200), -1):
+            if truncated[i] == '\n' and i < len(truncated) - 1:
+                if truncated[i + 1] == '\n' or (i > 0 and truncated[i - 1] == '\n'):
+                    paragraph_endings.append(i + 1)
+                    if len(paragraph_endings) >= 2:
+                        break
+        
+        # Choose best cut point
+        best_cut = len(truncated)
+        if sentence_endings:
+            # Use the last sentence ending that's not too early
+            for end_pos in reversed(sentence_endings):
+                if end_pos >= max_chars * 0.85:  # At least 85% of max_chars
+                    best_cut = end_pos
+                    break
+        elif paragraph_endings:
+            # Fall back to paragraph boundary
+            for end_pos in reversed(paragraph_endings):
+                if end_pos >= max_chars * 0.85:
+                    best_cut = end_pos
+                    break
+        
+        final_text = truncated[:best_cut].rstrip() + "\n\n[... content truncated to fit character limit ...]"
     
     return final_text
 
@@ -974,16 +1123,25 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 # -------------------------
 
 st.set_page_config(page_title="Web Scraper", layout="wide", page_icon="🌐")
-st.title("🌐 Stable Async Web Scraper")
-st.markdown("Upload a CSV file with URLs in the first column, configure settings, and start scraping!")
 
-# File Upload Section
-st.header("📁 Upload CSV File")
-uploaded_file = st.file_uploader(
-    "Upload CSV with URLs", 
-    type=["csv"],
-    help="Upload your CSV file. You'll be able to select which column contains URLs and other lead data."
-)
+# Clean header
+col_header1, col_header2 = st.columns([3, 1])
+with col_header1:
+    st.title("🌐 Web Scraper")
+    st.caption("Upload CSV → Configure → Scrape → Download Results")
+with col_header2:
+    st.write("")  # Spacing
+
+# Main tabs for better organization
+tab1, tab2, tab3 = st.tabs(["📁 Upload & Configure", "⚙️ Settings", "🤖 AI Summaries"])
+
+with tab1:
+    # File Upload Section
+    uploaded_file = st.file_uploader(
+        "📤 Upload CSV File", 
+        type=["csv"],
+        help="Upload your CSV file with URLs"
+    )
 
 # CSV Configuration (shown after file upload)
 csv_has_headers = None
@@ -992,9 +1150,10 @@ lead_data_columns = {}
 df_preview = None
 
 if uploaded_file is not None:
-    st.subheader("📋 CSV Configuration")
-    st.info("👆 **Configure your CSV file below** - Select headers and columns before starting scraping")
-    
+    # CSV Configuration - Cleaner layout
+    st.markdown("---")
+    st.markdown("### 📋 CSV Configuration")
+
     # Preview first few rows
     try:
         # Reset file pointer to beginning
@@ -1026,12 +1185,8 @@ if uploaded_file is not None:
             df_preview = pd.read_csv(uploaded_file, header=None, nrows=10)
             st.info(f"ℹ️ Detected {len(df_preview.columns)} columns (no headers)")
         
-        # Show preview
-        with st.expander("👀 Preview CSV (first 10 rows)", expanded=False):
-            st.dataframe(df_preview, use_container_width=True)
-        
-        # Column selection
-        st.subheader("🔧 Column Selection")
+        # Column selection - Compact layout
+        st.markdown("#### Column Selection")
         
         col_sel1, col_sel2 = st.columns(2)
         
@@ -1053,11 +1208,11 @@ if uploaded_file is not None:
                 )
         
         with col_sel2:
-            st.caption("📌 **Required:** This column must contain URLs")
+            st.caption("📌 Required column")
         
-        # Additional lead data columns (optional)
-        st.markdown("**📊 Additional Lead Data (Optional - for AI summaries)**")
-        st.caption("Select columns that contain company information (name, industry, etc.) to include in AI summaries")
+        # Additional lead data columns (optional) - Collapsed by default
+        with st.expander("📊 Additional Lead Data (Optional)", expanded=False):
+            st.caption("For AI summaries - select columns with company info")
         
         col_lead1, col_lead2, col_lead3 = st.columns(3)
         
@@ -1124,291 +1279,235 @@ if uploaded_file is not None:
         st.error(f"❌ Error reading CSV: {str(e)}")
         st.info("Please check your CSV file format and try again.")
 
-# Configuration Section
-st.header("⚙️ Configuration Settings")
+with tab2:
+    st.markdown("### ⚙️ Scraping Settings")
+    
+    col1, col2 = st.columns(2)
 
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("🔍 Scraping Parameters")
-    
-    # Keywords with detailed explanation
-    with st.expander("🔑 Keywords - How to Use", expanded=False):
-        st.markdown("""
-        **Keywords help find relevant pages on each website.**
+    with col1:
+        st.markdown("#### 🔍 Scraping")
         
-        **Format:**
-        - Separate keywords with commas: `about,service,product`
-        - Spaces after commas are optional: `about, service, product` ✅
-        - Case doesn't matter: `About, SERVICE, Product` ✅
-        - Hyphens work: `about-us, service-page` ✅
-        
-        **How it works:**
-        - Scraper looks for these keywords in website URLs
-        - Finds links like `/about`, `/about-us`, `/services`, `/products`
-        - Case-insensitive matching (About = about = ABOUT)
-        - Handles hyphens and underscores automatically
-        
-        **Examples:**
-        - `about,service,product` → finds `/about`, `/services`, `/products`
-        - `contact, pricing, faq` → finds contact, pricing, FAQ pages
-        - `blog, news, articles` → finds blog/news pages
-        """)
-    
-    keywords_input = st.text_input(
-        "Keywords (comma separated)",
-        value="about,service,product",
-        help="Enter keywords separated by commas. The scraper will find pages containing these keywords in their URLs."
-    )
-    keywords = process_keywords(keywords_input)
-    
-    if keywords:
-        st.caption(f"✅ Processing {len(keywords)} keyword(s): {', '.join(keywords)}")
-    
-    # Concurrency
-    with st.expander("⚡ Concurrency - What is it?", expanded=False):
-        st.markdown("""
-        **Number of parallel workers scraping websites simultaneously.**
-        
-        - **Low (1-10):** Slower but uses less resources, more stable
-        - **Medium (20-30):** Good balance (recommended)
-        - **High (40-50):** Faster but may cause timeouts or rate limiting
-        
-        **Recommendation:** Start with 20, increase if you have fast internet.
-        """)
-    
-    concurrency = st.slider(
-        "Concurrency (workers)", 
-        1, 50, 20,
-        help="Number of websites scraped at the same time. Higher = faster but may cause issues."
-    )
-    
-    # Retries
-    with st.expander("🔄 Retry Attempts - When to use?", expanded=False):
-        st.markdown("""
-        **How many times to retry if a website fails to load.**
-        
-        - **0:** No retries (fastest, but may miss slow websites)
-        - **1-2:** Quick retry for temporary issues
-        - **3-5:** More persistent (recommended for unreliable websites)
-        
-        **Use higher values if:** Websites are slow or frequently timeout.
-        """)
-    
-    retries = st.slider(
-        "Retry attempts", 
-        0, 5, 3,
-        help="Number of times to retry failed requests. Higher = more reliable but slower."
-    )
-    
-    # Depth
-    with st.expander("🔗 Depth - Link Following", expanded=False):
-        st.markdown("""
-        **How many levels of links to follow from the homepage.**
-        
-        - **0:** Only homepage (fastest)
-        - **1-2:** Homepage + direct links (recommended)
-        - **3-5:** Deep crawling (slower, more content)
-        
-        **How it works:**
-        - Depth 1: Homepage + pages linked from homepage
-        - Depth 2: Homepage + linked pages + their linked pages
-        - Plus: Always follows pages matching your keywords
-        
-        **Recommendation:** Use 2-3 for most cases.
-        """)
-    
-    depth = st.slider(
-        "Depth (link follow)", 
-        0, 5, 3,
-        help="How many levels of links to follow. Higher = more pages but slower."
-    )
-
-with col2:
-    st.subheader("⏱️ Performance & Output")
-    
-    # Timeout
-    with st.expander("⏰ Timeout - What does it do?", expanded=False):
-        st.markdown("""
-        **Maximum seconds to wait for a website to respond.**
-        
-        - **Low (2-5s):** Fast, but may skip slow websites
-        - **Medium (10-15s):** Good balance (recommended)
-        - **High (20-30s):** Waits longer, catches slow sites
-        
-        **Use higher values if:** Websites are slow to load.
-        """)
-    
-    timeout = st.slider(
-        "Timeout (seconds)", 
-        2, 30, 10,
-        help="Maximum seconds to wait for each website. Higher = waits longer for slow sites."
-    )
-    
-    # Max chars
-    with st.expander("📏 Max Characters - Accurate Limit", expanded=False):
-        st.markdown("""
-        **Maximum characters to scrape from each website (per site, not total).**
-        
-        - **Low (1k-10k):** Quick summaries only
-        - **Medium (20k-50k):** Good content (recommended)
-        - **High (80k-100k):** Full pages, may be very long
-        
-        **How it works (ACCURATE):**
-        - ✅ **Per-site limit:** Each website gets up to this many characters
-        - ✅ **Smart truncation:** Cuts at sentence/line boundaries when possible
-        - ✅ **Includes all pages:** Homepage + linked pages (up to limit)
-        - ✅ **Exact control:** The limit is strictly enforced per website
-        
-        **Why limit?**
-        - Prevents extremely large files (especially with 20k+ URLs)
-        - Focuses on important content
-        - Faster processing and smaller file sizes
-        - Better Excel/Google Sheets compatibility
-        
-        **For large datasets (20k+ rows):**
-        - Use 20k-50k characters per site for manageable file sizes
-        - Each row = one website, so total file size = rows × avg_chars_per_site
-        - Example: 20,000 rows × 50,000 chars = ~1GB of text data
-        
-        **Recommendation:** 50,000 characters per site is optimal for most use cases.
-        """)
-    
-    max_chars = st.number_input(
-        "Max chars per site (per website)", 
-        1000, 100000, 50000, step=5000,
-        help="Maximum characters to extract from EACH website. This limit is accurately enforced per site. For large datasets (20k+ rows), use 20k-50k to keep file sizes manageable."
-    )
-    
-    # Rows per file
-    with st.expander("📊 Rows per File - File Management", expanded=False):
-        st.markdown("""
-        **How many rows before creating a new file.**
-        
-        - **Low (1k-2k):** Many small files (easier to manage)
-        - **Medium (2k-5k):** Balanced (recommended)
-        - **High (10k+):** Fewer large files
-        
-        **Why split files?**
-        - Easier to open in Excel/Google Sheets
-        - Prevents file size issues
-        - Better for large datasets
-        
-        **Output:** Files named `output_part_1.csv`, `output_part_2.csv`, etc.
-        """)
-    
-    rows_per_file = st.number_input(
-        "Rows per CSV file (chunk size)", 
-        1000, 50000, 2000, step=1000,
-        help="Number of rows before creating a new file. Prevents huge files."
-    )
-    
-    # User Agent
-    with st.expander("🌐 User-Agent - What is it?", expanded=False):
-        st.markdown("""
-        **Identifies your scraper to websites (like a browser signature).**
-        
-        - **Default:** `Mozilla/5.0` (basic)
-        - **Better:** `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36`
-        - **Custom:** Any string you want
-        
-        **Why change it?**
-        - Some websites block basic user agents
-        - Mimics real browser (reduces blocking)
-        - Usually fine to leave default
-        """)
-    
-    user_agent = st.text_input(
-        "User-Agent", 
-        value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        help="Browser identifier sent to websites. Default works for most cases."
-    )
-
-# AI Summary Section
-st.header("🤖 AI Company Summary (Optional)")
-ai_enabled = st.checkbox(
-    "Enable AI-powered company summary generation",
-    value=False,
-    help="Generate AI summaries for each company using OpenAI or Gemini"
-)
-
-ai_api_key = None
-ai_provider = None
-ai_model = None
-ai_prompt = None
-
-if ai_enabled:
-    col_ai1, col_ai2 = st.columns(2)
-    
-    with col_ai1:
-        ai_provider = st.selectbox(
-            "AI Provider",
-            ["OpenAI", "Gemini"],
-            help="Choose OpenAI (GPT models) or Google Gemini"
+        # Keywords - Simplified
+        keywords_input = st.text_input(
+            "Keywords (comma separated)",
+            value=st.session_state.get('keywords_input', "about,service,product"),
+            help="Keywords to find in URLs (e.g., about,service,product)",
+            key="keywords_input"
         )
+        keywords = process_keywords(keywords_input)
+        st.session_state['keywords'] = keywords
         
-        # Get API key from session state or use empty
-        api_key_key = f"{ai_provider.lower()}_api_key"
-        stored_api_key = st.session_state.get(api_key_key, "")
+        if keywords:
+            st.caption(f"✅ {len(keywords)} keyword(s)")
         
-        col_key1, col_key2 = st.columns([3, 1])
+        # Concurrency - Simplified
+        concurrency = st.slider(
+            "Concurrency (workers)", 
+            1, 50, st.session_state.get('concurrency', 20),
+            help="Parallel workers (20-30 recommended)",
+            key="concurrency"
+        )
+        st.session_state['concurrency'] = concurrency
         
-        with col_key1:
+        # Retries - Simplified
+        retries = st.number_input(
+            "Retry Attempts", 
+            0, 5, st.session_state.get('retries', 2),
+            help="Retries for failed requests",
+            key="retries"
+        )
+        st.session_state['retries'] = retries
+        
+        # Depth - Simplified
+        depth = st.slider(
+            "Depth (link follow)", 
+            0, 5, st.session_state.get('depth', 3),
+            help="Link depth (2-3 recommended)",
+            key="depth"
+        )
+        st.session_state['depth'] = depth
+    
+    with col2:
+        st.markdown("#### ⏱️ Performance")
+        
+        # Timeout - Simplified
+        timeout = st.number_input(
+            "Timeout (seconds)", 
+            2, 60, st.session_state.get('timeout', 15),
+            help="Request timeout",
+            key="timeout"
+        )
+        st.session_state['timeout'] = timeout
+        
+        # Max chars - Simplified
+        max_chars = st.number_input(
+            "Max Characters per Site", 
+            1000, 200000, st.session_state.get('max_chars', 50000),
+            step=5000,
+            help="Character limit per website",
+            key="max_chars"
+        )
+        st.session_state['max_chars'] = max_chars
+        
+        # Rows per file - Simplified
+        rows_per_file = st.number_input(
+            "Rows per CSV file", 
+            1000, 50000, st.session_state.get('rows_per_file', 2000), step=1000,
+            help="Rows before splitting files",
+            key="rows_per_file"
+        )
+        st.session_state['rows_per_file'] = rows_per_file
+        
+        # User Agent - Simplified
+        user_agent = st.text_input(
+            "User-Agent", 
+            value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+            help="Browser identifier",
+            key="user_agent"
+        )
+        st.session_state['user_agent'] = user_agent
+    
+    # Detailed explanations in collapsed expander
+    with st.expander("ℹ️ Detailed Help", expanded=False):
+        st.markdown("""
+        **Keywords:** Separate with commas. Case-insensitive. Finds URLs containing these keywords.
+        
+        **Concurrency:** Number of parallel workers. Higher = faster but may cause timeouts.
+        
+        **Retries:** How many times to retry failed requests. 2-3 recommended.
+        
+        **Depth:** How many levels of links to follow. 2-3 recommended for most cases.
+        
+        **Timeout:** Maximum seconds to wait for a website. 15s recommended.
+        
+        **Max Characters:** Limit content per website. 50k recommended for large datasets.
+        
+        **Rows per File:** Split large outputs into multiple files. 2000-5000 recommended.
+        """)
+    
+    # Output Settings - Simplified
+    st.markdown("---")
+    st.markdown("#### 📂 Output Settings")
+    
+    run_name = st.text_input(
+        "Output folder name (optional)", 
+        value="",
+        help="Custom name for output folder. Leave empty for auto-generated."
+    )
+
+with tab3:
+    st.markdown("### 🤖 AI Company Summary")
+    
+    ai_enabled = st.checkbox(
+        "Enable AI summaries",
+        value=st.session_state.get('ai_enabled', False),
+        help="Generate AI summaries for each company",
+        key="ai_enabled_checkbox"
+    )
+    st.session_state['ai_enabled'] = ai_enabled
+    
+    if ai_enabled:
+        col_ai1, col_ai2 = st.columns(2)
+        
+        with col_ai1:
+            st.markdown("#### Configuration")
+            
+            ai_provider = st.selectbox(
+                "AI Provider",
+                ["OpenAI", "Gemini"],
+                help="Choose OpenAI or Gemini"
+            )
+            
+            # API Key - Simplified
+            api_key_key = f"{ai_provider.lower()}_api_key"
+            stored_api_key = st.session_state.get(api_key_key, "")
+            
             ai_api_key = st.text_input(
                 f"{ai_provider} API Key",
                 value=stored_api_key,
                 type="password",
-                help=f"Enter your {ai_provider} API key. Get one at: OpenAI (platform.openai.com) or Gemini (makersuite.google.com/app/apikey). Your key will be saved for this session.",
-                key=f"{ai_provider}_api_key_input"
+                help=f"Enter your {ai_provider} API key"
             )
-        
-        with col_key2:
-            st.write("")  # Spacing
-            st.write("")  # Spacing
-            if st.button("🗑️ Clear", key=f"clear_{ai_provider}_key", help="Clear saved API key"):
+            
+            # Save API key
+            if ai_api_key:
+                if ai_api_key != stored_api_key:
+                    st.session_state[api_key_key] = ai_api_key
+                    st.session_state[f"{ai_provider.lower()}_models"] = None
+                st.caption(f"✅ Saved")
+            elif stored_api_key and not ai_api_key:
                 st.session_state[api_key_key] = ""
-                st.rerun()
+                st.session_state[f"{ai_provider.lower()}_models"] = None
+            
+            # Model selection - Simplified
+            models_cache_key = f"{ai_provider.lower()}_models"
+            cached_models = st.session_state.get(models_cache_key)
+            
+            if ai_api_key and ai_api_key.strip():
+                if cached_models is None:
+                    with st.spinner(f"Fetching {ai_provider} models..."):
+                        try:
+                            if os.name == "nt":
+                                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                            
+                            if ai_provider == "OpenAI":
+                                models = asyncio.run(fetch_openai_models(ai_api_key))
+                            else:
+                                models = asyncio.run(fetch_gemini_models(ai_api_key))
+                            
+                            if models:
+                                st.session_state[models_cache_key] = models
+                                cached_models = models
+                            else:
+                                cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                                st.session_state[models_cache_key] = cached_models
+                        except Exception as e:
+                            st.warning(f"Using default models")
+                            cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                            st.session_state[models_cache_key] = cached_models
+                
+                if cached_models:
+                    default_index = 0
+                    if ai_provider == "OpenAI":
+                        if "gpt-4o-mini" in cached_models:
+                            default_index = cached_models.index("gpt-4o-mini")
+                        elif "gpt-4o" in cached_models:
+                            default_index = cached_models.index("gpt-4o")
+                    else:
+                        if "gemini-1.5-flash" in cached_models:
+                            default_index = cached_models.index("gemini-1.5-flash")
+                        elif "gemini-1.5-pro" in cached_models:
+                            default_index = cached_models.index("gemini-1.5-pro")
+                    
+                    ai_model = st.selectbox(
+                        "Model",
+                        options=cached_models,
+                        index=default_index,
+                        help=f"Select {ai_provider} model"
+                    )
+                    
+                    st.caption(f"📋 {len(cached_models)} model(s) available")
+                    
+                    with st.expander(f"View All Models", expanded=False):
+                        for i, model in enumerate(cached_models, 1):
+                            is_selected = "✅" if model == ai_model else ""
+                            st.markdown(f"{i}. `{model}` {is_selected}")
+                else:
+                    ai_model = None
+            else:
+                st.info("Enter API key to see models")
+                ai_model = None
         
-        # Save API key to session state when changed
-        if ai_api_key:
-            if ai_api_key != stored_api_key:
-                st.session_state[api_key_key] = ai_api_key
-            # Show saved indicator
-            masked_key = "*" * min(len(ai_api_key), 8) + "..." if len(ai_api_key) > 8 else "*" * len(ai_api_key)
-            st.caption(f"✅ API key saved for this session ({masked_key})")
-        elif stored_api_key and not ai_api_key:
-            # If cleared, remove from session state
-            st.session_state[api_key_key] = ""
-        
-        # Model selection based on provider
-        if ai_provider == "OpenAI":
-            ai_model = st.selectbox(
-                "Model",
-                ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-                index=0,
-                help="OpenAI model. gpt-4o-mini is fastest/cheapest, gpt-4o is most capable."
+        with col_ai2:
+            st.markdown("#### Prompt")
+            
+            prompt_mode = st.radio(
+                "Prompt Mode",
+                ["Use Default", "Edit Prompt"],
+                horizontal=True
             )
-        else:  # Gemini
-            ai_model = st.selectbox(
-                "Model",
-                ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
-                index=1,
-                help="Gemini model. Flash is fastest, Pro is most capable."
-            )
-    
-    with col_ai2:
-        st.markdown("**📝 Prompt Configuration**")
-        
-        # Prompt editing mode
-        prompt_mode = st.radio(
-            "Prompt Mode",
-            ["Use Default Prompt", "Edit Master Prompt"],
-            help="Use default prompt or edit the master prompt template",
-            horizontal=True
-        )
-        
-        # Default prompt template
-        default_prompt_template = """CRITICAL ANTI-HALLUCINATION RULES - READ CAREFULLY:
+            
+            default_prompt_template = """CRITICAL ANTI-HALLUCINATION RULES - READ CAREFULLY:
 
 🚫 DO NOT:
 - Invent any information not explicitly stated in the content
@@ -1473,94 +1572,59 @@ Before submitting, verify:
 - Inferences are clearly labeled and based on content patterns
 
 Format your response clearly with sections."""
-        
-        # Store default prompt in session state if not exists
-        if 'master_prompt' not in st.session_state:
-            st.session_state['master_prompt'] = default_prompt_template
-        
-        # Allow editing master prompt
-        if prompt_mode == "Edit Master Prompt":
-            st.info("💡 **Edit the master prompt template below. Use placeholders: `{url}`, `{company_name}`, `{scraped_content}`")
             
-            ai_prompt = st.text_area(
-                "Master Prompt Template",
-                value=st.session_state.get('master_prompt', default_prompt_template),
-                height=400,
-                help="Edit the master prompt. Placeholders: {url}, {company_name}, {scraped_content}"
-            )
-            st.session_state['master_prompt'] = ai_prompt
-        else:
-            ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
-        
-        # Show prompt preview
-        with st.expander("👁️ Preview Final Prompt Structure", expanded=False):
-            st.markdown("**See how your prompt will look with actual data:**")
+            if 'master_prompt' not in st.session_state:
+                st.session_state['master_prompt'] = default_prompt_template
             
-            # Sample data for preview
-            sample_url = "https://example.com"
-            sample_company = "Example Company"
-            sample_content = "This is a sample of scraped website content. The company provides technology solutions for businesses. They serve small and medium enterprises."
+            if prompt_mode == "Edit Prompt":
+                ai_prompt = st.text_area(
+                    "Master Prompt Template",
+                    value=st.session_state.get('master_prompt', default_prompt_template),
+                    height=300,
+                    help="Edit prompt. Use: {url}, {company_name}, {scraped_content}",
+                    key="ai_prompt_edit"
+                )
+                st.session_state['master_prompt'] = ai_prompt
+            else:
+                ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
             
-            # Build preview prompt
-            preview_prompt = ai_prompt.replace('{url}', sample_url)
-            preview_prompt = preview_prompt.replace('{company_name}', sample_company)
-            preview_prompt = preview_prompt.replace('{scraped_content}', sample_content[:200] + "...")
+            st.session_state['ai_prompt'] = ai_prompt
             
-            st.markdown("**Example Final Prompt (with sample data):**")
-            st.code(preview_prompt, language=None)
-            
-            st.markdown("---")
-            st.markdown("**📌 Placeholders that will be replaced:**")
-            st.markdown("""
-            - `{url}` → Actual website URL from your CSV
-            - `{company_name}` → Company name (from CSV column or extracted from URL)
-            - `{scraped_content}` → Full scraped website content (up to 15,000 characters)
-            """)
-            
-            st.markdown("**💡 Note:** The final prompt also includes:")
-            st.markdown("""
-            - Lead data from CSV (industry, other columns if selected)
-            - Anti-hallucination reminder at the end
-            - System message with strict instructions
-            """)
-        
-        # Show what will be added
-        st.caption("ℹ️ The final prompt sent to AI includes: Master prompt + Lead data + Anti-hallucination reminder")
+            with st.expander("Preview Prompt", expanded=False):
+                sample_url = "https://example.com"
+                sample_company = "Example Company"
+                sample_content = "Sample website content..."
+                preview = ai_prompt.replace('{url}', sample_url).replace('{company_name}', sample_company).replace('{scraped_content}', sample_content[:200])
+                st.code(preview, language=None)
     
-    # Ensure ai_prompt is set even if AI is disabled (for preview purposes)
-    if ai_enabled:
-        if 'ai_prompt' not in locals() or ai_prompt is None:
-            ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
     else:
+        ai_api_key = None
+        ai_provider = None
+        ai_model = None
         ai_prompt = None
-    
-    if not ai_api_key or not ai_api_key.strip():
-        st.warning("⚠️ Please enter your API key to enable AI summaries.")
-        ai_enabled = False
 
-# Output folder name
-st.header("📂 Output Settings")
-with st.expander("📁 Output Folder Name - Optional", expanded=False):
-    st.markdown("""
-    **Custom name for your output folder and ZIP file.**
-    
-    - **Leave empty:** Auto-generates timestamp name (e.g., `run_20260120_120000`)
-    - **Enter name:** Uses your custom name (e.g., `my-scrape-results`)
-    
-    **Output includes:**
-    - CSV files (Excel/Google Sheets compatible)
-    - Excel (.xlsx) files
-    - ZIP archive with all files
-    """)
+# Main action button - Outside tabs
+st.markdown("---")
+st.markdown("### 🚀 Start Scraping")
 
-run_name = st.text_input(
-    "📂 Output folder/zip name (optional)", 
-    value="",
-    help="Custom name for output folder. Leave empty for auto-generated timestamp."
-)
+# Get variables from tabs - Use session_state (proper Streamlit way)
+keywords = st.session_state.get('keywords', [])
+concurrency = st.session_state.get('concurrency', 20)
+retries = st.session_state.get('retries', 2)
+depth = st.session_state.get('depth', 3)
+timeout = st.session_state.get('timeout', 15)
+max_chars = st.session_state.get('max_chars', 50000)
+rows_per_file = st.session_state.get('rows_per_file', 2000)
+user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+run_name = st.session_state.get('run_name', "")
+ai_enabled = st.session_state.get('ai_enabled', False)
+ai_api_key = st.session_state.get('ai_api_key', None)
+ai_provider = st.session_state.get('ai_provider', None)
+ai_model = st.session_state.get('ai_model', None)
+ai_prompt = st.session_state.get('ai_prompt', None)
 
 # -------- SCRAPE BUTTON --------
-if uploaded_file and st.button("🚀 Start Scraping"):
+if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     # Get CSV configuration from session state
     csv_config = st.session_state.get('csv_config', {})
     
