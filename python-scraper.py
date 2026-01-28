@@ -125,23 +125,50 @@ def build_company_summary_prompt(base_prompt: str, lead_data: dict, scraped_cont
     Returns:
         Complete prompt string ready for AI
     """
-    # Default prompt structure if user doesn't provide one - STRICT ANTI-HALLUCINATION
-    default_base = """CRITICAL ANTI-HALLUCINATION RULES - READ CAREFULLY:
+    # Default prompt structure - Commercial analysis focused
+    default_base = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
-🚫 DO NOT:
-- Invent any information not explicitly stated in the content
-- Make assumptions about what the company does
-- Guess industry, products, or services
-- Add details not present in the scraped content
-- Use general knowledge or external information
-- Infer facts that aren't directly stated
+INPUT
+You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
 
-✅ DO:
-- Extract ONLY information explicitly written in the website content below
-- Quote or paraphrase directly from the content
-- Write "Not specified in the content" if information is missing
-- Base every statement on actual text from the scraped content
-- Clearly distinguish facts from inferences
+CORE JOB
+Turn messy webcopy into:
+1) a sharp company intelligence SUMMARY
+2) a clean set of FACTS grounded in the text
+3) commercially relevant HYPOTHESES inferred from signals, gaps, tone, and structure
+
+You are not writing outreach. You are building the intelligence layer that enables personalization later.
+
+NON NEGOTIABLE RULES
+1) Do not invent facts. If it is not explicitly supported by the webcopy, it is not a fact.
+2) Facts must be short and must include Evidence Quote… an exact snippet from the webcopy.
+3) Hypotheses must be explicitly labeled as hypotheses and must include:
+   • Signal… the specific wording or structural clue that triggered the inference
+   • Commercial implication… why it matters in a sales or growth context
+   • Confidence: High, Medium, or Low
+4) Never mention any external tools or data sources (Apollo, LinkedIn, Crunchbase, funding, headcount, etc.). You only have webcopy.
+5) If the company name is unclear, write "Company: Not explicitly stated" and proceed.
+6) Avoid cringe adjectives like great, amazing, innovative. Be surgical.
+7) Avoid criticism. Frame gaps neutrally as "signals" or "absence suggests".
+8) Keep it concise. No fluff. No extra sections.
+
+ANALYSIS GUIDELINES
+When extracting facts, prioritize:
+• What they do (offer categories, deliverables)
+• Who they serve (industries, segments, buyer language)
+• How they sell (engagement models, pricing mentions, process)
+• Proof (case studies, client names, testimonials, quantified claims)
+• Differentiators (positioning phrases, guarantees, compliance, security)
+• Operational signals (hiring, support hours, global language, locations)
+• Technology signals (stacks, platforms, integrations) only if stated
+
+When generating hypotheses, prioritize:
+• Likely buying triggers (growth, hiring, new initiatives, modernization)
+• Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
+• Likely maturity level (specialist vs generalist, product vs services)
+• Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
+• Contradictions or gaps between claims and proof
+Each hypothesis must connect to a commercial implication.
 
 LEAD INFORMATION:
 - Website URL: {url}
@@ -150,47 +177,31 @@ LEAD INFORMATION:
 WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
 {scraped_content}
 
-YOUR TASK:
-Analyze ONLY the website content above and extract information that is EXPLICITLY STATED. Do not add anything that is not directly written in the content.
+OUTPUT FORMAT (STRICT)
+Return exactly these 3 sections and nothing else:
 
-Provide:
-1. **Company Overview**: What does this company do? (2-3 sentences)
-   - ONLY use information directly stated in the content
-   - If unclear, write "Company description not clearly stated in the content"
-   - Quote specific phrases from the content when possible
+SUMMARY
+Write 3 to 5 sentences in one paragraph describing:
+• what the company appears to do
+• who it appears to serve
+• how it positions itself
+• one notable proof element (only if present)
+Mark inferences with (obs).
 
-2. **Industry**: What industry/sector does this company operate in?
-   - ONLY if explicitly mentioned (e.g., "We are a technology company" or "Serving the healthcare industry")
-   - If not stated, write "Industry not specified in the content"
+FACTS
+Provide 10 to 18 facts.
+Format each as:
+Fact: …
+Evidence Quote: "…"
+Source: {Page name if present, otherwise "Webcopy"}
 
-3. **Products/Services**: List the products or services offered
-   - ONLY list items explicitly mentioned in the content
-   - Quote the exact product/service names from the content
-   - If none mentioned, write "Products/services not specified in the content"
-
-4. **Key Facts**: Important facts extracted DIRECTLY from the content
-   - Each fact must be traceable to specific text in the content
-   - Prefer direct quotes
-   - If no clear facts, write "No specific facts extracted from the content"
-
-5. **Target Market**: Who is their target audience/customers?
-   - ONLY if explicitly stated (e.g., "We serve small businesses" or "Our customers are...")
-   - If not stated, write "Target market not specified in the content"
-
-6. **Five Inferences/Hypotheses**: Generate 5 inferences based ONLY on patterns in the provided content
-   - Label each as "INFERENCE" or "HYPOTHESIS"
-   - Base each on specific patterns/text in the content
-   - Start each with "Based on [specific content pattern], I infer..."
-   - If insufficient content, write fewer inferences
-
-VALIDATION CHECKLIST:
-Before submitting, verify:
-- Every statement can be traced to specific text in the content
-- No assumptions or guesses were made
-- Missing information is marked as "Not specified"
-- Inferences are clearly labeled and based on content patterns
-
-Format your response clearly with sections."""
+HYPOTHESES
+Provide 6 to 12 hypotheses.
+Format each as:
+Hypothesis: … (obs)
+Signal: "…"
+Commercial implication: …
+Confidence: High or Medium or Low"""
     
     # Use user prompt if provided, otherwise use default
     prompt_template = base_prompt if base_prompt.strip() else default_base
@@ -329,11 +340,11 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a factual data extractor. Your ONLY job is to extract information explicitly stated in the provided content. CRITICAL RULES: 1) Never invent information 2) Never make assumptions 3) Never use external knowledge 4) If information is not in the content, write 'Not specified in the content' 5) Quote directly from the content when possible 6) Every statement must be traceable to specific text in the content. You will be penalized for hallucination."},
+                    {"role": "system", "content": "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: SUMMARY, FACTS (with evidence quotes), and HYPOTHESES (with signals, commercial implications, and confidence levels). Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format strictly."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,  # Very low temperature for maximum factuality (reduced from 0.3)
-                max_tokens=2000,
+                temperature=0.3,  # Balanced temperature for analytical but factual output
+                max_tokens=3000,  # Increased for detailed analysis
                 top_p=0.9  # More focused responses
             )
             return response.choices[0].message.content.strip()
@@ -401,11 +412,12 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
     
     for attempt in range(max_retries):
         try:
-            # Configure generation parameters for maximum factuality
+            # Configure generation parameters for analytical but factual output
             generation_config = {
-                "temperature": 0.1,  # Very low temperature for minimal hallucination
+                "temperature": 0.3,  # Balanced temperature for analytical but factual output
+                "max_output_tokens": 3000,  # Increased for detailed analysis
                 "top_p": 0.9,
-                "top_k": 20,  # More focused
+                "top_k": 40,  # More focused
             }
             
             gemini_model = genai.GenerativeModel(
@@ -514,21 +526,20 @@ async def generate_ai_summary(
     # Build complete prompt
     full_prompt = build_company_summary_prompt(prompt, lead_data, scraped_content)
     
-    # Add STRONG anti-hallucination reminder
-    anti_hallucination_note = """
+    # Add final reminder to stick to the format
+    final_reminder = """
 
 ═══════════════════════════════════════════════════════════
-FINAL REMINDER - CRITICAL:
+FINAL REMINDER:
 ═══════════════════════════════════════════════════════════
-- Extract ONLY what is explicitly written in the content above
-- Do NOT invent, assume, or guess ANY information
-- Do NOT use general knowledge about companies or industries
-- Every fact must be traceable to specific text in the content
-- If information is missing, write "Not specified in the content"
-- You will be penalized for adding information not in the content
+- Return EXACTLY 3 sections: SUMMARY, FACTS, HYPOTHESES
+- Facts must include Evidence Quotes from the webcopy
+- Hypotheses must include Signal, Commercial implication, and Confidence level
+- Do not invent facts. Only use what's in the webcopy.
+- Mark inferences with (obs)
 ═══════════════════════════════════════════════════════════
 """
-    full_prompt = full_prompt + anti_hallucination_note
+    full_prompt = full_prompt + final_reminder
     
     # Generate summary based on provider
     if provider.lower() == 'openai':
@@ -1544,22 +1555,49 @@ with tab3:
                 horizontal=True
             )
             
-            default_prompt_template = """CRITICAL ANTI-HALLUCINATION RULES - READ CAREFULLY:
+            default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
-🚫 DO NOT:
-- Invent any information not explicitly stated in the content
-- Make assumptions about what the company does
-- Guess industry, products, or services
-- Add details not present in the scraped content
-- Use general knowledge or external information
-- Infer facts that aren't directly stated
+INPUT
+You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
 
-✅ DO:
-- Extract ONLY information explicitly written in the website content below
-- Quote or paraphrase directly from the content
-- Write "Not specified in the content" if information is missing
-- Base every statement on actual text from the scraped content
-- Clearly distinguish facts from inferences
+CORE JOB
+Turn messy webcopy into:
+1) a sharp company intelligence SUMMARY
+2) a clean set of FACTS grounded in the text
+3) commercially relevant HYPOTHESES inferred from signals, gaps, tone, and structure
+
+You are not writing outreach. You are building the intelligence layer that enables personalization later.
+
+NON NEGOTIABLE RULES
+1) Do not invent facts. If it is not explicitly supported by the webcopy, it is not a fact.
+2) Facts must be short and must include Evidence Quote… an exact snippet from the webcopy.
+3) Hypotheses must be explicitly labeled as hypotheses and must include:
+   • Signal… the specific wording or structural clue that triggered the inference
+   • Commercial implication… why it matters in a sales or growth context
+   • Confidence: High, Medium, or Low
+4) Never mention any external tools or data sources (Apollo, LinkedIn, Crunchbase, funding, headcount, etc.). You only have webcopy.
+5) If the company name is unclear, write "Company: Not explicitly stated" and proceed.
+6) Avoid cringe adjectives like great, amazing, innovative. Be surgical.
+7) Avoid criticism. Frame gaps neutrally as "signals" or "absence suggests".
+8) Keep it concise. No fluff. No extra sections.
+
+ANALYSIS GUIDELINES
+When extracting facts, prioritize:
+• What they do (offer categories, deliverables)
+• Who they serve (industries, segments, buyer language)
+• How they sell (engagement models, pricing mentions, process)
+• Proof (case studies, client names, testimonials, quantified claims)
+• Differentiators (positioning phrases, guarantees, compliance, security)
+• Operational signals (hiring, support hours, global language, locations)
+• Technology signals (stacks, platforms, integrations) only if stated
+
+When generating hypotheses, prioritize:
+• Likely buying triggers (growth, hiring, new initiatives, modernization)
+• Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
+• Likely maturity level (specialist vs generalist, product vs services)
+• Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
+• Contradictions or gaps between claims and proof
+Each hypothesis must connect to a commercial implication.
 
 LEAD INFORMATION:
 - Website URL: {url}
@@ -1568,47 +1606,31 @@ LEAD INFORMATION:
 WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
 {scraped_content}
 
-YOUR TASK:
-Analyze ONLY the website content above and extract information that is EXPLICITLY STATED. Do not add anything that is not directly written in the content.
+OUTPUT FORMAT (STRICT)
+Return exactly these 3 sections and nothing else:
 
-Provide:
-1. **Company Overview**: What does this company do? (2-3 sentences)
-   - ONLY use information directly stated in the content
-   - If unclear, write "Company description not clearly stated in the content"
-   - Quote specific phrases from the content when possible
+SUMMARY
+Write 3 to 5 sentences in one paragraph describing:
+• what the company appears to do
+• who it appears to serve
+• how it positions itself
+• one notable proof element (only if present)
+Mark inferences with (obs).
 
-2. **Industry**: What industry/sector does this company operate in?
-   - ONLY if explicitly mentioned (e.g., "We are a technology company" or "Serving the healthcare industry")
-   - If not stated, write "Industry not specified in the content"
+FACTS
+Provide 10 to 18 facts.
+Format each as:
+Fact: …
+Evidence Quote: "…"
+Source: {Page name if present, otherwise "Webcopy"}
 
-3. **Products/Services**: List the products or services offered
-   - ONLY list items explicitly mentioned in the content
-   - Quote the exact product/service names from the content
-   - If none mentioned, write "Products/services not specified in the content"
-
-4. **Key Facts**: Important facts extracted DIRECTLY from the content
-   - Each fact must be traceable to specific text in the content
-   - Prefer direct quotes
-   - If no clear facts, write "No specific facts extracted from the content"
-
-5. **Target Market**: Who is their target audience/customers?
-   - ONLY if explicitly stated (e.g., "We serve small businesses" or "Our customers are...")
-   - If not stated, write "Target market not specified in the content"
-
-6. **Five Inferences/Hypotheses**: Generate 5 inferences based ONLY on patterns in the provided content
-   - Label each as "INFERENCE" or "HYPOTHESIS"
-   - Base each on specific patterns/text in the content
-   - Start each with "Based on [specific content pattern], I infer..."
-   - If insufficient content, write fewer inferences
-
-VALIDATION CHECKLIST:
-Before submitting, verify:
-- Every statement can be traced to specific text in the content
-- No assumptions or guesses were made
-- Missing information is marked as "Not specified"
-- Inferences are clearly labeled and based on content patterns
-
-Format your response clearly with sections."""
+HYPOTHESES
+Provide 6 to 12 hypotheses.
+Format each as:
+Hypothesis: … (obs)
+Signal: "…"
+Commercial implication: …
+Confidence: High or Medium or Low"""
             
             if 'master_prompt' not in st.session_state:
                 st.session_state['master_prompt'] = default_prompt_template
