@@ -9,7 +9,7 @@ import zipfile
 from html import unescape
 import streamlit as st
 from datetime import datetime
-from io import BytesIO
+from io import BytesIO, StringIO, StringIO
 import json
 
 # AI imports (optional - only if API keys provided)
@@ -1757,28 +1757,31 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 # Save Excel file (optimized for large files)
                 excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
                 try:
+                    # CRITICAL: Ensure DataFrame has exactly 3 columns with correct names before writing
+                    if "CompanySummary" not in df.columns:
+                        df["CompanySummary"] = ""
+                    df = df[["Website", "ScrapedText", "CompanySummary"]]
+                    
                     # For very large files, use write_only mode to save memory
                     if len(df) > 10000:
                         from openpyxl import Workbook
                         wb = Workbook(write_only=True)
                         ws = wb.create_sheet()
-                        # Determine columns
-                        if "CompanySummary" in df.columns:
-                            ws.append(["Website", "ScrapedText", "CompanySummary"])
-                            for _, row in df.iterrows():
-                                website = str(row["Website"])[:255]
-                                text = str(row["ScrapedText"])[:32767]
-                                summary = str(row["CompanySummary"])[:32767]
-                                ws.append([website, text, summary])
-                        else:
-                            ws.append(["Website", "ScrapedText"])
-                            for _, row in df.iterrows():
-                                website = str(row["Website"])[:255]
-                                text = str(row["ScrapedText"])[:32767]
-                                ws.append([website, text])
+                        # Always write 3 columns with explicit headers
+                        ws.append(["Website", "ScrapedText", "CompanySummary"])
+                        for _, row in df.iterrows():
+                            website = str(row["Website"]) if pd.notna(row["Website"]) else ""
+                            text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
+                            summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
+                            # Truncate to Excel limits
+                            website = website[:255]
+                            text = text[:32767]
+                            summary = summary[:32767]
+                            ws.append([website, text, summary])
                         wb.save(excel_path)
                     else:
-                        df.to_excel(excel_path, index=False, engine='openpyxl')
+                        # Use pandas to_excel with explicit column names
+                        df.to_excel(excel_path, index=False, engine='openpyxl', sheet_name='Sheet1')
                 except Exception as e:
                     # If Excel fails, log but continue (CSV is more important)
                     import logging
@@ -1889,27 +1892,30 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     # Save Excel file (optimized for large files)
                     excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
                     try:
+                        # CRITICAL: Ensure DataFrame has exactly 3 columns with correct names before writing
+                        if "CompanySummary" not in df.columns:
+                            df["CompanySummary"] = ""
+                        df = df[["Website", "ScrapedText", "CompanySummary"]]
+                        
                         if len(df) > 10000:
                             from openpyxl import Workbook
                             wb = Workbook(write_only=True)
                             ws = wb.create_sheet()
-                            # Determine columns
-                            if "CompanySummary" in df.columns:
-                                ws.append(["Website", "ScrapedText", "CompanySummary"])
-                                for _, row in df.iterrows():
-                                    website = str(row["Website"])[:255]
-                                    text = str(row["ScrapedText"])[:32767]
-                                    summary = str(row["CompanySummary"])[:32767]
-                                    ws.append([website, text, summary])
-                            else:
-                                ws.append(["Website", "ScrapedText"])
-                                for _, row in df.iterrows():
-                                    website = str(row["Website"])[:255]
-                                    text = str(row["ScrapedText"])[:32767]
-                                    ws.append([website, text])
+                            # Always write 3 columns with explicit headers
+                            ws.append(["Website", "ScrapedText", "CompanySummary"])
+                            for _, row in df.iterrows():
+                                website = str(row["Website"]) if pd.notna(row["Website"]) else ""
+                                text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
+                                summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
+                                # Truncate to Excel limits
+                                website = website[:255]
+                                text = text[:32767]
+                                summary = summary[:32767]
+                                ws.append([website, text, summary])
                             wb.save(excel_path)
                         else:
-                            df.to_excel(excel_path, index=False, engine='openpyxl')
+                            # Use pandas to_excel with explicit column names
+                            df.to_excel(excel_path, index=False, engine='openpyxl', sheet_name='Sheet1')
                         
                         # Verify Excel file was written
                         if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
@@ -2917,31 +2923,65 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             st.warning(f"⚠️ Excel file is empty: {excel_file}")
                             continue
                         
-                        df_part = pd.read_excel(excel_path, engine='openpyxl')
+                        # Read Excel file with explicit column handling
+                        df_part = pd.read_excel(excel_path, engine='openpyxl', header=0)
                         
                         # Check if DataFrame is empty
                         if df_part.empty:
                             st.warning(f"⚠️ Excel file {excel_file} contains no data")
                             continue
                         
-                        # Normalize column structure: ensure all DataFrames have same columns
-                        # Standard columns: Website, ScrapedText, CompanySummary
+                        # CRITICAL: Normalize column names - handle corrupted/merged headers
+                        # Clean column names: strip whitespace, handle case-insensitive matching
+                        df_part.columns = [str(col).strip() for col in df_part.columns]
+                        
+                        # Map columns to standard names (case-insensitive, handle variations)
+                        column_mapping = {}
+                        for col in df_part.columns:
+                            col_lower = col.lower().strip()
+                            if 'website' in col_lower or col_lower == 'url':
+                                column_mapping[col] = 'Website'
+                            elif 'scraped' in col_lower and 'text' in col_lower:
+                                column_mapping[col] = 'ScrapedText'
+                            elif 'company' in col_lower and 'summary' in col_lower:
+                                column_mapping[col] = 'CompanySummary'
+                            elif 'summary' in col_lower and 'company' not in col_lower:
+                                column_mapping[col] = 'CompanySummary'
+                        
+                        # Rename columns
+                        df_part = df_part.rename(columns=column_mapping)
+                        
+                        # If we still don't have the right columns, try to infer from position
+                        # This handles cases where headers might be completely corrupted
+                        if 'Website' not in df_part.columns and len(df_part.columns) >= 1:
+                            df_part.columns.values[0] = 'Website'
+                        if 'ScrapedText' not in df_part.columns and len(df_part.columns) >= 2:
+                            df_part.columns.values[1] = 'ScrapedText'
+                        if 'CompanySummary' not in df_part.columns and len(df_part.columns) >= 3:
+                            df_part.columns.values[2] = 'CompanySummary'
+                        
+                        # Ensure all required columns exist
+                        if "Website" not in df_part.columns:
+                            st.warning(f"⚠️ Excel file {excel_file} missing Website column. Found columns: {list(df_part.columns)}")
+                            continue
+                        
+                        if "ScrapedText" not in df_part.columns:
+                            # If ScrapedText is missing, create it from the second column or empty
+                            if len(df_part.columns) >= 2:
+                                second_col = df_part.columns[1]
+                                df_part = df_part.rename(columns={second_col: 'ScrapedText'})
+                            else:
+                                df_part['ScrapedText'] = ""
+                        
                         if "CompanySummary" not in df_part.columns:
                             df_part["CompanySummary"] = ""
                         
-                        # Ensure correct column order
-                        if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
-                            if "CompanySummary" in df_part.columns:
-                                df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
-                            else:
-                                df_part = df_part[["Website", "ScrapedText"]]
-                        else:
-                            st.warning(f"⚠️ Excel file {excel_file} missing required columns (Website, ScrapedText)")
-                            continue
+                        # Ensure correct column order and only keep the 3 standard columns
+                        df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
                         
-                        # Remove any extra columns that might cause issues
-                        expected_cols = ["Website", "ScrapedText", "CompanySummary"]
-                        df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
+                        # Convert all columns to string and clean
+                        for col in df_part.columns:
+                            df_part[col] = df_part[col].astype(str).replace('nan', '').replace('None', '')
                         
                         # Only add if DataFrame has rows
                         if len(df_part) > 0:
@@ -3080,7 +3120,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     combined_df = clean_dataframe_for_csv(combined_df.copy())
                     
                     # PERFECT CSV WRITING with manual writer for absolute control
-                    csv_buffer = BytesIO()
+                    # Use StringIO for text-based CSV writing, then encode to bytes
+                    csv_buffer = StringIO()
                     csv_writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
                     # Write header - ALWAYS 3 columns
                     csv_writer.writerow(["Website", "ScrapedText", "CompanySummary"])
@@ -3102,7 +3143,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         csv_writer.writerow(row_values)
                     csv_buffer.seek(0)
                     
-                    csv_data = csv_buffer.getvalue()
+                    # Get string content and encode to bytes with UTF-8 BOM for Excel compatibility
+                    csv_data = csv_buffer.getvalue().encode('utf-8-sig')
                     
                     # Store for Google Sheets section and persistence
                     st.session_state['combined_csv_data'] = csv_data
