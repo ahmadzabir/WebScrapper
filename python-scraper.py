@@ -125,23 +125,70 @@ def build_company_summary_prompt(base_prompt: str, lead_data: dict, scraped_cont
     Returns:
         Complete prompt string ready for AI
     """
-    # Default prompt structure if user doesn't provide one
-    default_base = """Analyze the following company website content and generate a comprehensive company summary.
+    # Default prompt structure if user doesn't provide one - STRICT ANTI-HALLUCINATION
+    default_base = """CRITICAL ANTI-HALLUCINATION RULES - READ CAREFULLY:
+
+🚫 DO NOT:
+- Invent any information not explicitly stated in the content
+- Make assumptions about what the company does
+- Guess industry, products, or services
+- Add details not present in the scraped content
+- Use general knowledge or external information
+- Infer facts that aren't directly stated
+
+✅ DO:
+- Extract ONLY information explicitly written in the website content below
+- Quote or paraphrase directly from the content
+- Write "Not specified in the content" if information is missing
+- Base every statement on actual text from the scraped content
+- Clearly distinguish facts from inferences
 
 LEAD INFORMATION:
 - Website URL: {url}
 - Company Name: {company_name}
 
-WEBSITE CONTENT:
+WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
 {scraped_content}
 
-Please provide:
+YOUR TASK:
+Analyze ONLY the website content above and extract information that is EXPLICITLY STATED. Do not add anything that is not directly written in the content.
+
+Provide:
 1. **Company Overview**: What does this company do? (2-3 sentences)
+   - ONLY use information directly stated in the content
+   - If unclear, write "Company description not clearly stated in the content"
+   - Quote specific phrases from the content when possible
+
 2. **Industry**: What industry/sector does this company operate in?
-3. **Products/Services**: List the main products or services offered
-4. **Key Facts**: Important facts extracted from the website content
+   - ONLY if explicitly mentioned (e.g., "We are a technology company" or "Serving the healthcare industry")
+   - If not stated, write "Industry not specified in the content"
+
+3. **Products/Services**: List the products or services offered
+   - ONLY list items explicitly mentioned in the content
+   - Quote the exact product/service names from the content
+   - If none mentioned, write "Products/services not specified in the content"
+
+4. **Key Facts**: Important facts extracted DIRECTLY from the content
+   - Each fact must be traceable to specific text in the content
+   - Prefer direct quotes
+   - If no clear facts, write "No specific facts extracted from the content"
+
 5. **Target Market**: Who is their target audience/customers?
-6. **Five Inferences/Hypotheses**: Generate 5 strategic inferences or hypotheses about this company based on the content
+   - ONLY if explicitly stated (e.g., "We serve small businesses" or "Our customers are...")
+   - If not stated, write "Target market not specified in the content"
+
+6. **Five Inferences/Hypotheses**: Generate 5 inferences based ONLY on patterns in the provided content
+   - Label each as "INFERENCE" or "HYPOTHESIS"
+   - Base each on specific patterns/text in the content
+   - Start each with "Based on [specific content pattern], I infer..."
+   - If insufficient content, write fewer inferences
+
+VALIDATION CHECKLIST:
+Before submitting, verify:
+- Every statement can be traced to specific text in the content
+- No assumptions or guesses were made
+- Missing information is marked as "Not specified"
+- Inferences are clearly labeled and based on content patterns
 
 Format your response clearly with sections."""
     
@@ -149,20 +196,100 @@ Format your response clearly with sections."""
     prompt_template = base_prompt if base_prompt.strip() else default_base
     
     # Replace placeholders
-    company_name = lead_data.get('company_name', lead_data.get('url', 'Unknown'))
-    url = lead_data.get('url', 'N/A')
+    company_name = lead_data.get('company_name', '')
+    if not company_name or company_name == 'Unknown':
+        # Extract from URL if not provided
+        url_str = lead_data.get('url', '')
+        company_name = url_str.replace('https://', '').replace('http://', '').split('/')[0] if url_str else 'Unknown'
     
-    prompt = prompt_template.format(
-        url=url,
-        company_name=company_name,
-        scraped_content=scraped_content[:15000]  # Limit content to avoid token limits
-    )
+    url = lead_data.get('url', 'N/A')
+    industry = lead_data.get('industry', '')
+    other_data = lead_data.get('other', '')
+    
+    # Build lead information section dynamically
+    lead_info_parts = [f"- Website URL: {url}", f"- Company Name: {company_name}"]
+    
+    if industry and industry.strip() and industry.lower() != 'not specified':
+        lead_info_parts.append(f"- Industry: {industry}")
+    if other_data and other_data.strip() and other_data.lower() != 'not specified':
+        lead_info_parts.append(f"- Additional Info: {other_data}")
+    
+    lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts)
+    
+    # Replace placeholders in prompt
+    prompt = prompt_template.replace('{url}', url)
+    prompt = prompt.replace('{company_name}', company_name)
+    prompt = prompt.replace('{scraped_content}', scraped_content[:15000])  # Limit content to avoid token limits
+    
+    # Replace LEAD INFORMATION section if it exists, otherwise add it
+    import re
+    if 'LEAD INFORMATION:' in prompt:
+        # Replace existing lead info section
+        prompt = re.sub(
+            r'LEAD INFORMATION:.*?(?=WEBSITE CONTENT:|$)',
+            lead_info_section + '\n\n',
+            prompt,
+            flags=re.DOTALL
+        )
+    else:
+        # Add lead info before WEBSITE CONTENT or at the beginning
+        if 'WEBSITE CONTENT:' in prompt:
+            prompt = prompt.replace('WEBSITE CONTENT:', lead_info_section + '\n\nWEBSITE CONTENT:')
+        else:
+            prompt = lead_info_section + '\n\n' + prompt
     
     return prompt
 
 
-async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 3) -> str:
-    """Generate company summary using OpenAI API."""
+async def fetch_openai_models(api_key: str) -> list:
+    """Fetch available OpenAI models from API."""
+    if not OPENAI_AVAILABLE:
+        return ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]  # Fallback
+    
+    try:
+        client = AsyncOpenAI(api_key=api_key)
+        models = await client.models.list()
+        # Filter for chat models and sort by name
+        chat_models = [
+            model.id for model in models.data 
+            if 'gpt' in model.id.lower() and ('chat' in model.id.lower() or 'gpt-4' in model.id or 'gpt-3.5' in model.id)
+        ]
+        # Remove duplicates and sort
+        unique_models = sorted(list(set(chat_models)), reverse=True)
+        # Prioritize common models
+        priority_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
+        ordered = [m for m in priority_models if m in unique_models]
+        ordered.extend([m for m in unique_models if m not in ordered])
+        return ordered if ordered else priority_models
+    except Exception as e:
+        # Return fallback models on error
+        return ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
+
+
+async def fetch_gemini_models(api_key: str) -> list:
+    """Fetch available Gemini models from API."""
+    if not GEMINI_AVAILABLE:
+        return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]  # Fallback
+    
+    try:
+        genai.configure(api_key=api_key)
+        # Gemini models are typically fixed, but we can verify
+        # Common Gemini models
+        common_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro", "gemini-1.5-flash-latest", "gemini-1.5-pro-latest"]
+        
+        # Try to get list of models (if API supports it)
+        try:
+            # Note: Gemini API doesn't have a direct models.list() endpoint
+            # So we'll use common models and verify they work
+            return common_models
+        except:
+            return common_models
+    except Exception as e:
+        return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+
+
+async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
+    """Generate company summary using OpenAI API with automatic rate limit handling."""
     if not OPENAI_AVAILABLE:
         return "❌ OpenAI library not installed. Install with: pip install openai"
     
@@ -173,21 +300,68 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are an expert business analyst specializing in company research and analysis."},
+                    {"role": "system", "content": "You are a factual data extractor. Your ONLY job is to extract information explicitly stated in the provided content. CRITICAL RULES: 1) Never invent information 2) Never make assumptions 3) Never use external knowledge 4) If information is not in the content, write 'Not specified in the content' 5) Quote directly from the content when possible 6) Every statement must be traceable to specific text in the content. You will be penalized for hallucination."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,
-                max_tokens=2000
+                temperature=0.1,  # Very low temperature for maximum factuality (reduced from 0.3)
+                max_tokens=2000,
+                top_p=0.9  # More focused responses
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            error_str = str(e).lower()
+            error_msg = str(e)
+            
+            # Check for rate limit errors
+            is_rate_limit = (
+                "rate limit" in error_str or
+                "429" in error_str or
+                "quota" in error_str or
+                "too many requests" in error_str or
+                "requests per minute" in error_str or
+                "rate_limit_exceeded" in error_str
+            )
+            
+            if is_rate_limit:
+                # Calculate exponential backoff: 2^attempt seconds, max 60 seconds
+                wait_time = min(2 ** attempt, 60)
+                
+                if status_callback:
+                    status_callback(f"⏳ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                
+                await asyncio.sleep(wait_time)
+                continue  # Retry after waiting
+            
+            # Check for other retryable errors
+            is_retryable = (
+                "timeout" in error_str or
+                "connection" in error_str or
+                "503" in error_str or
+                "502" in error_str or
+                "500" in error_str
+            )
+            
+            if is_retryable and attempt < max_retries - 1:
+                wait_time = min(2 ** attempt, 30)
+                
+                if status_callback:
+                    status_callback(f"⚠️ API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
+                
+                await asyncio.sleep(wait_time)
+                continue
+            
+            # Final attempt or non-retryable error
             if attempt == max_retries - 1:
-                return f"❌ OpenAI API Error: {str(e)}"
+                if is_rate_limit:
+                    return f"❌ OpenAI Rate Limit: Exceeded after {max_retries} retries. Please wait a few minutes and try again, or upgrade your API plan."
+                return f"❌ OpenAI API Error: {error_msg}"
+            
+            # Default wait for other errors
             await asyncio.sleep(1 + attempt)
 
 
-async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_retries: int = 3) -> str:
-    """Generate company summary using Google Gemini API."""
+async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
+    """Generate company summary using Google Gemini API with automatic rate limit handling."""
     if not GEMINI_AVAILABLE:
         return "❌ Gemini library not installed. Install with: pip install google-generativeai"
     
@@ -198,7 +372,17 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
     
     for attempt in range(max_retries):
         try:
-            gemini_model = genai.GenerativeModel(model)
+            # Configure generation parameters for maximum factuality
+            generation_config = {
+                "temperature": 0.1,  # Very low temperature for minimal hallucination
+                "top_p": 0.9,
+                "top_k": 20,  # More focused
+            }
+            
+            gemini_model = genai.GenerativeModel(
+                model,
+                generation_config=generation_config
+            )
             # Run in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
@@ -210,8 +394,56 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
             else:
                 return f"❌ Gemini API returned unexpected response format"
         except Exception as e:
+            error_str = str(e).lower()
+            error_msg = str(e)
+            
+            # Check for rate limit errors
+            is_rate_limit = (
+                "rate limit" in error_str or
+                "429" in error_str or
+                "quota" in error_str or
+                "resource_exhausted" in error_str or
+                "too many requests" in error_str or
+                "requests per minute" in error_str or
+                "per_minute" in error_str
+            )
+            
+            if is_rate_limit:
+                # Calculate exponential backoff: 2^attempt seconds, max 60 seconds
+                wait_time = min(2 ** attempt, 60)
+                
+                if status_callback:
+                    status_callback(f"⏳ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                
+                await asyncio.sleep(wait_time)
+                continue  # Retry after waiting
+            
+            # Check for other retryable errors
+            is_retryable = (
+                "timeout" in error_str or
+                "connection" in error_str or
+                "503" in error_str or
+                "502" in error_str or
+                "500" in error_str or
+                "unavailable" in error_str
+            )
+            
+            if is_retryable and attempt < max_retries - 1:
+                wait_time = min(2 ** attempt, 30)
+                
+                if status_callback:
+                    status_callback(f"⚠️ API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
+                
+                await asyncio.sleep(wait_time)
+                continue
+            
+            # Final attempt or non-retryable error
             if attempt == max_retries - 1:
-                return f"❌ Gemini API Error: {str(e)}"
+                if is_rate_limit:
+                    return f"❌ Gemini Rate Limit: Exceeded after {max_retries} retries. Please wait a few minutes and try again, or check your API quota."
+                return f"❌ Gemini API Error: {error_msg}"
+            
+            # Default wait for other errors
             await asyncio.sleep(1 + attempt)
     
     return "❌ Gemini API failed after retries"
@@ -245,26 +477,130 @@ async def generate_ai_summary(
     if not scraped_content or scraped_content.startswith("❌"):
         return "❌ No valid scraped content available"
     
+    # Validate scraped content has meaningful content before sending to AI
+    if len(scraped_content.strip()) < 50:
+        return "❌ Insufficient content scraped. Content too short to generate meaningful summary."
+    
     # Build complete prompt
     full_prompt = build_company_summary_prompt(prompt, lead_data, scraped_content)
     
+    # Add STRONG anti-hallucination reminder
+    anti_hallucination_note = """
+
+═══════════════════════════════════════════════════════════
+FINAL REMINDER - CRITICAL:
+═══════════════════════════════════════════════════════════
+- Extract ONLY what is explicitly written in the content above
+- Do NOT invent, assume, or guess ANY information
+- Do NOT use general knowledge about companies or industries
+- Every fact must be traceable to specific text in the content
+- If information is missing, write "Not specified in the content"
+- You will be penalized for adding information not in the content
+═══════════════════════════════════════════════════════════
+"""
+    full_prompt = full_prompt + anti_hallucination_note
+    
     # Generate summary based on provider
     if provider.lower() == 'openai':
-        return await generate_openai_summary(api_key, model, full_prompt)
+        return await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback)
     elif provider.lower() == 'gemini':
-        return await generate_gemini_summary(api_key, model, full_prompt)
+        return await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback)
     else:
         return f"❌ Unknown provider: {provider}"
 
 
 def cleanup_html(html: str) -> str:
+    """Clean and organize HTML content into well-structured text."""
+    # Remove unwanted elements first
     html = re.sub(
-        r"<(style|script|nav|footer|header)[\s\S]*?</\1>", "", html, flags=re.IGNORECASE)
-    html = re.sub(r"<[^>]+>", "", html)
-    html = re.sub(r"\n\s*\n", "\n", html)
-    html = re.sub(r"&nbsp;", " ", html)
-    html = re.sub(r" {2,}", " ", html)
-    return unescape(html.strip())
+        r"<(style|script|nav|footer|header|aside|noscript|iframe|svg|canvas|form|button)[\s\S]*?</\1>", 
+        "", html, flags=re.IGNORECASE)
+    
+    # Remove common noise patterns (cookies, ads, etc.)
+    html = re.sub(
+        r'<(div|section|span)[^>]*(?:class|id)=["\'](?:cookie|ad|advertisement|popup|modal|overlay|banner|promo|marketing|tracking|analytics|social-share|share-buttons|newsletter|subscribe|signup)[^"\']*["\'][^>]*>[\s\S]*?</\1>',
+        "", html, flags=re.IGNORECASE)
+    
+    # Convert headings to markdown-style headers
+    html = re.sub(r'<h1[^>]*>(.*?)</h1>', r'\n\n# \1\n', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'<h2[^>]*>(.*?)</h2>', r'\n\n## \1\n', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'<h3[^>]*>(.*?)</h3>', r'\n\n### \1\n', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'<h4[^>]*>(.*?)</h4>', r'\n\n#### \1\n', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'<h5[^>]*>(.*?)</h5>', r'\n\n##### \1\n', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'<h6[^>]*>(.*?)</h6>', r'\n\n###### \1\n', html, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Convert lists to markdown-style
+    html = re.sub(r'<li[^>]*>(.*?)</li>', r'\n- \1', html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'<(ul|ol)[^>]*>', '\n', html, flags=re.IGNORECASE)
+    html = re.sub(r'</(ul|ol)>', '\n', html, flags=re.IGNORECASE)
+    
+    # Convert paragraphs to double newlines
+    html = re.sub(r'<p[^>]*>(.*?)</p>', r'\n\n\1\n\n', html, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Convert line breaks
+    html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
+    
+    # Convert strong/bold to markdown
+    html = re.sub(r'<(strong|b)[^>]*>(.*?)</\1>', r'**\2**', html, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Convert emphasis/italic to markdown
+    html = re.sub(r'<(em|i)[^>]*>(.*?)</\1>', r'*\2*', html, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Remove all remaining HTML tags
+    html = re.sub(r'<[^>]+>', '', html)
+    
+    # Decode HTML entities
+    html = unescape(html)
+    
+    # Clean up whitespace
+    html = re.sub(r'&nbsp;', ' ', html)
+    html = re.sub(r'\s+', ' ', html)  # Multiple spaces to single
+    html = re.sub(r' \n', '\n', html)  # Space before newline
+    html = re.sub(r'\n{3,}', '\n\n', html)  # Multiple newlines to double
+    html = re.sub(r'^\s+', '', html, flags=re.MULTILINE)  # Leading whitespace
+    html = re.sub(r'\s+$', '', html, flags=re.MULTILINE)  # Trailing whitespace
+    
+    # Remove common noise phrases
+    noise_patterns = [
+        r'cookie\s+policy',
+        r'privacy\s+policy',
+        r'terms\s+of\s+service',
+        r'accept\s+cookies',
+        r'we\s+use\s+cookies',
+        r'skip\s+to\s+content',
+        r'jump\s+to\s+content',
+        r'menu',
+        r'close',
+        r'share\s+on',
+        r'follow\s+us',
+        r'subscribe\s+to',
+    ]
+    for pattern in noise_patterns:
+        html = re.sub(pattern, '', html, flags=re.IGNORECASE)
+    
+    # Final cleanup
+    html = html.strip()
+    
+    # Split into lines and clean each line
+    lines = html.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line = line.strip()
+        # Skip very short lines that are likely noise
+        if len(line) < 3:
+            continue
+        # Skip lines that are just punctuation or symbols
+        if re.match(r'^[^\w\s]+$', line):
+            continue
+        cleaned_lines.append(line)
+    
+    # Join back with proper spacing
+    result = '\n'.join(cleaned_lines)
+    
+    # Final pass: ensure proper spacing around headers
+    result = re.sub(r'\n(#{1,6}\s+[^\n]+)\n+', r'\n\1\n\n', result)
+    
+    return result.strip()
 
 
 def extract_links(html: str, base_url: str):
@@ -307,7 +643,7 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
 async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int):
     visited, results, errors = set(), [], []
     total_chars = 0
-    separator = "\n\n"  # Separator between pages
+    separator = "\n\n" + "─" * 80 + "\n\n"  # Better visual separator between pages
     separator_len = len(separator)
 
     homepage = await fetch(session, url, timeout, retries)
@@ -317,7 +653,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     page_url, html = homepage
     cleaned = cleanup_html(html)
     if cleaned:
-        page_header = f"--- Page ({page_url}) ---\n"
+        # Better page header with clear separation
+        page_header = f"\n{'='*80}\nPAGE: {page_url}\n{'='*80}\n\n"
         page_content = page_header + cleaned
         # Check if adding this page would exceed max_chars
         if total_chars + len(page_content) + separator_len <= max_chars:
@@ -359,7 +696,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             link_url, html2 = res
             cleaned2 = cleanup_html(html2)
             if cleaned2:
-                page_header = f"--- Page ({link_url}) ---\n"
+                # Better page header with clear separation
+                page_header = f"\n{'='*80}\nPAGE: {link_url}\n{'='*80}\n\n"
                 page_content = page_header + cleaned2
                 # Check if adding this page would exceed max_chars
                 if total_chars + len(page_content) + separator_len <= max_chars:
@@ -405,15 +743,35 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 
 async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue: asyncio.Queue,
                            depth, keywords, max_chars, retries, timeout,
-                           ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None):
+                           ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
+                           lead_data_map=None, ai_status_callback=None):
     while True:
-        url = await url_queue.get()
-        if url is None:
+        item = await url_queue.get()
+        if item is None:
             url_queue.task_done()
             break
+        
+        # Handle both old format (just URL) and new format (URL, index)
+        if isinstance(item, tuple):
+            original_url, url_index = item
+        else:
+            original_url = item
+            url_index = None
+        
         # Normalize URL (add https:// if missing)
-        original_url = url
-        normalized_url = normalize_url(url)
+        normalized_url = normalize_url(original_url)
+        
+        # Get lead data from map if available
+        lead_data = None
+        if lead_data_map and url_index is not None and url_index in lead_data_map:
+            lead_data = lead_data_map[url_index].copy()
+            lead_data['url'] = original_url  # Ensure URL is set
+        else:
+            # Fallback: extract company name from URL
+            lead_data = {
+                'url': original_url,
+                'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
+            }
         
         # Validate normalized URL
         if not normalized_url or not normalized_url.startswith(("http://", "https://")):
@@ -425,13 +783,14 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             
             # Generate AI summary if enabled
             if ai_enabled and ai_api_key and ai_provider and ai_model:
-                lead_data = {
-                    'url': original_url,
-                    'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
-                }
+                # Create URL-specific status callback
+                def url_status_callback(msg):
+                    if ai_status_callback:
+                        ai_status_callback(original_url, msg)
+                
                 ai_summary = await generate_ai_summary(
                     ai_api_key, ai_provider, ai_model, ai_prompt or "",
-                    lead_data, scraped_text
+                    lead_data, scraped_text, status_callback=url_status_callback
                 )
             else:
                 ai_summary = ""  # Empty if AI not enabled
@@ -576,13 +935,15 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
 
 async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                       user_agent, rows_per_file, output_dir, progress_callback,
-                      ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None):
+                      ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
+                      lead_data_map=None, ai_status_callback=None):
     url_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
     total = len(urls)
 
-    for u in urls:
-        await url_queue.put(u)
+    # Put URLs with their indices for lead data lookup
+    for idx, u in enumerate(urls):
+        await url_queue.put((u, idx))
 
     timeout_obj = aiohttp.ClientTimeout(total=None)
     connector = aiohttp.TCPConnector(limit=0, ssl=False)
@@ -594,7 +955,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 
     workers = [asyncio.create_task(worker_coroutine(
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
-        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt)) for i in range(concurrency)]
+        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback)) for i in range(concurrency)]
 
     await url_queue.join()
 
@@ -619,10 +980,149 @@ st.markdown("Upload a CSV file with URLs in the first column, configure settings
 # File Upload Section
 st.header("📁 Upload CSV File")
 uploaded_file = st.file_uploader(
-    "Upload CSV with URLs (first column will be used)", 
+    "Upload CSV with URLs", 
     type=["csv"],
-    help="Your CSV file should have URLs in the first column. Header name doesn't matter. Example: www.example.com or https://example.com"
+    help="Upload your CSV file. You'll be able to select which column contains URLs and other lead data."
 )
+
+# CSV Configuration (shown after file upload)
+csv_has_headers = None
+url_column = None
+lead_data_columns = {}
+df_preview = None
+
+if uploaded_file is not None:
+    st.subheader("📋 CSV Configuration")
+    st.info("👆 **Configure your CSV file below** - Select headers and columns before starting scraping")
+    
+    # Preview first few rows
+    try:
+        # Reset file pointer to beginning
+        uploaded_file.seek(0)
+        
+        # Read a sample to detect structure
+        sample_df = pd.read_csv(uploaded_file, nrows=5)
+        uploaded_file.seek(0)  # Reset again
+        
+        col_csv1, col_csv2 = st.columns(2)
+        
+        with col_csv1:
+            csv_has_headers = st.radio(
+                "Does your CSV have headers?",
+                ["Yes, has headers", "No headers"],
+                help="Select whether the first row contains column names",
+                key="csv_headers_radio"
+            )
+        
+        with col_csv2:
+            st.caption("💡 **Tip:** Headers make column selection easier!")
+        
+        # Read CSV based on header selection
+        uploaded_file.seek(0)  # Reset file pointer
+        if csv_has_headers == "Yes, has headers":
+            df_preview = pd.read_csv(uploaded_file, nrows=10)
+            st.success(f"✅ Detected {len(df_preview.columns)} columns with headers: {', '.join(df_preview.columns.tolist()[:5])}{'...' if len(df_preview.columns) > 5 else ''}")
+        else:
+            df_preview = pd.read_csv(uploaded_file, header=None, nrows=10)
+            st.info(f"ℹ️ Detected {len(df_preview.columns)} columns (no headers)")
+        
+        # Show preview
+        with st.expander("👀 Preview CSV (first 10 rows)", expanded=False):
+            st.dataframe(df_preview, use_container_width=True)
+        
+        # Column selection
+        st.subheader("🔧 Column Selection")
+        
+        col_sel1, col_sel2 = st.columns(2)
+        
+        with col_sel1:
+            # URL column selection
+            if csv_has_headers == "Yes, has headers":
+                url_column = st.selectbox(
+                    "Select column with URLs",
+                    options=list(df_preview.columns),
+                    index=0,
+                    help="Choose which column contains the website URLs"
+                )
+            else:
+                url_column = st.selectbox(
+                    "Select column with URLs",
+                    options=[f"Column {i+1}" for i in range(len(df_preview.columns))],
+                    index=0,
+                    help="Choose which column contains the website URLs"
+                )
+        
+        with col_sel2:
+            st.caption("📌 **Required:** This column must contain URLs")
+        
+        # Additional lead data columns (optional)
+        st.markdown("**📊 Additional Lead Data (Optional - for AI summaries)**")
+        st.caption("Select columns that contain company information (name, industry, etc.) to include in AI summaries")
+        
+        col_lead1, col_lead2, col_lead3 = st.columns(3)
+        
+        with col_lead1:
+            if csv_has_headers == "Yes, has headers":
+                company_name_col = st.selectbox(
+                    "Company Name Column (optional)",
+                    options=["None"] + list(df_preview.columns),
+                    index=0,
+                    help="Column with company names"
+                )
+            else:
+                company_name_col = st.selectbox(
+                    "Company Name Column (optional)",
+                    options=["None"] + [f"Column {i+1}" for i in range(len(df_preview.columns))],
+                    index=0
+                )
+            if company_name_col != "None":
+                lead_data_columns['company_name'] = company_name_col
+        
+        with col_lead2:
+            if csv_has_headers == "Yes, has headers":
+                industry_col = st.selectbox(
+                    "Industry Column (optional)",
+                    options=["None"] + list(df_preview.columns),
+                    index=0,
+                    help="Column with industry information"
+                )
+            else:
+                industry_col = st.selectbox(
+                    "Industry Column (optional)",
+                    options=["None"] + [f"Column {i+1}" for i in range(len(df_preview.columns))],
+                    index=0
+                )
+            if industry_col != "None":
+                lead_data_columns['industry'] = industry_col
+        
+        with col_lead3:
+            if csv_has_headers == "Yes, has headers":
+                other_col = st.selectbox(
+                    "Other Column (optional)",
+                    options=["None"] + list(df_preview.columns),
+                    index=0,
+                    help="Any other relevant column"
+                )
+            else:
+                other_col = st.selectbox(
+                    "Other Column (optional)",
+                    options=["None"] + [f"Column {i+1}" for i in range(len(df_preview.columns))],
+                    index=0
+                )
+            if other_col != "None":
+                lead_data_columns['other'] = other_col
+        
+        # Store in session state for use during scraping
+        st.session_state['csv_config'] = {
+            'has_headers': csv_has_headers == "Yes, has headers",
+            'url_column': url_column,
+            'lead_data_columns': lead_data_columns,
+            'df_preview': df_preview
+        }
+        
+    except Exception as e:
+        st.error(f"❌ Error reading CSV: {str(e)}")
+        st.info("Please check your CSV file format and try again.")
 
 # Configuration Section
 st.header("⚙️ Configuration Settings")
@@ -847,11 +1347,38 @@ if ai_enabled:
             help="Choose OpenAI (GPT models) or Google Gemini"
         )
         
-        ai_api_key = st.text_input(
-            f"{ai_provider} API Key",
-            type="password",
-            help=f"Enter your {ai_provider} API key. Get one at: OpenAI (platform.openai.com) or Gemini (makersuite.google.com/app/apikey)"
-        )
+        # Get API key from session state or use empty
+        api_key_key = f"{ai_provider.lower()}_api_key"
+        stored_api_key = st.session_state.get(api_key_key, "")
+        
+        col_key1, col_key2 = st.columns([3, 1])
+        
+        with col_key1:
+            ai_api_key = st.text_input(
+                f"{ai_provider} API Key",
+                value=stored_api_key,
+                type="password",
+                help=f"Enter your {ai_provider} API key. Get one at: OpenAI (platform.openai.com) or Gemini (makersuite.google.com/app/apikey). Your key will be saved for this session.",
+                key=f"{ai_provider}_api_key_input"
+            )
+        
+        with col_key2:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            if st.button("🗑️ Clear", key=f"clear_{ai_provider}_key", help="Clear saved API key"):
+                st.session_state[api_key_key] = ""
+                st.rerun()
+        
+        # Save API key to session state when changed
+        if ai_api_key:
+            if ai_api_key != stored_api_key:
+                st.session_state[api_key_key] = ai_api_key
+            # Show saved indicator
+            masked_key = "*" * min(len(ai_api_key), 8) + "..." if len(ai_api_key) > 8 else "*" * len(ai_api_key)
+            st.caption(f"✅ API key saved for this session ({masked_key})")
+        elif stored_api_key and not ai_api_key:
+            # If cleared, remove from session state
+            st.session_state[api_key_key] = ""
         
         # Model selection based on provider
         if ai_provider == "OpenAI":
@@ -870,46 +1397,142 @@ if ai_enabled:
             )
     
     with col_ai2:
-        with st.expander("📝 Custom Prompt (Optional)", expanded=False):
-            st.markdown("""
-            **Customize the AI prompt for company summaries.**
-            
-            **Available placeholders:**
-            - `{url}` - Website URL
-            - `{company_name}` - Company name (extracted from URL)
-            - `{scraped_content}` - Scraped website content
-            
-            **Leave empty to use default prompt** (recommended for most cases).
-            """)
+        st.markdown("**📝 Prompt Configuration**")
         
-        default_prompt = """Analyze the following company website content and generate a comprehensive company summary.
+        # Prompt editing mode
+        prompt_mode = st.radio(
+            "Prompt Mode",
+            ["Use Default Prompt", "Edit Master Prompt"],
+            help="Use default prompt or edit the master prompt template",
+            horizontal=True
+        )
+        
+        # Default prompt template
+        default_prompt_template = """CRITICAL ANTI-HALLUCINATION RULES - READ CAREFULLY:
+
+🚫 DO NOT:
+- Invent any information not explicitly stated in the content
+- Make assumptions about what the company does
+- Guess industry, products, or services
+- Add details not present in the scraped content
+- Use general knowledge or external information
+- Infer facts that aren't directly stated
+
+✅ DO:
+- Extract ONLY information explicitly written in the website content below
+- Quote or paraphrase directly from the content
+- Write "Not specified in the content" if information is missing
+- Base every statement on actual text from the scraped content
+- Clearly distinguish facts from inferences
 
 LEAD INFORMATION:
 - Website URL: {url}
 - Company Name: {company_name}
 
-WEBSITE CONTENT:
+WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
 {scraped_content}
 
-Please provide:
+YOUR TASK:
+Analyze ONLY the website content above and extract information that is EXPLICITLY STATED. Do not add anything that is not directly written in the content.
+
+Provide:
 1. **Company Overview**: What does this company do? (2-3 sentences)
+   - ONLY use information directly stated in the content
+   - If unclear, write "Company description not clearly stated in the content"
+   - Quote specific phrases from the content when possible
+
 2. **Industry**: What industry/sector does this company operate in?
-3. **Products/Services**: List the main products or services offered
-4. **Key Facts**: Important facts extracted from the website content
+   - ONLY if explicitly mentioned (e.g., "We are a technology company" or "Serving the healthcare industry")
+   - If not stated, write "Industry not specified in the content"
+
+3. **Products/Services**: List the products or services offered
+   - ONLY list items explicitly mentioned in the content
+   - Quote the exact product/service names from the content
+   - If none mentioned, write "Products/services not specified in the content"
+
+4. **Key Facts**: Important facts extracted DIRECTLY from the content
+   - Each fact must be traceable to specific text in the content
+   - Prefer direct quotes
+   - If no clear facts, write "No specific facts extracted from the content"
+
 5. **Target Market**: Who is their target audience/customers?
-6. **Five Inferences/Hypotheses**: Generate 5 strategic inferences or hypotheses about this company based on the content
+   - ONLY if explicitly stated (e.g., "We serve small businesses" or "Our customers are...")
+   - If not stated, write "Target market not specified in the content"
+
+6. **Five Inferences/Hypotheses**: Generate 5 inferences based ONLY on patterns in the provided content
+   - Label each as "INFERENCE" or "HYPOTHESIS"
+   - Base each on specific patterns/text in the content
+   - Start each with "Based on [specific content pattern], I infer..."
+   - If insufficient content, write fewer inferences
+
+VALIDATION CHECKLIST:
+Before submitting, verify:
+- Every statement can be traced to specific text in the content
+- No assumptions or guesses were made
+- Missing information is marked as "Not specified"
+- Inferences are clearly labeled and based on content patterns
 
 Format your response clearly with sections."""
         
-        ai_prompt = st.text_area(
-            "Custom Prompt (optional)",
-            value="",
-            height=200,
-            help="Leave empty for default prompt, or customize with placeholders: {url}, {company_name}, {scraped_content}"
-        )
+        # Store default prompt in session state if not exists
+        if 'master_prompt' not in st.session_state:
+            st.session_state['master_prompt'] = default_prompt_template
         
-        if not ai_prompt.strip():
-            ai_prompt = default_prompt
+        # Allow editing master prompt
+        if prompt_mode == "Edit Master Prompt":
+            st.info("💡 **Edit the master prompt template below. Use placeholders: `{url}`, `{company_name}`, `{scraped_content}`")
+            
+            ai_prompt = st.text_area(
+                "Master Prompt Template",
+                value=st.session_state.get('master_prompt', default_prompt_template),
+                height=400,
+                help="Edit the master prompt. Placeholders: {url}, {company_name}, {scraped_content}"
+            )
+            st.session_state['master_prompt'] = ai_prompt
+        else:
+            ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
+        
+        # Show prompt preview
+        with st.expander("👁️ Preview Final Prompt Structure", expanded=False):
+            st.markdown("**See how your prompt will look with actual data:**")
+            
+            # Sample data for preview
+            sample_url = "https://example.com"
+            sample_company = "Example Company"
+            sample_content = "This is a sample of scraped website content. The company provides technology solutions for businesses. They serve small and medium enterprises."
+            
+            # Build preview prompt
+            preview_prompt = ai_prompt.replace('{url}', sample_url)
+            preview_prompt = preview_prompt.replace('{company_name}', sample_company)
+            preview_prompt = preview_prompt.replace('{scraped_content}', sample_content[:200] + "...")
+            
+            st.markdown("**Example Final Prompt (with sample data):**")
+            st.code(preview_prompt, language=None)
+            
+            st.markdown("---")
+            st.markdown("**📌 Placeholders that will be replaced:**")
+            st.markdown("""
+            - `{url}` → Actual website URL from your CSV
+            - `{company_name}` → Company name (from CSV column or extracted from URL)
+            - `{scraped_content}` → Full scraped website content (up to 15,000 characters)
+            """)
+            
+            st.markdown("**💡 Note:** The final prompt also includes:")
+            st.markdown("""
+            - Lead data from CSV (industry, other columns if selected)
+            - Anti-hallucination reminder at the end
+            - System message with strict instructions
+            """)
+        
+        # Show what will be added
+        st.caption("ℹ️ The final prompt sent to AI includes: Master prompt + Lead data + Anti-hallucination reminder")
+    
+    # Ensure ai_prompt is set even if AI is disabled (for preview purposes)
+    if ai_enabled:
+        if 'ai_prompt' not in locals() or ai_prompt is None:
+            ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
+    else:
+        ai_prompt = None
     
     if not ai_api_key or not ai_api_key.strip():
         st.warning("⚠️ Please enter your API key to enable AI summaries.")
@@ -938,11 +1561,83 @@ run_name = st.text_input(
 
 # -------- SCRAPE BUTTON --------
 if uploaded_file and st.button("🚀 Start Scraping"):
-    df_in = pd.read_csv(uploaded_file, header=0)
-    urls = df_in.iloc[:, 0].fillna("").astype(str).tolist()
+    # Get CSV configuration from session state
+    csv_config = st.session_state.get('csv_config', {})
+    
+    if not csv_config:
+        st.error("❌ Please configure your CSV file above (select columns)")
+        st.stop()
+    
+    # Read CSV based on configuration
+    has_headers = csv_config.get('has_headers', True)
+    url_col = csv_config.get('url_column')
+    lead_cols = csv_config.get('lead_data_columns', {})
+    
+    # Reset file pointer
+    uploaded_file.seek(0)
+    
+    if has_headers:
+        df_in = pd.read_csv(uploaded_file)
+    else:
+        df_in = pd.read_csv(uploaded_file, header=None)
+    
+    # Get URL column index
+    if has_headers:
+        url_col_idx = list(df_in.columns).index(url_col)
+    else:
+        url_col_idx = int(url_col.replace("Column ", "")) - 1
+    
+    # Extract URLs
+    urls = df_in.iloc[:, url_col_idx].fillna("").astype(str).tolist()
     # Filter out empty URLs
     urls = [url for url in urls if url.strip()]
     total = len(urls)
+    
+    # Prepare lead data mapping (row index -> lead data dict)
+    lead_data_map = {}
+    for idx, url in enumerate(urls):
+        lead_data = {'url': url}
+        
+        # Add company name if column selected
+        if 'company_name' in lead_cols:
+            col_name = lead_cols['company_name']
+            if has_headers:
+                col_idx = list(df_in.columns).index(col_name)
+            else:
+                col_idx = int(col_name.replace("Column ", "")) - 1
+            if idx < len(df_in):
+                lead_data['company_name'] = str(df_in.iloc[idx, col_idx]) if pd.notna(df_in.iloc[idx, col_idx]) else ""
+            else:
+                lead_data['company_name'] = ""
+        
+        # Add industry if column selected
+        if 'industry' in lead_cols:
+            col_name = lead_cols['industry']
+            if has_headers:
+                col_idx = list(df_in.columns).index(col_name)
+            else:
+                col_idx = int(col_name.replace("Column ", "")) - 1
+            if idx < len(df_in):
+                lead_data['industry'] = str(df_in.iloc[idx, col_idx]) if pd.notna(df_in.iloc[idx, col_idx]) else ""
+            else:
+                lead_data['industry'] = ""
+        
+        # Add other data if column selected
+        if 'other' in lead_cols:
+            col_name = lead_cols['other']
+            if has_headers:
+                col_idx = list(df_in.columns).index(col_name)
+            else:
+                col_idx = int(col_name.replace("Column ", "")) - 1
+            if idx < len(df_in):
+                lead_data['other'] = str(df_in.iloc[idx, col_idx]) if pd.notna(df_in.iloc[idx, col_idx]) else ""
+            else:
+                lead_data['other'] = ""
+        
+        lead_data_map[idx] = lead_data
+    
+    # Store lead data map in session state
+    st.session_state['lead_data_map'] = lead_data_map
     
     # Show warning and info for large files
     if total > 10000:
@@ -988,6 +1683,24 @@ if uploaded_file and st.button("🚀 Start Scraping"):
     progress_bar = st.progress(0)
     status_text = st.empty()
     eta_text = st.empty()
+    
+    # AI status display (only if AI enabled)
+    ai_status_text = None
+    if ai_enabled:
+        st.subheader("🤖 AI Summary Status")
+        ai_status_text = st.empty()
+        ai_status_text.info("AI summaries will start generating after scraping completes...")
+    
+    # AI status callback function
+    ai_status_messages = {}
+    def ai_status_callback(url, message):
+        """Update AI status display in real-time."""
+        ai_status_messages[url] = message
+        if ai_status_text:
+            # Show last 5 status messages
+            recent_messages = list(ai_status_messages.items())[-5:]
+            status_display = "\n".join([f"**{url[:50]}...**: {msg}" for url, msg in recent_messages])
+            ai_status_text.info(status_display)
 
     fun_messages = [
         "🔍 Scanning the web...",
@@ -1012,10 +1725,14 @@ if uploaded_file and st.button("🚀 Start Scraping"):
         if os.name == "nt":
             asyncio.set_event_loop_policy(
                 asyncio.WindowsSelectorEventLoopPolicy())
+        # Get lead_data_map from session state
+        lead_data_map = st.session_state.get('lead_data_map', None)
+        
         asyncio.run(
             run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                         user_agent, rows_per_file, output_dir, progress_cb,
-                        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt)
+                        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map,
+                        ai_status_callback if ai_enabled else None)
         )
 
     # Zip all parts at the end with custom name (CSV and Excel files)
