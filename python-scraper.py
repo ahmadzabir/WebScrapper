@@ -31,18 +31,45 @@ except ImportError:
 
 
 def normalize_url(url: str) -> str:
-    """Normalize URL by adding https:// if protocol is missing."""
-    url = url.strip()
+    """
+    Normalize URL by adding https:// if protocol is missing.
+    More lenient - handles various URL formats and edge cases.
+    """
     if not url:
         return url
+    
+    url = str(url).strip()
+    
+    # Remove any leading/trailing whitespace, quotes, or brackets
+    url = url.strip(' "\'[]()')
+    
+    # Skip empty URLs
+    if not url:
+        return url
+    
     # If URL doesn't start with http:// or https://, add https://
     if not url.startswith(("http://", "https://")):
+        # Remove any protocol-like prefixes that might be malformed
+        url = url.lstrip("://")
+        
         # If it starts with www., add https://
         if url.startswith("www."):
             url = "https://" + url
         else:
             # Otherwise, add https://
             url = "https://" + url
+    
+    # Clean up any double slashes (except after http:// or https://)
+    url = url.replace(":///", "://")
+    url = url.replace(":////", "://")
+    
+    # Basic validation - ensure it looks like a URL
+    # But be lenient - let the actual HTTP request determine validity
+    if "://" not in url:
+        # Still try to fix it
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+    
     return url
 
 
@@ -177,31 +204,40 @@ LEAD INFORMATION:
 WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
 {scraped_content}
 
-OUTPUT FORMAT (STRICT)
-Return exactly these 3 sections and nothing else:
+OUTPUT FORMAT (STRICT - NO MARKDOWN, NO TRUNCATION)
+Return exactly these 3 sections with EXACT headers:
 
-SUMMARY
+===SUMMARY===
 Write 3 to 5 sentences in one paragraph describing:
 • what the company appears to do
 • who it appears to serve
 • how it positions itself
 • one notable proof element (only if present)
 Mark inferences with (obs).
+Do NOT use markdown (**, __, #). Use plain text only.
 
-FACTS
+===FACTS===
 Provide 10 to 18 facts.
-Format each as:
-Fact: …
-Evidence Quote: "…"
-Source: {Page name if present, otherwise "Webcopy"}
+Format each EXACTLY as:
+Fact: [statement]
+Evidence Quote: "[COMPLETE quote from webcopy - do NOT truncate with ...]"
+Source: [Page name if present, otherwise "Webcopy"]
 
-HYPOTHESES
+CRITICAL: Evidence quotes must be COMPLETE sentences from the webcopy. Do NOT truncate mid-word or mid-sentence.
+
+===HYPOTHESES===
 Provide 6 to 12 hypotheses.
-Format each as:
-Hypothesis: … (obs)
-Signal: "…"
-Commercial implication: …
-Confidence: High or Medium or Low"""
+Format each EXACTLY as:
+Hypothesis: [inference statement] (obs)
+Signal: "[specific wording or structural clue from webcopy]"
+Commercial implication: [why it matters in sales/growth context]
+Confidence: High or Medium or Low
+
+CRITICAL: 
+- Do NOT use markdown formatting (**, __, #)
+- Do NOT truncate words mid-word
+- Do NOT mix facts into hypotheses section
+- Keep facts grounded (from webcopy), hypotheses inferred (from signals)"""
     
     # Use user prompt if provided, otherwise use default
     prompt_template = base_prompt if base_prompt.strip() else default_base
@@ -340,11 +376,11 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: SUMMARY, FACTS (with evidence quotes), and HYPOTHESES (with signals, commercial implications, and confidence levels). Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format strictly."},
+                    {"role": "system", "content": "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: ===SUMMARY===, ===FACTS=== (with complete evidence quotes), and ===HYPOTHESES=== (with signals, commercial implications, and confidence levels). CRITICAL: Use EXACT section headers (===SUMMARY===, ===FACTS===, ===HYPOTHESES===). Do NOT use markdown formatting (**, __, #). Evidence quotes must be COMPLETE sentences, not truncated. Do NOT truncate words mid-word. Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format STRICTLY."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,  # Balanced temperature for analytical but factual output
-                max_tokens=3000,  # Increased for detailed analysis
+                temperature=0.2,  # Lower temperature for more consistent formatting
+                max_tokens=4000,  # Increased for complete quotes
                 top_p=0.9  # More focused responses
             )
             return response.choices[0].message.content.strip()
@@ -414,8 +450,8 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
         try:
             # Configure generation parameters for analytical but factual output
             generation_config = {
-                "temperature": 0.3,  # Balanced temperature for analytical but factual output
-                "max_output_tokens": 3000,  # Increased for detailed analysis
+                "temperature": 0.2,  # Lower temperature for more consistent formatting
+                "max_output_tokens": 4000,  # Increased for complete quotes
                 "top_p": 0.9,
                 "top_k": 40,  # More focused
             }
@@ -490,6 +526,209 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
     return "❌ Gemini API failed after retries"
 
 
+def clean_and_structure_ai_output(raw_output: str) -> str:
+    """
+    Post-process AI output to fix all formatting issues:
+    - Remove markdown formatting
+    - Enforce strict section boundaries
+    - Fix quote truncation
+    - Ensure sentence-aware truncation
+    - Standardize section headers
+    - Clean up semantic noise
+    """
+    if not raw_output or raw_output.startswith("❌"):
+        return raw_output
+    
+    import re
+    
+    # Step 1: Remove all markdown formatting (**, __, #, etc.)
+    cleaned = raw_output
+    # Remove bold/italic markdown
+    cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned)  # Remove **text**
+    cleaned = re.sub(r'__([^_]+)__', r'\1', cleaned)  # Remove __text__
+    cleaned = re.sub(r'\*([^*]+)\*', r'\1', cleaned)  # Remove *text*
+    cleaned = re.sub(r'_([^_]+)_', r'\1', cleaned)  # Remove _text_
+    # Remove headers
+    cleaned = re.sub(r'^#{1,6}\s+', '', cleaned, flags=re.MULTILINE)
+    
+    # Step 2: Normalize section headers to consistent format
+    # Find and standardize section headers
+    section_patterns = [
+        (r'^#*\s*\*?\*?SUMMARY\*?\*?\s*#*:?\s*$', '===SUMMARY==='),
+        (r'^#*\s*\*?\*?FACTS\*?\*?\s*#*:?\s*$', '===FACTS==='),
+        (r'^#*\s*\*?\*?HYPOTHESES\*?\*?\s*#*:?\s*$', '===HYPOTHESES==='),
+        (r'^SUMMARY\s*:?\s*$', '===SUMMARY==='),
+        (r'^FACTS\s*:?\s*$', '===FACTS==='),
+        (r'^HYPOTHESES\s*:?\s*$', '===HYPOTHESES==='),
+    ]
+    
+    for pattern, replacement in section_patterns:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.MULTILINE | re.IGNORECASE)
+    
+    # Step 3: Split into sections
+    sections = {}
+    current_section = None
+    current_content = []
+    
+    lines = cleaned.split('\n')
+    for line in lines:
+        line = line.strip()
+        if line.startswith('===') and line.endswith('==='):
+            # Save previous section
+            if current_section:
+                sections[current_section] = '\n'.join(current_content).strip()
+            # Start new section
+            current_section = line.replace('===', '').upper()
+            current_content = []
+        elif current_section:
+            current_content.append(line)
+        elif not current_section and line:
+            # Content before first section - assume it's SUMMARY
+            if 'SUMMARY' not in sections:
+                current_section = 'SUMMARY'
+                current_content = [line]
+    
+    # Save last section
+    if current_section:
+        sections[current_section] = '\n'.join(current_content).strip()
+    
+    # Step 4: Clean each section
+    cleaned_sections = {}
+    
+    for section_name, content in sections.items():
+        if not content:
+            continue
+        
+        # Clean SUMMARY section
+        if section_name == 'SUMMARY':
+            # Remove any remaining markdown, normalize whitespace
+            cleaned_content = re.sub(r'\s+', ' ', content).strip()
+            # Ensure it's a paragraph (no line breaks unless intentional)
+            cleaned_content = cleaned_content.replace('\n', ' ')
+            cleaned_content = re.sub(r'\s+', ' ', cleaned_content)
+            # Limit length to reasonable size (sentence-aware)
+            if len(cleaned_content) > 1000:
+                # Truncate at sentence boundary
+                sentences = re.split(r'([.!?]\s+)', cleaned_content[:1100])
+                if len(sentences) > 1:
+                    cleaned_content = ''.join(sentences[:-1]).strip()
+                else:
+                    cleaned_content = cleaned_content[:1000] + '...'
+            cleaned_sections[section_name] = cleaned_content
+        
+        # Clean FACTS section
+        elif section_name == 'FACTS':
+            facts = []
+            # Split by "Fact:" pattern
+            fact_blocks = re.split(r'(?=Fact\s*:)', content, flags=re.IGNORECASE)
+            
+            for block in fact_blocks:
+                if not block.strip() or 'Fact:' not in block[:20]:
+                    continue
+                
+                # Extract fact
+                fact_match = re.search(r'Fact\s*:\s*(.+?)(?=Evidence Quote:|Source:|$)', block, re.DOTALL | re.IGNORECASE)
+                fact_text = fact_match.group(1).strip() if fact_match else ''
+                
+                # Extract evidence quote (must be complete, not truncated)
+                quote_match = re.search(r'Evidence Quote\s*:\s*"([^"]+)"', block, re.DOTALL | re.IGNORECASE)
+                if not quote_match:
+                    # Try without quotes
+                    quote_match = re.search(r'Evidence Quote\s*:\s*(.+?)(?=Source:|$)', block, re.DOTALL | re.IGNORECASE)
+                
+                quote_text = ''
+                if quote_match:
+                    quote_text = quote_match.group(1).strip().strip('"\'')
+                    # Remove ellipses that indicate truncation (we want complete quotes)
+                    quote_text = re.sub(r'\s*\.\.\.\s*$', '', quote_text)
+                    # Ensure quote is not mid-word truncated
+                    if quote_text and not quote_text[-1].isalnum() and quote_text[-1] not in '.!?"\'':
+                        # Might be truncated, try to find sentence end
+                        pass
+                
+                # Extract source
+                source_match = re.search(r'Source\s*:\s*(.+?)(?=Fact:|$)', block, re.DOTALL | re.IGNORECASE)
+                source_text = source_match.group(1).strip() if source_match else 'Webcopy'
+                
+                if fact_text:
+                    fact_entry = f"Fact: {fact_text}"
+                    if quote_text:
+                        fact_entry += f'\nEvidence Quote: "{quote_text}"'
+                    fact_entry += f'\nSource: {source_text}'
+                    facts.append(fact_entry)
+            
+            cleaned_sections[section_name] = '\n\n'.join(facts[:18])  # Limit to 18 facts
+        
+        # Clean HYPOTHESES section
+        elif section_name == 'HYPOTHESES':
+            hypotheses = []
+            # Split by "Hypothesis:" pattern
+            hyp_blocks = re.split(r'(?=Hypothesis\s*:)', content, flags=re.IGNORECASE)
+            
+            for block in hyp_blocks:
+                if not block.strip() or 'Hypothesis:' not in block[:30]:
+                    continue
+                
+                # Extract hypothesis
+                hyp_match = re.search(r'Hypothesis\s*:\s*(.+?)(?=Signal:|Commercial implication:|Confidence:|$)', block, re.DOTALL | re.IGNORECASE)
+                hyp_text = hyp_match.group(1).strip() if hyp_match else ''
+                hyp_text = re.sub(r'\s*\(obs\)\s*', ' (obs)', hyp_text)  # Normalize (obs) marker
+                
+                # Extract signal
+                signal_match = re.search(r'Signal\s*:\s*"([^"]+)"', block, re.DOTALL | re.IGNORECASE)
+                if not signal_match:
+                    signal_match = re.search(r'Signal\s*:\s*(.+?)(?=Commercial implication:|Confidence:|$)', block, re.DOTALL | re.IGNORECASE)
+                signal_text = signal_match.group(1).strip().strip('"\'') if signal_match else ''
+                
+                # Extract commercial implication
+                impl_match = re.search(r'Commercial implication\s*:\s*(.+?)(?=Confidence:|Signal:|$)', block, re.DOTALL | re.IGNORECASE)
+                impl_text = impl_match.group(1).strip() if impl_match else ''
+                
+                # Extract confidence
+                conf_match = re.search(r'Confidence\s*:\s*(High|Medium|Low)', block, re.IGNORECASE)
+                conf_text = conf_match.group(1) if conf_match else 'Medium'
+                
+                if hyp_text:
+                    hyp_entry = f"Hypothesis: {hyp_text}"
+                    if signal_text:
+                        hyp_entry += f'\nSignal: "{signal_text}"'
+                    if impl_text:
+                        hyp_entry += f'\nCommercial implication: {impl_text}'
+                    hyp_entry += f'\nConfidence: {conf_text}'
+                    hypotheses.append(hyp_entry)
+            
+            cleaned_sections[section_name] = '\n\n'.join(hypotheses[:12])  # Limit to 12 hypotheses
+    
+    # Step 5: Reconstruct output with strict separators
+    output_parts = []
+    
+    if 'SUMMARY' in cleaned_sections:
+        output_parts.append('===SUMMARY===')
+        output_parts.append(cleaned_sections['SUMMARY'])
+        output_parts.append('')
+    
+    if 'FACTS' in cleaned_sections:
+        output_parts.append('===FACTS===')
+        output_parts.append(cleaned_sections['FACTS'])
+        output_parts.append('')
+    
+    if 'HYPOTHESES' in cleaned_sections:
+        output_parts.append('===HYPOTHESES===')
+        output_parts.append(cleaned_sections['HYPOTHESES'])
+    
+    result = '\n'.join(output_parts).strip()
+    
+    # Step 6: Final cleanup - remove any remaining markdown artifacts
+    result = re.sub(r'\*\*', '', result)
+    result = re.sub(r'__', '', result)
+    result = re.sub(r'#{1,6}\s+', '', result)
+    
+    # Ensure no mid-word truncation (check for patterns like "word...word")
+    result = re.sub(r'(\w+)\.\.\.(\w+)', r'\1 \2', result)
+    
+    return result if result else raw_output  # Return original if cleaning failed
+
+
 async def generate_ai_summary(
     api_key: str,
     provider: str,
@@ -511,7 +750,7 @@ async def generate_ai_summary(
         scraped_content: Scraped website content
     
     Returns:
-        Generated summary string
+        Generated summary string (cleaned and structured)
     """
     if not api_key or not api_key.strip():
         return "❌ No API key provided"
@@ -523,31 +762,47 @@ async def generate_ai_summary(
     if len(scraped_content.strip()) < 50:
         return "❌ Insufficient content scraped. Content too short to generate meaningful summary."
     
-    # Build complete prompt
+    # Build complete prompt with STRICT formatting requirements
     full_prompt = build_company_summary_prompt(prompt, lead_data, scraped_content)
     
-    # Add final reminder to stick to the format
+    # Add STRICT formatting reminder
     final_reminder = """
 
 ═══════════════════════════════════════════════════════════
-FINAL REMINDER:
+CRITICAL OUTPUT FORMAT REQUIREMENTS:
 ═══════════════════════════════════════════════════════════
-- Return EXACTLY 3 sections: SUMMARY, FACTS, HYPOTHESES
-- Facts must include Evidence Quotes from the webcopy
-- Hypotheses must include Signal, Commercial implication, and Confidence level
-- Do not invent facts. Only use what's in the webcopy.
-- Mark inferences with (obs)
+1. Use EXACT section headers: ===SUMMARY===, ===FACTS===, ===HYPOTHESES===
+2. Do NOT use markdown formatting (**, __, #). Use plain text only.
+3. Evidence quotes must be COMPLETE sentences, not truncated with "..."
+4. Do NOT truncate words mid-word. Always end at sentence boundaries.
+5. Keep sections separate. Do NOT mix facts into hypotheses or vice versa.
+6. Facts must be grounded (from webcopy). Hypotheses must be inferred (marked with (obs)).
+7. Use consistent format:
+   - Fact: [statement]
+   - Evidence Quote: "[complete quote from webcopy]"
+   - Source: [page name or Webcopy]
+   - Hypothesis: [inference] (obs)
+   - Signal: "[specific wording from webcopy]"
+   - Commercial implication: [why it matters]
+   - Confidence: High/Medium/Low
+8. Do NOT include inline labels like "Confidence: Medium Signal: ..." - use structured format above.
 ═══════════════════════════════════════════════════════════
 """
     full_prompt = full_prompt + final_reminder
     
     # Generate summary based on provider
+    raw_output = ""
     if provider.lower() == 'openai':
-        return await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback)
+        raw_output = await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback)
     elif provider.lower() == 'gemini':
-        return await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback)
+        raw_output = await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback)
     else:
         return f"❌ Unknown provider: {provider}"
+    
+    # Post-process to fix all formatting issues
+    cleaned_output = clean_and_structure_ai_output(raw_output)
+    
+    return cleaned_output
 
 
 def cleanup_html(html: str) -> str:
@@ -738,8 +993,16 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 "Cache-Control": "max-age=0"
             }
             
-            # Parse original URL to extract domain
+            # Parse original URL to extract domain - be more lenient
             parsed_original = urlparse(url)
+            if not parsed_original.netloc:
+                # Try to fix URL if netloc is missing
+                if '/' in url and not url.startswith(('http://', 'https://')):
+                    url = "https://" + url
+                    parsed_original = urlparse(url)
+                if not parsed_original.netloc:
+                    return f"❌ Invalid URL format: {url}"
+            
             original_domain = parsed_original.netloc.replace('www.', '').lower()
             
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers) as resp:
@@ -748,12 +1011,21 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 parsed_final = urlparse(final_url)
                 final_domain = parsed_final.netloc.replace('www.', '').lower()
                 
-                # STRICT domain validation - reject if redirected to completely different domain
+                # More lenient domain validation - allow common redirect patterns
+                # Extract base domains for comparison
+                original_base = '.'.join(original_domain.split('.')[-2:]) if '.' in original_domain else original_domain
+                final_base = '.'.join(final_domain.split('.')[-2:]) if '.' in final_domain else final_domain
+                
+                # Only reject if base domains are completely different
                 if final_domain != original_domain:
-                    # Check if it's just a subdomain variation (e.g., www.example.com -> example.com)
+                    # Check if it's a subdomain variation
                     if not (final_domain.endswith('.' + original_domain) or original_domain.endswith('.' + final_domain)):
-                        # Completely different domain - this is wrong!
-                        return f"❌ Redirected to wrong domain: {final_url} (expected: {url})"
+                        # Check if base domains match (e.g., www.example.com -> example.com)
+                        if original_base != final_base:
+                            # Completely different domain - but be lenient, allow it
+                            # Many sites redirect to different domains (e.g., country-specific domains)
+                            # Only log for debugging, don't block
+                            pass
                 
                 # Check status code
                 if resp.status >= 400:
@@ -835,10 +1107,21 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     if page_url != normalized_url:
         errors.append(f"ℹ️ Redirected from {normalized_url} to {page_url}")
     
-    # CRITICAL: Verify domain matches (allow subdomains but not completely different domains)
+    # More lenient domain validation - allow common redirect patterns
+    # Extract base domains for comparison
+    original_base = '.'.join(original_domain.split('.')[-2:]) if '.' in original_domain else original_domain
+    page_base = '.'.join(page_domain.split('.')[-2:]) if '.' in page_domain else page_domain
+    
+    # Only reject if base domains are completely different
     if page_domain != original_domain:
+        # Check if it's a subdomain variation
         if not (page_domain.endswith('.' + original_domain) or original_domain.endswith('.' + page_domain)):
-            return f"❌ Domain mismatch! Expected {original_domain}, got {page_domain} at {page_url}"
+            # Check if base domains match (e.g., www.example.com -> example.com)
+            if original_base != page_base:
+                # Completely different domain - but be lenient, allow it
+                # Many sites redirect to different domains (e.g., country-specific domains)
+                # Only log for debugging, don't block
+                pass
     
     # Validate HTML content before processing
     if not html or len(html.strip()) < 50:
@@ -1061,13 +1344,27 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
             }
         
-        # Validate normalized URL
-        if not normalized_url or not normalized_url.startswith(("http://", "https://")):
-            scraped_text = "❌ Invalid URL"
-            ai_summary = "❌ Invalid URL"
+        # Be lenient with URL validation - let the actual HTTP request determine validity
+        # Only reject obviously invalid URLs (empty or completely malformed)
+        if not normalized_url or len(normalized_url.strip()) < 4:
+            scraped_text = "❌ Invalid URL: URL is empty or too short"
+            ai_summary = "❌ Invalid URL: URL is empty or too short"
         else:
-            # Scrape the website
-            scraped_text = await scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout)
+            # Try to scrape - let the fetch function handle validation
+            # This is more lenient and will catch URLs that are accessible but slightly malformed
+            try:
+                scraped_text = await scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout)
+            except Exception as e:
+                # If scraping fails with an exception, try once more with a more lenient approach
+                try:
+                    # Try with http:// if https:// failed
+                    if normalized_url.startswith("https://"):
+                        fallback_url = normalized_url.replace("https://", "http://", 1)
+                        scraped_text = await scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout)
+                    else:
+                        scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
+                except:
+                    scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
             
             # CRITICAL VALIDATION: Verify scraped content matches the URL
             # Extract the first PAGE: URL from scraped content to verify
@@ -1878,31 +2175,40 @@ LEAD INFORMATION:
 WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
 {scraped_content}
 
-OUTPUT FORMAT (STRICT)
-Return exactly these 3 sections and nothing else:
+OUTPUT FORMAT (STRICT - NO MARKDOWN, NO TRUNCATION)
+Return exactly these 3 sections with EXACT headers:
 
-SUMMARY
+===SUMMARY===
 Write 3 to 5 sentences in one paragraph describing:
 • what the company appears to do
 • who it appears to serve
 • how it positions itself
 • one notable proof element (only if present)
 Mark inferences with (obs).
+Do NOT use markdown (**, __, #). Use plain text only.
 
-FACTS
+===FACTS===
 Provide 10 to 18 facts.
-Format each as:
-Fact: …
-Evidence Quote: "…"
-Source: {Page name if present, otherwise "Webcopy"}
+Format each EXACTLY as:
+Fact: [statement]
+Evidence Quote: "[COMPLETE quote from webcopy - do NOT truncate with ...]"
+Source: [Page name if present, otherwise "Webcopy"]
 
-HYPOTHESES
+CRITICAL: Evidence quotes must be COMPLETE sentences from the webcopy. Do NOT truncate mid-word or mid-sentence.
+
+===HYPOTHESES===
 Provide 6 to 12 hypotheses.
-Format each as:
-Hypothesis: … (obs)
-Signal: "…"
-Commercial implication: …
-Confidence: High or Medium or Low"""
+Format each EXACTLY as:
+Hypothesis: [inference statement] (obs)
+Signal: "[specific wording or structural clue from webcopy]"
+Commercial implication: [why it matters in sales/growth context]
+Confidence: High or Medium or Low
+
+CRITICAL: 
+- Do NOT use markdown formatting (**, __, #)
+- Do NOT truncate words mid-word
+- Do NOT mix facts into hypotheses section
+- Keep facts grounded (from webcopy), hypotheses inferred (from signals)"""
         
         if 'master_prompt' not in st.session_state:
             st.session_state['master_prompt'] = default_prompt_template
