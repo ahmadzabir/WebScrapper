@@ -1422,9 +1422,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 ai_summary = "❌ Invalid URL: URL is empty or too short"
             else:
                 # CRITICAL: Add a global timeout wrapper to prevent workers from hanging indefinitely
-                # Calculate max time: timeout per request * (retries + 1) * (depth + 1) URLs * 2 (for variations)
-                # Add extra buffer for processing time
-                max_total_time = (timeout * (retries + 1) * (depth + 1) * 2) + 30  # Extra 30s buffer
+                # Use a more aggressive timeout: max 2 minutes per URL regardless of settings
+                # This prevents one slow URL from blocking everything
+                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + 30, 120)  # Max 2 minutes per URL
                 
                 try:
                     # Wrap scraping in a timeout to prevent infinite hangs
@@ -1930,15 +1930,117 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
         ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback)) for i in range(concurrency)]
 
-    await url_queue.join()
+    # CRITICAL: Add timeout wrapper around url_queue.join() to prevent infinite hangs
+    # Use a more aggressive timeout: max 2 minutes per URL (much more reasonable)
+    max_queue_time = min((timeout * (retries + 1) * (depth + 1) * 2 * total) + (30 * total), 120 * total)  # Max 2 min per URL
+    
+    # Track completed count
+    completed_count = [0]  # Use list to allow modification in nested function
+    
+    async def force_completion_on_stall():
+        """Force completion if queue is stuck"""
+        start_time = time.time()
+        last_size = total
+        while True:
+            await asyncio.sleep(10)  # Check every 10 seconds
+            current_size = url_queue.qsize()
+            elapsed = time.time() - start_time
+            
+            # If queue size hasn't changed in 60 seconds and there are still items, force complete
+            if current_size == last_size and current_size > 0 and elapsed > 60:
+                print(f"⚠️ Detected stall: {total - current_size}/{total} completed, {current_size} remaining. Forcing completion...")
+                # Drain remaining URLs and mark as timeout errors
+                drained = 0
+                while not url_queue.empty() and drained < current_size:
+                    try:
+                        item = url_queue.get_nowait()
+                        if item and item != (None, None):
+                            if isinstance(item, tuple):
+                                url, idx = item
+                            else:
+                                url = item
+                            error_result = (url, f"❌ Timeout: Processing exceeded time limit (stall detected)", "")
+                            await result_queue.put(error_result)
+                            url_queue.task_done()
+                            drained += 1
+                    except Exception as e:
+                        print(f"Error draining queue: {e}")
+                        break
+                break
+            
+            # If queue is empty, we're done
+            if current_size == 0:
+                break
+            
+            last_size = current_size
+    
+    stall_monitor = asyncio.create_task(force_completion_on_stall())
+    
+    try:
+        # Wait for queue to complete, but with a timeout
+        await asyncio.wait_for(url_queue.join(), timeout=max_queue_time)
+    except asyncio.TimeoutError:
+        # Queue join timed out - force completion
+        print(f"⚠️ Queue join timed out after {max_queue_time}s. Forcing completion...")
+        # Drain remaining URLs
+        drained = 0
+        while not url_queue.empty() and drained < 1000:  # Safety limit
+            try:
+                item = url_queue.get_nowait()
+                if item and item != (None, None):
+                    if isinstance(item, tuple):
+                        url, idx = item
+                    else:
+                        url = item
+                    error_result = (url, f"❌ Timeout: Processing exceeded {max_queue_time}s limit", "")
+                    await result_queue.put(error_result)
+                    url_queue.task_done()
+                    drained += 1
+            except Exception as e:
+                print(f"Error draining queue: {e}")
+                break
+    
+    # Cancel stall monitor
+    stall_monitor.cancel()
+    try:
+        await stall_monitor
+    except (asyncio.CancelledError, Exception):
+        pass
 
+    # Signal workers to stop
     for _ in workers:
-        await url_queue.put(None)
-    await asyncio.gather(*workers)
+        try:
+            await url_queue.put(None)
+        except:
+            pass
+    
+    # Wait for workers to finish (with timeout)
+    try:
+        await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=30)
+    except asyncio.TimeoutError:
+        # Force cancel if still hanging
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
 
-    await result_queue.put(None)
-    await result_queue.join()
-    await writer_task
+    # Signal writer to stop
+    try:
+        await result_queue.put(None)
+    except:
+        pass
+    
+    # Wait for result queue to drain (with timeout)
+    try:
+        await asyncio.wait_for(result_queue.join(), timeout=60)
+    except asyncio.TimeoutError:
+        print("⚠️ Result queue join timed out. Proceeding anyway...")
+    
+    # Wait for writer to finish (with timeout)
+    try:
+        await asyncio.wait_for(writer_task, timeout=30)
+    except asyncio.TimeoutError:
+        print("⚠️ Writer task timed out. Proceeding anyway...")
+        writer_task.cancel()
 
     await session.close()
 
