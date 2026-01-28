@@ -5,6 +5,7 @@ A high-performance asynchronous web scraper built with Python, aiohttp, asyncio,
 ## ✨ Features
 
 - ⚡ **Async scraping** with configurable concurrency (handle 50k+ URLs efficiently)
+- 🤖 **AI-Powered Company Summaries** (OpenAI & Gemini support) - Generate intelligent company summaries in parallel
 - 🧹 **HTML cleanup** (removes tags, scripts, headers, footers)
 - 🔗 **Keyword-based link following** (about, service, product pages)
 - 📊 **Batch processing** - Split output into multiple CSV files (e.g. 2000 rows each)
@@ -13,8 +14,10 @@ A high-performance asynchronous web scraper built with Python, aiohttp, asyncio,
   - Real-time progress bar with fun status messages + ETA
   - Customizable output folder names
   - Automatic ZIP file generation
+  - AI summary generation (optional)
 - 🛡️ **Error handling** with retry logic
 - ⚙️ **Highly configurable** - Adjust all parameters via UI
+- 📈 **Excel & Google Sheets compatible** - Perfect formatting, no errors
 
 ## 📥 Input Format
 
