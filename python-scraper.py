@@ -1100,9 +1100,56 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             else:
                 ai_summary = ""  # Empty if AI not enabled
         
+        # PERFECT CSV CLEANING - Zero tolerance for formatting errors
+        def clean_csv_field(field_value):
+            """
+            Perfect CSV field cleaning:
+            - Removes all newlines, carriage returns, tabs
+            - Removes null bytes and control characters
+            - Normalizes whitespace
+            - Ensures valid UTF-8 encoding
+            - Returns empty string for None/invalid values
+            """
+            if field_value is None:
+                return ""
+            
+            # Convert to string
+            field_str = str(field_value)
+            
+            # Remove null bytes and control characters (except space, tab)
+            # Keep only printable characters and whitespace
+            import re
+            # Remove null bytes
+            field_str = field_str.replace('\x00', '')
+            # Replace all newlines, carriage returns, form feeds, vertical tabs with space
+            field_str = re.sub(r'[\n\r\f\v]', ' ', field_str)
+            # Replace tabs with space
+            field_str = field_str.replace('\t', ' ')
+            # Remove other control characters (0x00-0x1F except space)
+            field_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', field_str)
+            
+            # Normalize whitespace: collapse multiple spaces/tabs into single space
+            field_str = re.sub(r'\s+', ' ', field_str)
+            
+            # Strip leading/trailing whitespace
+            field_str = field_str.strip()
+            
+            # Ensure valid UTF-8 encoding (replace invalid sequences)
+            try:
+                field_str = field_str.encode('utf-8', errors='replace').decode('utf-8')
+            except:
+                field_str = ""
+            
+            return field_str
+        
+        # Clean all fields perfectly
+        cleaned_url = clean_csv_field(original_url)
+        cleaned_scraped_text = clean_csv_field(scraped_text)
+        cleaned_ai_summary = clean_csv_field(ai_summary)
+        
         # Output format: (url, scraped_text, ai_summary)
         # Use original_url to maintain consistency with input CSV
-        out = (original_url, scraped_text, ai_summary)
+        out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
         await result_queue.put(out)
         url_queue.task_done()
 
@@ -1131,18 +1178,104 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             buffer = buffer[rows_per_file:]
             
             try:
-                # Determine columns based on data structure (2 or 3 columns)
-                if len(chunk_rows[0]) == 3:
-                    df = pd.DataFrame(chunk_rows, columns=["Website", "ScrapedText", "CompanySummary"])
-                else:
-                    df = pd.DataFrame(chunk_rows, columns=["Website", "ScrapedText"])
+                # Filter out empty rows before creating DataFrame
+                filtered_rows = []
+                for row in chunk_rows:
+                    if len(row) >= 2:
+                        url = str(row[0]).strip() if row[0] else ""
+                        scraped_text = str(row[1]).strip() if row[1] else ""
+                        # Only include rows with valid URL and scraped text
+                        if url and scraped_text and len(scraped_text) > 0:
+                            filtered_rows.append(row)
                 
-                # Save CSV with Excel/Google Sheets compatibility (optimized for large files)
+                if not filtered_rows:
+                    # Skip writing if no valid rows
+                    continue
+                
+                # Determine columns based on data structure (2 or 3 columns)
+                if len(filtered_rows[0]) == 3:
+                    df = pd.DataFrame(filtered_rows, columns=["Website", "ScrapedText", "CompanySummary"])
+                else:
+                    df = pd.DataFrame(filtered_rows, columns=["Website", "ScrapedText"])
+                
+                # PERFECT CSV CLEANING - Clean all DataFrame columns before writing
+                def clean_dataframe_for_csv(df):
+                    """Clean all string columns in DataFrame for perfect CSV formatting"""
+                    import re
+                    for col in df.columns:
+                        # Convert to string, handle None/NaN
+                        df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                        # Remove null bytes
+                        df[col] = df[col].str.replace('\x00', '', regex=False)
+                        # Replace newlines, carriage returns, tabs with space
+                        df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                        # Remove other control characters
+                        df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                        # Normalize whitespace
+                        df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                        # Strip whitespace
+                        df[col] = df[col].str.strip()
+                        # Replace empty strings with empty string (not NaN)
+                        df[col] = df[col].replace('', '')
+                    return df
+                
+                # Clean DataFrame
+                df = clean_dataframe_for_csv(df.copy())
+                
+                # Remove any remaining empty rows from DataFrame
+                df = df.dropna(subset=["Website", "ScrapedText"], how="all")
+                df = df[df["Website"].astype(str).str.strip() != ""]
+                df = df[df["ScrapedText"].astype(str).str.strip() != ""]
+                
+                if len(df) == 0:
+                    # Skip writing if DataFrame is empty after filtering
+                    continue
+                
+                # PERFECT CSV WRITING - Zero tolerance for errors
                 csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
-                # Use UTF-8 with BOM for Excel compatibility
-                df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                          quoting=csv.QUOTE_MINIMAL, escapechar='\\', lineterminator="\n",
-                          chunksize=1000 if len(df) > 5000 else None)  # Chunk large writes
+                
+                # Write CSV with perfect formatting:
+                # - UTF-8 with BOM for Excel compatibility
+                # - QUOTE_ALL: All fields quoted to handle commas, quotes, special chars
+                # - lineterminator='\n': Standard Unix line endings
+                # - doublequote=True: Escape quotes by doubling them (CSV standard)
+                try:
+                    df.to_csv(csv_path, index=False, encoding="utf-8-sig",
+                              quoting=csv.QUOTE_ALL, 
+                              lineterminator="\n",
+                              doublequote=True,
+                              escapechar=None,
+                              chunksize=1000 if len(df) > 5000 else None)
+                    
+                    # VALIDATION: Verify CSV file is valid by reading it back
+                    try:
+                        test_df = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
+                        # Check row count matches
+                        if len(test_df) != len(df):
+                            raise ValueError(f"CSV validation failed: row count mismatch")
+                        # Check column count matches
+                        if len(test_df.columns) != len(df.columns):
+                            raise ValueError(f"CSV validation failed: column count mismatch")
+                    except Exception as e:
+                        # If validation fails, rewrite with manual CSV writer for maximum control
+                        import logging
+                        logging.warning(f"CSV validation warning: {e}. Rewriting with manual writer...")
+                        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
+                            # Write header
+                            writer.writerow(df.columns.tolist())
+                            # Write rows
+                            for _, row in df.iterrows():
+                                writer.writerow([str(val) if pd.notna(val) else '' for val in row])
+                except Exception as e:
+                    # Final fallback: manual CSV writing
+                    import logging
+                    logging.error(f"CSV write failed: {e}. Using manual writer...")
+                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
+                        writer.writerow(df.columns.tolist())
+                        for _, row in df.iterrows():
+                            writer.writerow([str(val) if pd.notna(val) else '' for val in row])
                 
                 # Save Excel file (optimized for large files)
                 excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
@@ -1174,65 +1307,105 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     import logging
                     logging.warning(f"Excel export failed for part {part}: {e}")
             except Exception as e:
-                # If Excel fails for large file, at least save CSV
+                # If Excel fails for large file, at least save CSV with perfect formatting
                 try:
+                    # Clean DataFrame first
+                    def clean_dataframe_for_csv(df):
+                        import re
+                        for col in df.columns:
+                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                            df[col] = df[col].str.replace('\x00', '', regex=False)
+                            df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                            df[col] = df[col].str.strip()
+                            df[col] = df[col].replace('', '')
+                        return df
+                    df = clean_dataframe_for_csv(df.copy())
+                    
                     df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                              quoting=csv.QUOTE_MINIMAL, escapechar='\\', lineterminator="\n")
+                              quoting=csv.QUOTE_ALL, 
+                              lineterminator="\n",
+                              doublequote=True,
+                              escapechar=None)
                 except:
-                    pass
+                    # Ultimate fallback: manual writer
+                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
+                        writer.writerow(df.columns.tolist())
+                        for _, row in df.iterrows():
+                            writer.writerow([str(val) if pd.notna(val) else '' for val in row])
 
         result_queue.task_done()
 
     # Write remaining buffer
     if buffer:
-        part += 1
-        try:
-            # Determine columns based on data structure
-            if len(buffer[0]) == 3:
-                df = pd.DataFrame(buffer, columns=["Website", "ScrapedText", "CompanySummary"])
-            else:
-                df = pd.DataFrame(buffer, columns=["Website", "ScrapedText"])
-            
-            # Save CSV with Excel/Google Sheets compatibility
-            csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
-            df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                      quoting=csv.QUOTE_MINIMAL, escapechar='\\', lineterminator="\n")
-            
-            # Save Excel file (optimized for large files)
-            excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
+        # Filter out empty rows before creating DataFrame
+        filtered_buffer = []
+        for row in buffer:
+            if len(row) >= 2:
+                url = str(row[0]).strip() if row[0] else ""
+                scraped_text = str(row[1]).strip() if row[1] else ""
+                # Only include rows with valid URL and scraped text
+                if url and scraped_text and len(scraped_text) > 0:
+                    filtered_buffer.append(row)
+        
+        if filtered_buffer:
+            part += 1
             try:
-                if len(df) > 10000:
-                    from openpyxl import Workbook
-                    wb = Workbook(write_only=True)
-                    ws = wb.create_sheet()
-                    # Determine columns
-                    if "CompanySummary" in df.columns:
-                        ws.append(["Website", "ScrapedText", "CompanySummary"])
-                        for _, row in df.iterrows():
-                            website = str(row["Website"])[:255]
-                            text = str(row["ScrapedText"])[:32767]
-                            summary = str(row["CompanySummary"])[:32767]
-                            ws.append([website, text, summary])
-                    else:
-                        ws.append(["Website", "ScrapedText"])
-                        for _, row in df.iterrows():
-                            website = str(row["Website"])[:255]
-                            text = str(row["ScrapedText"])[:32767]
-                            ws.append([website, text])
-                    wb.save(excel_path)
+                # Determine columns based on data structure
+                if len(filtered_buffer[0]) == 3:
+                    df = pd.DataFrame(filtered_buffer, columns=["Website", "ScrapedText", "CompanySummary"])
                 else:
-                    df.to_excel(excel_path, index=False, engine='openpyxl')
+                    df = pd.DataFrame(filtered_buffer, columns=["Website", "ScrapedText"])
+                
+                # Remove any remaining empty rows from DataFrame
+                df = df.dropna(subset=["Website", "ScrapedText"], how="all")
+                df = df[df["Website"].astype(str).str.strip() != ""]
+                df = df[df["ScrapedText"].astype(str).str.strip() != ""]
+                
+                if len(df) == 0:
+                    # Skip writing if DataFrame is empty after filtering
+                    pass
+                else:
+                    # Save CSV with Excel/Google Sheets compatibility
+                    csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
+                    # QUOTE_ALL ensures all fields are quoted, preventing issues with commas and newlines
+                    df.to_csv(csv_path, index=False, encoding="utf-8-sig",
+                              quoting=csv.QUOTE_ALL, lineterminator="\n")
+                    
+                    # Save Excel file (optimized for large files)
+                    excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
+                    try:
+                        if len(df) > 10000:
+                            from openpyxl import Workbook
+                            wb = Workbook(write_only=True)
+                            ws = wb.create_sheet()
+                            # Determine columns
+                            if "CompanySummary" in df.columns:
+                                ws.append(["Website", "ScrapedText", "CompanySummary"])
+                                for _, row in df.iterrows():
+                                    website = str(row["Website"])[:255]
+                                    text = str(row["ScrapedText"])[:32767]
+                                    summary = str(row["CompanySummary"])[:32767]
+                                    ws.append([website, text, summary])
+                            else:
+                                ws.append(["Website", "ScrapedText"])
+                                for _, row in df.iterrows():
+                                    website = str(row["Website"])[:255]
+                                    text = str(row["ScrapedText"])[:32767]
+                                    ws.append([website, text])
+                            wb.save(excel_path)
+                        else:
+                            df.to_excel(excel_path, index=False, engine='openpyxl')
+                    except Exception as e:
+                        # If Excel fails, log but continue (CSV is more important)
+                        import logging
+                        logging.warning(f"Excel export failed for part {part}: {e}")
             except Exception as e:
-                # If Excel fails, log but continue (CSV is more important)
+                # If writing fails, log error
                 import logging
-                logging.warning(f"Excel export failed for part {part}: {e}")
-        except Exception as e:
-            # If Excel fails, at least save CSV
-            try:
-                df.to_csv(csv_path, index=False, encoding="utf-8-sig",
-                          quoting=csv.QUOTE_MINIMAL, escapechar='\\', lineterminator="\n")
-            except:
-                pass
+                logging.warning(f"Failed to write output part {part}: {e}")
 
 # -------------------------
 # Runner
@@ -1980,6 +2153,23 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 zf.write(file_path, arcname=f)
                 excel_files.append(f)
     
+    # Store file paths and data in session_state for persistence across reruns
+    st.session_state['scraping_complete'] = True
+    st.session_state['output_dir'] = output_dir
+    st.session_state['run_folder'] = run_folder
+    st.session_state['zip_path'] = zip_path
+    st.session_state['zip_name'] = zip_name
+    st.session_state['csv_files'] = csv_files
+    st.session_state['excel_files'] = excel_files
+    st.session_state['total_processed'] = total
+    
+    # Read ZIP file data and store in session_state
+    try:
+        with open(zip_path, 'rb') as f:
+            st.session_state['zip_data'] = f.read()
+    except Exception as e:
+        st.session_state['zip_data'] = None
+    
     # Success message with download options
     st.success(f"✅ Scraping finished! Processed {total:,} website(s).")
     
@@ -1994,14 +2184,32 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     
     with col_dl1:
         st.subheader("📦 All Files (ZIP)")
-        with open(zip_path, 'rb') as f:
+        zip_data = st.session_state.get('zip_data')
+        if zip_data:
             st.download_button(
                 label="⬇️ Download ZIP Archive",
-                data=f.read(),
+                data=zip_data,
                 file_name=zip_name,
                 mime="application/zip",
-                help="Download all CSV and Excel files in a ZIP archive"
+                help="Download all CSV and Excel files in a ZIP archive",
+                key="download_zip"
             )
+        else:
+            # Fallback: read from file if not in session_state
+            try:
+                with open(zip_path, 'rb') as f:
+                    zip_data = f.read()
+                    st.session_state['zip_data'] = zip_data
+                    st.download_button(
+                        label="⬇️ Download ZIP Archive",
+                        data=zip_data,
+                        file_name=zip_name,
+                        mime="application/zip",
+                        help="Download all CSV and Excel files in a ZIP archive",
+                        key="download_zip_fallback"
+                    )
+            except Exception as e:
+                st.error(f"Could not read ZIP file: {e}")
         st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
     
     with col_dl2:
@@ -2020,13 +2228,19 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     excel_buffer = BytesIO()
                     combined_df.to_excel(excel_buffer, index=False, engine='openpyxl')
                     excel_buffer.seek(0)
+                    excel_data = excel_buffer.read()
+                    
+                    # Store in session_state for persistence
+                    st.session_state['combined_excel_data'] = excel_data
+                    st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
                     
                     st.download_button(
                         label="⬇️ Download Combined Excel",
-                        data=excel_buffer.read(),
+                        data=excel_data,
                         file_name=f"{run_folder}_combined.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="Download all data in a single Excel file"
+                        help="Download all data in a single Excel file",
+                        key="download_excel"
                     )
                     st.caption(f"{len(combined_df)} total rows")
             except Exception as e:
@@ -2048,22 +2262,45 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 if all_data:
                     combined_df = pd.concat(all_data, ignore_index=True)
                     csv_buffer = BytesIO()
-                    combined_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+                    # PERFECT CSV CLEANING for combined CSV
+                    def clean_dataframe_for_csv(df):
+                        """Clean all string columns in DataFrame for perfect CSV formatting"""
+                        import re
+                        for col in df.columns:
+                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                            df[col] = df[col].str.replace('\x00', '', regex=False)
+                            df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                            df[col] = df[col].str.strip()
+                            df[col] = df[col].replace('', '')
+                        return df
+                    combined_df = clean_dataframe_for_csv(combined_df.copy())
+                    
+                    # PERFECT CSV WRITING with all safety measures
+                    combined_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig', 
+                                      quoting=csv.QUOTE_ALL, 
+                                      lineterminator="\n",
+                                      doublequote=True,
+                                      escapechar=None)
                     csv_buffer.seek(0)
                     
                     csv_data = csv_buffer.getvalue()
+                    
+                    # Store for Google Sheets section and persistence
+                    st.session_state['combined_csv_data'] = csv_data
+                    st.session_state['combined_df'] = combined_df
+                    st.session_state['combined_csv_filename'] = f"{run_folder}_combined.csv"
+                    
                     st.download_button(
                         label="⬇️ Download Combined CSV",
                         data=csv_data,
                         file_name=f"{run_folder}_combined.csv",
                         mime="text/csv",
-                        help="Download all data in a single CSV file (Excel/Google Sheets compatible)"
+                        help="Download all data in a single CSV file (Excel/Google Sheets compatible)",
+                        key="download_csv"
                     )
                     st.caption(f"{len(combined_df)} total rows")
-                    
-                    # Store for Google Sheets section
-                    st.session_state['combined_csv_data'] = csv_data
-                    st.session_state['combined_df'] = combined_df
             except Exception as e:
                 st.warning(f"Could not create combined CSV: {e}")
         else:
@@ -2147,3 +2384,187 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         st.write(f"**Location:** `{output_dir}`")
     
     st.info("💡 **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
+    
+    # Store max_chars info for display
+    st.session_state['max_chars_info'] = max_chars
+
+# Show download section even after rerun (if scraping was completed)
+if st.session_state.get('scraping_complete', False):
+    # Retrieve data from session_state
+    output_dir = st.session_state.get('output_dir')
+    run_folder = st.session_state.get('run_folder')
+    zip_path = st.session_state.get('zip_path')
+    zip_name = st.session_state.get('zip_name')
+    csv_files = st.session_state.get('csv_files', [])
+    excel_files = st.session_state.get('excel_files', [])
+    total = st.session_state.get('total_processed', 0)
+    max_chars = st.session_state.get('max_chars_info', 50000)
+    
+    st.success(f"✅ Scraping completed! Processed {total:,} website(s).")
+    
+    if total > 0:
+        st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
+    
+    # Download section (persistent)
+    st.header("📥 Download Results")
+    
+    col_dl1, col_dl2, col_dl3 = st.columns(3)
+    
+    with col_dl1:
+        st.subheader("📦 All Files (ZIP)")
+        zip_data = st.session_state.get('zip_data')
+        if zip_data:
+            st.download_button(
+                label="⬇️ Download ZIP Archive",
+                data=zip_data,
+                file_name=zip_name,
+                mime="application/zip",
+                help="Download all CSV and Excel files in a ZIP archive",
+                key="download_zip_persistent"
+            )
+        else:
+            # Fallback: read from file
+            try:
+                if zip_path and os.path.exists(zip_path):
+                    with open(zip_path, 'rb') as f:
+                        zip_data = f.read()
+                        st.session_state['zip_data'] = zip_data
+                        st.download_button(
+                            label="⬇️ Download ZIP Archive",
+                            data=zip_data,
+                            file_name=zip_name,
+                            mime="application/zip",
+                            help="Download all CSV and Excel files in a ZIP archive",
+                            key="download_zip_persistent2"
+                        )
+                else:
+                    st.info("ZIP file not available")
+            except Exception as e:
+                st.error(f"Could not read ZIP file: {e}")
+        st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
+    
+    with col_dl2:
+        st.subheader("📊 Excel Files")
+        excel_data = st.session_state.get('combined_excel_data')
+        excel_filename = st.session_state.get('combined_excel_filename')
+        combined_df = st.session_state.get('combined_df')
+        
+        if excel_data and excel_filename:
+            st.download_button(
+                label="⬇️ Download Combined Excel",
+                data=excel_data,
+                file_name=excel_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Download all data in a single Excel file",
+                key="download_excel_persistent"
+            )
+            if combined_df is not None:
+                st.caption(f"{len(combined_df)} total rows")
+        elif excel_files:
+            st.info("Click 'Start Scraping' again to generate Excel file")
+        else:
+            st.info("No Excel files generated")
+    
+    with col_dl3:
+        st.subheader("📄 CSV Files")
+        csv_data = st.session_state.get('combined_csv_data')
+        csv_filename = st.session_state.get('combined_csv_filename')
+        combined_df = st.session_state.get('combined_df')
+        
+        if csv_data and csv_filename:
+            st.download_button(
+                label="⬇️ Download Combined CSV",
+                data=csv_data,
+                file_name=csv_filename,
+                mime="text/csv",
+                help="Download all data in a single CSV file (Excel/Google Sheets compatible)",
+                key="download_csv_persistent"
+            )
+            if combined_df is not None:
+                st.caption(f"{len(combined_df)} total rows")
+        elif csv_files:
+            st.info("Click 'Start Scraping' again to generate CSV file")
+        else:
+            st.info("No CSV files generated")
+    
+    # Google Sheets section (persistent)
+    st.markdown("---")
+    st.subheader("📊 Import to Google Sheets")
+    
+    if csv_files and combined_df is not None:
+        col_gs1, col_gs2 = st.columns(2)
+        
+        with col_gs1:
+            st.markdown("""
+            **🚀 Quick Import Method:**
+            
+            1. **Download the CSV file** (button above)
+            2. Go to [sheets.google.com](https://sheets.google.com)
+            3. Click **File → Import**
+            4. Choose **Upload** tab
+            5. Select your downloaded CSV file
+            6. Click **Import data**
+            
+            ✅ **Done!** Your data is now in Google Sheets.
+            """)
+        
+        with col_gs2:
+            st.markdown(f"""
+            **💡 Alternative Methods:**
+            
+            **Method 2: Drag & Drop**
+            - Download CSV
+            - Open Google Sheets
+            - Drag CSV file into the sheet
+            
+            **Method 3: Copy-Paste** (for small datasets)
+            - Open CSV in a text editor
+            - Copy all content
+            - Paste into Google Sheets
+            
+            **📊 Your Data:**
+            - **Rows:** {len(combined_df):,}
+            - **Format:** UTF-8 CSV (perfect for Google Sheets)
+            - **Compatibility:** ✅ 100% compatible
+            """)
+        
+        # Show file size info
+        if len(combined_df) > 10000:
+            st.warning(f"⚠️ **Large dataset ({len(combined_df):,} rows).** Use File → Import method for best results.")
+        elif len(combined_df) > 5000:
+            st.info(f"ℹ️ Dataset has {len(combined_df):,} rows. File → Import is recommended.")
+        else:
+            st.success(f"✅ Dataset ready ({len(combined_df):,} rows). Any import method will work!")
+        
+        # Direct links
+        st.markdown("---")
+        col_link1, col_link2 = st.columns(2)
+        with col_link1:
+            st.markdown(f"[🔗 Create New Google Sheet](https://sheets.google.com/create) - Opens in new tab")
+        with col_link2:
+            st.markdown(f"[📤 Upload to Google Drive](https://drive.google.com/drive/my-drive) - Then import to Sheets")
+    else:
+        st.info("💡 Download the combined CSV file above, then use the import instructions to add it to Google Sheets.")
+    
+    # File list
+    with st.expander("📋 View Generated Files", expanded=False):
+        st.write("**CSV Files:**")
+        for f in sorted(csv_files):
+            st.code(f, language=None)
+        st.write("**Excel Files:**")
+        for f in sorted(excel_files):
+            st.code(f, language=None)
+        if output_dir:
+            st.write(f"**Location:** `{output_dir}`")
+    
+    st.info("💡 **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
+    
+    # Option to clear results
+    if st.button("🗑️ Clear Results", help="Clear download buttons and start fresh", key="clear_results"):
+        st.session_state['scraping_complete'] = False
+        st.session_state.pop('output_dir', None)
+        st.session_state.pop('zip_data', None)
+        st.session_state.pop('combined_csv_data', None)
+        st.session_state.pop('combined_excel_data', None)
+        st.session_state.pop('combined_df', None)
+        st.rerun()
