@@ -1584,14 +1584,25 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
 
 async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, output_dir: str,
                            total_urls: int, progress_callback):
-    os.makedirs(output_dir, exist_ok=True)
+    # CRITICAL: Create output directory first
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"📁 Writer: Created output directory: {output_dir}")
+    except Exception as e:
+        print(f"❌ Writer: Failed to create output directory: {e}")
+        import traceback
+        traceback.print_exc()
+        return  # Exit if we can't create directory
+    
     buffer = []
     part = 0
     processed = 0
+    files_written = []
 
     while True:
         item = await result_queue.get()
         if item is None:
+            print(f"📝 Writer: Received None sentinel. Processed {processed}/{total_urls} items. Buffer has {len(buffer)} items.")
             result_queue.task_done()
             break
         buffer.append(item)
@@ -1706,12 +1717,19 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                                     # Convert to string and ensure it's properly formatted
                                     val_str = str(val)
                                     # Remove any embedded newlines that might break CSV
+                                    import re
                                     val_str = val_str.replace('\n', ' ').replace('\r', ' ')
                                     # Collapse multiple spaces
-                                    import re
                                     val_str = re.sub(r'\s+', ' ', val_str).strip()
                                     row_values.append(val_str)
                             writer.writerow(row_values)
+                    
+                    # Verify file was written
+                    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                        files_written.append(csv_path)
+                        print(f"✅ Writer: Successfully wrote CSV file: {csv_path} ({len(df)} rows)")
+                    else:
+                        print(f"❌ Writer: CSV file was not created or is empty: {csv_path}")
                     
                     # VALIDATION: Verify CSV file is valid by reading it back
                     try:
@@ -1892,14 +1910,28 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             wb.save(excel_path)
                         else:
                             df.to_excel(excel_path, index=False, engine='openpyxl')
+                        
+                        # Verify Excel file was written
+                        if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
+                            files_written.append(excel_path)
+                            print(f"✅ Writer: Successfully wrote Excel file: {excel_path} ({len(df)} rows)")
+                        else:
+                            print(f"❌ Writer: Excel file was not created or is empty: {excel_path}")
                     except Exception as e:
                         # If Excel fails, log but continue (CSV is more important)
-                        import logging
-                        logging.warning(f"Excel export failed for part {part}: {e}")
+                        print(f"⚠️ Writer: Excel export failed for part {part}: {e}")
+                        import traceback
+                        traceback.print_exc()
             except Exception as e:
                 # If writing fails, log error
-                import logging
-                logging.warning(f"Failed to write output part {part}: {e}")
+                print(f"❌ Writer: Failed to write output part {part}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Final summary
+    print(f"📊 Writer: Finished. Wrote {len(files_written)} files total.")
+    if files_written:
+        print(f"📁 Writer: Files written: {', '.join([os.path.basename(f) for f in files_written])}")
 
 # -------------------------
 # Runner
@@ -2037,12 +2069,18 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     
     # Wait for writer to finish (with timeout)
     try:
-        await asyncio.wait_for(writer_task, timeout=30)
+        await asyncio.wait_for(writer_task, timeout=120)  # Give writer more time to finish
     except asyncio.TimeoutError:
         print("⚠️ Writer task timed out. Proceeding anyway...")
         writer_task.cancel()
+    except Exception as e:
+        print(f"⚠️ Error waiting for writer: {e}")
 
     await session.close()
+    
+    # CRITICAL: Give files time to be fully written to disk
+    import time
+    await asyncio.sleep(2)  # Wait 2 seconds for file system to sync
 
 # -------------------------
 # Streamlit UI
@@ -2748,15 +2786,57 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     csv_files = []
     excel_files = []
     
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for f in os.listdir(output_dir):
-            file_path = os.path.join(output_dir, f)
-            if f.endswith(".csv"):
-                zf.write(file_path, arcname=f)
-                csv_files.append(f)
-            elif f.endswith(".xlsx"):
-                zf.write(file_path, arcname=f)
-                excel_files.append(f)
+    # CRITICAL: Wait a moment for files to be fully written to disk
+    import time
+    time.sleep(1)
+    
+    # List files in output directory
+    try:
+        output_files = os.listdir(output_dir)
+        st.info(f"📁 Found {len(output_files)} files in output directory: {', '.join(output_files[:5])}{'...' if len(output_files) > 5 else ''}")
+    except Exception as e:
+        st.error(f"❌ Error listing output directory: {e}")
+        output_files = []
+    
+    # Create ZIP file
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for f in output_files:
+                file_path = os.path.join(output_dir, f)
+                if os.path.isfile(file_path):  # Only process files, not directories
+                    if f.endswith(".csv") and f != zip_name:
+                        try:
+                            zf.write(file_path, arcname=f)
+                            csv_files.append(f)
+                        except Exception as e:
+                            st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
+                    elif f.endswith(".xlsx") and f != zip_name:
+                        try:
+                            zf.write(file_path, arcname=f)
+                            excel_files.append(f)
+                        except Exception as e:
+                            st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
+    except Exception as e:
+        st.error(f"❌ Error creating ZIP file: {e}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
+    
+    # CRITICAL: Verify files were actually created before proceeding
+    if not csv_files and not excel_files:
+        st.error("⚠️ **WARNING: No CSV or Excel files were generated!**")
+        st.error("This might indicate that the writer coroutine failed or no data was processed.")
+        st.info("Check the output directory for any error messages or partial files.")
+        # Try to list what's actually in the directory
+        try:
+            actual_files = os.listdir(output_dir)
+            if actual_files:
+                st.info(f"Files found in output directory: {', '.join(actual_files)}")
+            else:
+                st.warning("Output directory is empty!")
+        except Exception as e:
+            st.error(f"Could not list output directory: {e}")
+    else:
+        st.success(f"✅ Scraping finished! Processed {total:,} website(s). Generated {len(csv_files)} CSV file(s) and {len(excel_files)} Excel file(s).")
     
     # Store file paths and data in session_state for persistence across reruns
     st.session_state['scraping_complete'] = True
@@ -2770,13 +2850,15 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     
     # Read ZIP file data and store in session_state
     try:
-        with open(zip_path, 'rb') as f:
-            st.session_state['zip_data'] = f.read()
+        if os.path.exists(zip_path):
+            with open(zip_path, 'rb') as f:
+                st.session_state['zip_data'] = f.read()
+        else:
+            st.warning(f"⚠️ ZIP file not found at {zip_path}")
+            st.session_state['zip_data'] = None
     except Exception as e:
+        st.error(f"❌ Error reading ZIP file: {e}")
         st.session_state['zip_data'] = None
-    
-    # Success message with download options
-    st.success(f"✅ Scraping finished! Processed {total:,} website(s).")
     
     # Show accuracy info for max_chars
     if total > 0:
@@ -2825,25 +2907,52 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 all_data = []
                 for excel_file in sorted(excel_files):
                     excel_path = os.path.join(output_dir, excel_file)
-                    df_part = pd.read_excel(excel_path, engine='openpyxl')
-                    
-                    # Normalize column structure: ensure all DataFrames have same columns
-                    # Standard columns: Website, ScrapedText, CompanySummary
-                    if "CompanySummary" not in df_part.columns:
-                        df_part["CompanySummary"] = ""
-                    
-                    # Ensure correct column order
-                    if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
-                        if "CompanySummary" in df_part.columns:
-                            df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                    try:
+                        # Check if file exists and has content
+                        if not os.path.exists(excel_path):
+                            st.warning(f"⚠️ Excel file not found: {excel_file}")
+                            continue
+                        
+                        if os.path.getsize(excel_path) == 0:
+                            st.warning(f"⚠️ Excel file is empty: {excel_file}")
+                            continue
+                        
+                        df_part = pd.read_excel(excel_path, engine='openpyxl')
+                        
+                        # Check if DataFrame is empty
+                        if df_part.empty:
+                            st.warning(f"⚠️ Excel file {excel_file} contains no data")
+                            continue
+                        
+                        # Normalize column structure: ensure all DataFrames have same columns
+                        # Standard columns: Website, ScrapedText, CompanySummary
+                        if "CompanySummary" not in df_part.columns:
+                            df_part["CompanySummary"] = ""
+                        
+                        # Ensure correct column order
+                        if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
+                            if "CompanySummary" in df_part.columns:
+                                df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                            else:
+                                df_part = df_part[["Website", "ScrapedText"]]
                         else:
-                            df_part = df_part[["Website", "ScrapedText"]]
-                    
-                    # Remove any extra columns that might cause issues
-                    expected_cols = ["Website", "ScrapedText", "CompanySummary"]
-                    df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
-                    
-                    all_data.append(df_part)
+                            st.warning(f"⚠️ Excel file {excel_file} missing required columns (Website, ScrapedText)")
+                            continue
+                        
+                        # Remove any extra columns that might cause issues
+                        expected_cols = ["Website", "ScrapedText", "CompanySummary"]
+                        df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
+                        
+                        # Only add if DataFrame has rows
+                        if len(df_part) > 0:
+                            all_data.append(df_part)
+                        else:
+                            st.warning(f"⚠️ Excel file {excel_file} has no valid rows after processing")
+                    except Exception as e:
+                        st.warning(f"⚠️ Error reading Excel file {excel_file}: {e}")
+                        import traceback
+                        st.error(f"Traceback: {traceback.format_exc()}")
+                        continue
                 
                 if all_data:
                     combined_df = pd.concat(all_data, ignore_index=True)
@@ -2899,26 +3008,53 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 all_data = []
                 for csv_file in sorted(csv_files):
                     csv_path = os.path.join(output_dir, csv_file)
-                    # Read CSV with proper quoting handling
-                    df_part = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
-                    
-                    # Normalize column structure: ensure all DataFrames have same columns
-                    # Standard columns: Website, ScrapedText, CompanySummary
-                    if "CompanySummary" not in df_part.columns:
-                        df_part["CompanySummary"] = ""
-                    
-                    # Ensure correct column order
-                    if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
-                        if "CompanySummary" in df_part.columns:
-                            df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                    try:
+                        # Check if file exists and has content
+                        if not os.path.exists(csv_path):
+                            st.warning(f"⚠️ CSV file not found: {csv_file}")
+                            continue
+                        
+                        if os.path.getsize(csv_path) == 0:
+                            st.warning(f"⚠️ CSV file is empty: {csv_file}")
+                            continue
+                        
+                        # Read CSV with proper quoting handling
+                        df_part = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
+                        
+                        # Check if DataFrame is empty
+                        if df_part.empty:
+                            st.warning(f"⚠️ CSV file {csv_file} contains no data")
+                            continue
+                        
+                        # Normalize column structure: ensure all DataFrames have same columns
+                        # Standard columns: Website, ScrapedText, CompanySummary
+                        if "CompanySummary" not in df_part.columns:
+                            df_part["CompanySummary"] = ""
+                        
+                        # Ensure correct column order
+                        if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
+                            if "CompanySummary" in df_part.columns:
+                                df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                            else:
+                                df_part = df_part[["Website", "ScrapedText"]]
                         else:
-                            df_part = df_part[["Website", "ScrapedText"]]
-                    
-                    # Remove any extra columns that might cause issues
-                    expected_cols = ["Website", "ScrapedText", "CompanySummary"]
-                    df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
-                    
-                    all_data.append(df_part)
+                            st.warning(f"⚠️ CSV file {csv_file} missing required columns (Website, ScrapedText)")
+                            continue
+                        
+                        # Remove any extra columns that might cause issues
+                        expected_cols = ["Website", "ScrapedText", "CompanySummary"]
+                        df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
+                        
+                        # Only add if DataFrame has rows
+                        if len(df_part) > 0:
+                            all_data.append(df_part)
+                        else:
+                            st.warning(f"⚠️ CSV file {csv_file} has no valid rows after processing")
+                    except Exception as e:
+                        st.warning(f"⚠️ Error reading CSV file {csv_file}: {e}")
+                        import traceback
+                        st.error(f"Traceback: {traceback.format_exc()}")
+                        continue
                 
                 if all_data:
                     combined_df = pd.concat(all_data, ignore_index=True)
