@@ -10,6 +10,20 @@ from html import unescape
 import streamlit as st
 from datetime import datetime
 from io import BytesIO
+import json
+
+# AI imports (optional - only if API keys provided)
+try:
+    from openai import AsyncOpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 
 # -------------------------
 # Utilities
@@ -93,6 +107,154 @@ def match_keyword_in_url(keyword: str, url: str) -> bool:
             return True
     
     return False
+
+
+# -------------------------
+# AI Summary Generation
+# -------------------------
+
+def build_company_summary_prompt(base_prompt: str, lead_data: dict, scraped_content: str) -> str:
+    """
+    Build the complete prompt for AI company summary generation.
+    
+    Args:
+        base_prompt: User-provided base prompt (with placeholders)
+        lead_data: Dictionary with lead information (URL, company name, etc.)
+        scraped_content: Scraped website content
+    
+    Returns:
+        Complete prompt string ready for AI
+    """
+    # Default prompt structure if user doesn't provide one
+    default_base = """Analyze the following company website content and generate a comprehensive company summary.
+
+LEAD INFORMATION:
+- Website URL: {url}
+- Company Name: {company_name}
+
+WEBSITE CONTENT:
+{scraped_content}
+
+Please provide:
+1. **Company Overview**: What does this company do? (2-3 sentences)
+2. **Industry**: What industry/sector does this company operate in?
+3. **Products/Services**: List the main products or services offered
+4. **Key Facts**: Important facts extracted from the website content
+5. **Target Market**: Who is their target audience/customers?
+6. **Five Inferences/Hypotheses**: Generate 5 strategic inferences or hypotheses about this company based on the content
+
+Format your response clearly with sections."""
+    
+    # Use user prompt if provided, otherwise use default
+    prompt_template = base_prompt if base_prompt.strip() else default_base
+    
+    # Replace placeholders
+    company_name = lead_data.get('company_name', lead_data.get('url', 'Unknown'))
+    url = lead_data.get('url', 'N/A')
+    
+    prompt = prompt_template.format(
+        url=url,
+        company_name=company_name,
+        scraped_content=scraped_content[:15000]  # Limit content to avoid token limits
+    )
+    
+    return prompt
+
+
+async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 3) -> str:
+    """Generate company summary using OpenAI API."""
+    if not OPENAI_AVAILABLE:
+        return "❌ OpenAI library not installed. Install with: pip install openai"
+    
+    client = AsyncOpenAI(api_key=api_key)
+    
+    for attempt in range(max_retries):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are an expert business analyst specializing in company research and analysis."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return f"❌ OpenAI API Error: {str(e)}"
+            await asyncio.sleep(1 + attempt)
+
+
+async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_retries: int = 3) -> str:
+    """Generate company summary using Google Gemini API."""
+    if not GEMINI_AVAILABLE:
+        return "❌ Gemini library not installed. Install with: pip install google-generativeai"
+    
+    try:
+        genai.configure(api_key=api_key)
+    except Exception as e:
+        return f"❌ Gemini API Configuration Error: {str(e)}"
+    
+    for attempt in range(max_retries):
+        try:
+            gemini_model = genai.GenerativeModel(model)
+            # Run in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: gemini_model.generate_content(prompt)
+            )
+            if hasattr(response, 'text'):
+                return response.text.strip()
+            else:
+                return f"❌ Gemini API returned unexpected response format"
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return f"❌ Gemini API Error: {str(e)}"
+            await asyncio.sleep(1 + attempt)
+    
+    return "❌ Gemini API failed after retries"
+
+
+async def generate_ai_summary(
+    api_key: str,
+    provider: str,
+    model: str,
+    prompt: str,
+    lead_data: dict,
+    scraped_content: str
+) -> str:
+    """
+    Generate AI summary for a company.
+    
+    Args:
+        api_key: API key for the AI provider
+        provider: 'openai' or 'gemini'
+        model: Model name (e.g., 'gpt-4', 'gemini-pro')
+        prompt: Base prompt template
+        lead_data: Lead information dictionary
+        scraped_content: Scraped website content
+    
+    Returns:
+        Generated summary string
+    """
+    if not api_key or not api_key.strip():
+        return "❌ No API key provided"
+    
+    if not scraped_content or scraped_content.startswith("❌"):
+        return "❌ No valid scraped content available"
+    
+    # Build complete prompt
+    full_prompt = build_company_summary_prompt(prompt, lead_data, scraped_content)
+    
+    # Generate summary based on provider
+    if provider.lower() == 'openai':
+        return await generate_openai_summary(api_key, model, full_prompt)
+    elif provider.lower() == 'gemini':
+        return await generate_gemini_summary(api_key, model, full_prompt)
+    else:
+        return f"❌ Unknown provider: {provider}"
 
 
 def cleanup_html(html: str) -> str:
@@ -242,7 +404,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 
 
 async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue: asyncio.Queue,
-                           depth, keywords, max_chars, retries, timeout):
+                           depth, keywords, max_chars, retries, timeout,
+                           ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None):
     while True:
         url = await url_queue.get()
         if url is None:
@@ -254,10 +417,27 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
         
         # Validate normalized URL
         if not normalized_url or not normalized_url.startswith(("http://", "https://")):
-            out = (original_url, "❌ Invalid URL")
+            scraped_text = "❌ Invalid URL"
+            ai_summary = "❌ Invalid URL"
         else:
-            # Use original URL for display, normalized for scraping
-            out = (original_url, await scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout))
+            # Scrape the website
+            scraped_text = await scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout)
+            
+            # Generate AI summary if enabled
+            if ai_enabled and ai_api_key and ai_provider and ai_model:
+                lead_data = {
+                    'url': original_url,
+                    'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
+                }
+                ai_summary = await generate_ai_summary(
+                    ai_api_key, ai_provider, ai_model, ai_prompt or "",
+                    lead_data, scraped_text
+                )
+            else:
+                ai_summary = ""  # Empty if AI not enabled
+        
+        # Output format: (url, scraped_text, ai_summary)
+        out = (original_url, scraped_text, ai_summary)
         await result_queue.put(out)
         url_queue.task_done()
 
@@ -286,7 +466,11 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             buffer = buffer[rows_per_file:]
             
             try:
-                df = pd.DataFrame(chunk_rows, columns=["Website", "ScrapedText"])
+                # Determine columns based on data structure (2 or 3 columns)
+                if len(chunk_rows[0]) == 3:
+                    df = pd.DataFrame(chunk_rows, columns=["Website", "ScrapedText", "CompanySummary"])
+                else:
+                    df = pd.DataFrame(chunk_rows, columns=["Website", "ScrapedText"])
                 
                 # Save CSV with Excel/Google Sheets compatibility (optimized for large files)
                 csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
@@ -303,12 +487,20 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         from openpyxl import Workbook
                         wb = Workbook(write_only=True)
                         ws = wb.create_sheet()
-                        ws.append(["Website", "ScrapedText"])
-                        for _, row in df.iterrows():
-                            # Truncate very long text to prevent Excel errors
-                            website = str(row["Website"])[:255]  # Excel cell limit
-                            text = str(row["ScrapedText"])[:32767]  # Excel cell limit
-                            ws.append([website, text])
+                        # Determine columns
+                        if "CompanySummary" in df.columns:
+                            ws.append(["Website", "ScrapedText", "CompanySummary"])
+                            for _, row in df.iterrows():
+                                website = str(row["Website"])[:255]
+                                text = str(row["ScrapedText"])[:32767]
+                                summary = str(row["CompanySummary"])[:32767]
+                                ws.append([website, text, summary])
+                        else:
+                            ws.append(["Website", "ScrapedText"])
+                            for _, row in df.iterrows():
+                                website = str(row["Website"])[:255]
+                                text = str(row["ScrapedText"])[:32767]
+                                ws.append([website, text])
                         wb.save(excel_path)
                     else:
                         df.to_excel(excel_path, index=False, engine='openpyxl')
@@ -330,7 +522,11 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     if buffer:
         part += 1
         try:
-            df = pd.DataFrame(buffer, columns=["Website", "ScrapedText"])
+            # Determine columns based on data structure
+            if len(buffer[0]) == 3:
+                df = pd.DataFrame(buffer, columns=["Website", "ScrapedText", "CompanySummary"])
+            else:
+                df = pd.DataFrame(buffer, columns=["Website", "ScrapedText"])
             
             # Save CSV with Excel/Google Sheets compatibility
             csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
@@ -344,12 +540,20 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     from openpyxl import Workbook
                     wb = Workbook(write_only=True)
                     ws = wb.create_sheet()
-                    ws.append(["Website", "ScrapedText"])
-                    for _, row in df.iterrows():
-                        # Truncate very long text to prevent Excel errors
-                        website = str(row["Website"])[:255]  # Excel cell limit
-                        text = str(row["ScrapedText"])[:32767]  # Excel cell limit
-                        ws.append([website, text])
+                    # Determine columns
+                    if "CompanySummary" in df.columns:
+                        ws.append(["Website", "ScrapedText", "CompanySummary"])
+                        for _, row in df.iterrows():
+                            website = str(row["Website"])[:255]
+                            text = str(row["ScrapedText"])[:32767]
+                            summary = str(row["CompanySummary"])[:32767]
+                            ws.append([website, text, summary])
+                    else:
+                        ws.append(["Website", "ScrapedText"])
+                        for _, row in df.iterrows():
+                            website = str(row["Website"])[:255]
+                            text = str(row["ScrapedText"])[:32767]
+                            ws.append([website, text])
                     wb.save(excel_path)
                 else:
                     df.to_excel(excel_path, index=False, engine='openpyxl')
@@ -371,7 +575,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
 
 
 async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
-                      user_agent, rows_per_file, output_dir, progress_callback):
+                      user_agent, rows_per_file, output_dir, progress_callback,
+                      ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None):
     url_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
     total = len(urls)
@@ -388,7 +593,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         result_queue, rows_per_file, output_dir, total, progress_callback))
 
     workers = [asyncio.create_task(worker_coroutine(
-        f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout)) for i in range(concurrency)]
+        f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
+        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt)) for i in range(concurrency)]
 
     await url_queue.join()
 
@@ -618,6 +824,97 @@ with col2:
         help="Browser identifier sent to websites. Default works for most cases."
     )
 
+# AI Summary Section
+st.header("🤖 AI Company Summary (Optional)")
+ai_enabled = st.checkbox(
+    "Enable AI-powered company summary generation",
+    value=False,
+    help="Generate AI summaries for each company using OpenAI or Gemini"
+)
+
+ai_api_key = None
+ai_provider = None
+ai_model = None
+ai_prompt = None
+
+if ai_enabled:
+    col_ai1, col_ai2 = st.columns(2)
+    
+    with col_ai1:
+        ai_provider = st.selectbox(
+            "AI Provider",
+            ["OpenAI", "Gemini"],
+            help="Choose OpenAI (GPT models) or Google Gemini"
+        )
+        
+        ai_api_key = st.text_input(
+            f"{ai_provider} API Key",
+            type="password",
+            help=f"Enter your {ai_provider} API key. Get one at: OpenAI (platform.openai.com) or Gemini (makersuite.google.com/app/apikey)"
+        )
+        
+        # Model selection based on provider
+        if ai_provider == "OpenAI":
+            ai_model = st.selectbox(
+                "Model",
+                ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+                index=0,
+                help="OpenAI model. gpt-4o-mini is fastest/cheapest, gpt-4o is most capable."
+            )
+        else:  # Gemini
+            ai_model = st.selectbox(
+                "Model",
+                ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
+                index=1,
+                help="Gemini model. Flash is fastest, Pro is most capable."
+            )
+    
+    with col_ai2:
+        with st.expander("📝 Custom Prompt (Optional)", expanded=False):
+            st.markdown("""
+            **Customize the AI prompt for company summaries.**
+            
+            **Available placeholders:**
+            - `{url}` - Website URL
+            - `{company_name}` - Company name (extracted from URL)
+            - `{scraped_content}` - Scraped website content
+            
+            **Leave empty to use default prompt** (recommended for most cases).
+            """)
+        
+        default_prompt = """Analyze the following company website content and generate a comprehensive company summary.
+
+LEAD INFORMATION:
+- Website URL: {url}
+- Company Name: {company_name}
+
+WEBSITE CONTENT:
+{scraped_content}
+
+Please provide:
+1. **Company Overview**: What does this company do? (2-3 sentences)
+2. **Industry**: What industry/sector does this company operate in?
+3. **Products/Services**: List the main products or services offered
+4. **Key Facts**: Important facts extracted from the website content
+5. **Target Market**: Who is their target audience/customers?
+6. **Five Inferences/Hypotheses**: Generate 5 strategic inferences or hypotheses about this company based on the content
+
+Format your response clearly with sections."""
+        
+        ai_prompt = st.text_area(
+            "Custom Prompt (optional)",
+            value="",
+            height=200,
+            help="Leave empty for default prompt, or customize with placeholders: {url}, {company_name}, {scraped_content}"
+        )
+        
+        if not ai_prompt.strip():
+            ai_prompt = default_prompt
+    
+    if not ai_api_key or not ai_api_key.strip():
+        st.warning("⚠️ Please enter your API key to enable AI summaries.")
+        ai_enabled = False
+
 # Output folder name
 st.header("📂 Output Settings")
 with st.expander("📁 Output Folder Name - Optional", expanded=False):
@@ -717,7 +1014,8 @@ if uploaded_file and st.button("🚀 Start Scraping"):
                 asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(
             run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
-                        user_agent, rows_per_file, output_dir, progress_cb)
+                        user_agent, rows_per_file, output_dir, progress_cb,
+                        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt)
         )
 
     # Zip all parts at the end with custom name (CSV and Excel files)
