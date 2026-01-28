@@ -242,24 +242,53 @@ Format your response clearly with sections."""
 
 
 async def fetch_openai_models(api_key: str) -> list:
-    """Fetch available OpenAI models from API."""
+    """Fetch ALL available OpenAI models from API in real-time."""
     if not OPENAI_AVAILABLE:
         return ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]  # Fallback
     
     try:
         client = AsyncOpenAI(api_key=api_key)
-        models = await client.models.list()
-        # Filter for chat models and sort by name
-        chat_models = [
-            model.id for model in models.data 
-            if 'gpt' in model.id.lower() and ('chat' in model.id.lower() or 'gpt-4' in model.id or 'gpt-3.5' in model.id)
-        ]
+        models_response = await client.models.list()
+        
+        # Get ALL GPT models (chat completion capable)
+        all_models = [model.id for model in models_response.data]
+        
+        # Filter for GPT models - Get ALL GPT models that can be used for chat completions
+        # Only exclude: embeddings, deprecated models, and base/completion models (ada, babbage, curie, davinci)
+        # Include ALL GPT models including variants like gpt-4o, gpt-4-turbo, gpt-3.5-turbo, gpt-4o-mini, etc.
+        # IMPORTANT: Include ALL GPT models, don't filter by 'chat' or 'instruct' as those are valid chat models
+        gpt_models = []
+        skip_patterns = ['embedding', 'ada', 'babbage', 'curie', 'davinci', 'deprecated']
+        
+        for model_id in all_models:
+            model_lower = model_id.lower()
+            # Include if it's a GPT model
+            if 'gpt' in model_lower:
+                # Skip only if it's clearly an embedding or base model (not chat models)
+                # Include ALL GPT models including instruct, turbo, o, etc.
+                if not any(skip in model_lower for skip in skip_patterns):
+                    gpt_models.append(model_id)
+        
+        # Debug: Log how many models we found (remove in production)
+        # print(f"Found {len(gpt_models)} GPT models: {gpt_models[:10]}...")
+        
         # Remove duplicates and sort
-        unique_models = sorted(list(set(chat_models)), reverse=True)
-        # Prioritize common models
-        priority_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
-        ordered = [m for m in priority_models if m in unique_models]
-        ordered.extend([m for m in unique_models if m not in ordered])
+        unique_models = sorted(list(set(gpt_models)), reverse=True)
+        
+        # Prioritize common/recommended models at the top
+        priority_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+        ordered = []
+        
+        # Add priority models first (if they exist)
+        for pm in priority_models:
+            if pm in unique_models:
+                ordered.append(pm)
+        
+        # Add ALL remaining models (not just filtered ones)
+        for model in unique_models:
+            if model not in ordered:
+                ordered.append(model)
+        
         return ordered if ordered else priority_models
     except Exception as e:
         # Return fallback models on error
@@ -1301,13 +1330,14 @@ with tab2:
             st.caption(f"✅ {len(keywords)} keyword(s)")
         
         # Concurrency - Simplified
+        # Note: When using key= parameter, Streamlit manages session_state automatically
         concurrency = st.slider(
             "Concurrency (workers)", 
             1, 50, st.session_state.get('concurrency', 20),
             help="Parallel workers (20-30 recommended)",
             key="concurrency"
         )
-        st.session_state['concurrency'] = concurrency
+        # Don't manually set - Streamlit handles it via key=
         
         # Retries - Simplified
         retries = st.number_input(
@@ -1316,7 +1346,7 @@ with tab2:
             help="Retries for failed requests",
             key="retries"
         )
-        st.session_state['retries'] = retries
+        # Don't manually set - Streamlit handles it via key=
         
         # Depth - Simplified
         depth = st.slider(
@@ -1325,7 +1355,7 @@ with tab2:
             help="Link depth (2-3 recommended)",
             key="depth"
         )
-        st.session_state['depth'] = depth
+        # Don't manually set - Streamlit handles it via key=
     
     with col2:
         st.markdown("#### ⏱️ Performance")
@@ -1337,7 +1367,7 @@ with tab2:
             help="Request timeout",
             key="timeout"
         )
-        st.session_state['timeout'] = timeout
+        # Don't manually set - Streamlit handles it via key=
         
         # Max chars - Simplified
         max_chars = st.number_input(
@@ -1347,7 +1377,7 @@ with tab2:
             help="Character limit per website",
             key="max_chars"
         )
-        st.session_state['max_chars'] = max_chars
+        # Don't manually set - Streamlit handles it via key=
         
         # Rows per file - Simplified
         rows_per_file = st.number_input(
@@ -1356,7 +1386,7 @@ with tab2:
             help="Rows before splitting files",
             key="rows_per_file"
         )
-        st.session_state['rows_per_file'] = rows_per_file
+        # Don't manually set - Streamlit handles it via key=
         
         # User Agent - Simplified
         user_agent = st.text_input(
@@ -1365,7 +1395,7 @@ with tab2:
             help="Browser identifier",
             key="user_agent"
         )
-        st.session_state['user_agent'] = user_agent
+        # Don't manually set - Streamlit handles it via key=
     
     # Detailed explanations in collapsed expander
     with st.expander("ℹ️ Detailed Help", expanded=False):
@@ -1391,8 +1421,9 @@ with tab2:
     
     run_name = st.text_input(
         "Output folder name (optional)", 
-        value="",
-        help="Custom name for output folder. Leave empty for auto-generated."
+        value=st.session_state.get('run_name', ""),
+        help="Custom name for output folder. Leave empty for auto-generated.",
+        key="run_name"
     )
 
 with tab3:
@@ -1415,8 +1446,10 @@ with tab3:
             ai_provider = st.selectbox(
                 "AI Provider",
                 ["OpenAI", "Gemini"],
-                help="Choose OpenAI or Gemini"
+                help="Choose OpenAI or Gemini",
+                key="ai_provider_select"
             )
+            st.session_state['ai_provider'] = ai_provider
             
             # API Key - Simplified
             api_key_key = f"{ai_provider.lower()}_api_key"
@@ -1483,10 +1516,14 @@ with tab3:
                         "Model",
                         options=cached_models,
                         index=default_index,
-                        help=f"Select {ai_provider} model"
+                        help=f"Select {ai_provider} model - Showing ALL available models from API",
+                        key=f"{ai_provider}_model_select"
                     )
+                    # Store in session_state for use in scraping
+                    st.session_state['ai_model'] = ai_model
+                    st.session_state['ai_provider'] = ai_provider
                     
-                    st.caption(f"📋 {len(cached_models)} model(s) available")
+                    st.caption(f"📋 {len(cached_models)} model(s) available - All GPT models fetched from API")
                     
                     with st.expander(f"View All Models", expanded=False):
                         for i, model in enumerate(cached_models, 1):
@@ -1588,6 +1625,7 @@ Format your response clearly with sections."""
             else:
                 ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
             
+            # Store prompt in session_state (not managed by widget key)
             st.session_state['ai_prompt'] = ai_prompt
             
             with st.expander("Preview Prompt", expanded=False):
