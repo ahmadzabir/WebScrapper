@@ -1703,25 +1703,47 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 try:
                     # CRITICAL: Use manual CSV writer to ensure ALL fields are properly quoted
                     # pandas to_csv sometimes doesn't quote correctly, causing data to split across columns
+                    # CRITICAL: Ensure column order is correct before writing
+                    if "CompanySummary" not in df.columns:
+                        df["CompanySummary"] = ""
+                    df = df[["Website", "ScrapedText", "CompanySummary"]]
+                    
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                         writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                        # Write header
-                        writer.writerow(df.columns.tolist())
+                        # Write header - ALWAYS 3 columns in exact order
+                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
                         # Write rows - ensure all values are strings and properly cleaned
-                        for _, row in df.iterrows():
+                        # CRITICAL: Extract by column name to ensure correct order
+                        for idx, row in df.iterrows():
                             row_values = []
-                            for val in row:
-                                if pd.isna(val):
-                                    row_values.append('')
-                                else:
-                                    # Convert to string and ensure it's properly formatted
-                                    val_str = str(val)
-                                    # Remove any embedded newlines that might break CSV
-                                    import re
-                                    val_str = val_str.replace('\n', ' ').replace('\r', ' ')
-                                    # Collapse multiple spaces
-                                    val_str = re.sub(r'\s+', ' ', val_str).strip()
-                                    row_values.append(val_str)
+                            
+                            # Extract values by column name (not position) to ensure correct order
+                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                            
+                            # Clean each value
+                            def clean_val(v):
+                                if not v:
+                                    return ""
+                                import re
+                                v = v.replace('\x00', '')
+                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
+                                v = re.sub(r'\s+', ' ', v).strip()
+                                return v
+                            
+                            # Add values in correct order: Website, ScrapedText, CompanySummary
+                            row_values.append(clean_val(website))
+                            row_values.append(clean_val(scraped_text))
+                            row_values.append(clean_val(company_summary))
+                            
+                            # Verify exactly 3 values
+                            if len(row_values) != 3:
+                                while len(row_values) < 3:
+                                    row_values.append("")
+                                row_values = row_values[:3]
+                            
                             writer.writerow(row_values)
                     
                     # Verify file was written
@@ -1873,20 +1895,49 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 else:
                     # Save CSV with Excel/Google Sheets compatibility
                     csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
+                    
+                    # CRITICAL: Ensure column order is correct before writing
+                    if "CompanySummary" not in df.columns:
+                        df["CompanySummary"] = ""
+                    df = df[["Website", "ScrapedText", "CompanySummary"]]
+                    
                     # Use manual CSV writer for perfect quoting
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                         writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                        writer.writerow(df.columns.tolist())
-                        for _, row in df.iterrows():
+                        # Write header - ALWAYS 3 columns in exact order
+                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                        
+                        # Write rows - extract by column name to ensure correct order
+                        for idx, row in df.iterrows():
                             row_values = []
-                            for val in row:
-                                if pd.isna(val):
-                                    row_values.append('')
-                                else:
-                                    val_str = str(val).replace('\n', ' ').replace('\r', ' ')
-                                    import re
-                                    val_str = re.sub(r'\s+', ' ', val_str).strip()
-                                    row_values.append(val_str)
+                            
+                            # Extract values by column name (not position) to ensure correct order
+                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                            
+                            # Clean each value
+                            def clean_val(v):
+                                if not v:
+                                    return ""
+                                import re
+                                v = v.replace('\x00', '')
+                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
+                                v = re.sub(r'\s+', ' ', v).strip()
+                                return v
+                            
+                            # Add values in correct order: Website, ScrapedText, CompanySummary
+                            row_values.append(clean_val(website))
+                            row_values.append(clean_val(scraped_text))
+                            row_values.append(clean_val(company_summary))
+                            
+                            # Verify exactly 3 values
+                            if len(row_values) != 3:
+                                while len(row_values) < 3:
+                                    row_values.append("")
+                                row_values = row_values[:3]
+                            
                             writer.writerow(row_values)
                     
                     # Save Excel file (optimized for large files)
@@ -3002,6 +3053,87 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         combined_df["CompanySummary"] = ""
                     combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
                     
+                    # CRITICAL: Read from CSV files using csv.reader (not pandas) for perfect compatibility
+                    # This ensures we read exactly what we wrote, avoiding pandas parsing issues
+                    csv_all_data = []
+                    for csv_file in sorted(csv_files):
+                        csv_path = os.path.join(output_dir, csv_file)
+                        try:
+                            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                                rows_data = []
+                                with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                                    csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
+                                    header = next(csv_reader, None)
+                                    if not header:
+                                        continue
+                                    
+                                    # Map header to column indices
+                                    col_indices = {}
+                                    for idx, h in enumerate(header):
+                                        h_clean = str(h).strip().strip('"').strip("'").lower()
+                                        if 'website' in h_clean or h_clean == 'url':
+                                            col_indices['Website'] = idx
+                                        elif 'scraped' in h_clean and 'text' in h_clean:
+                                            col_indices['ScrapedText'] = idx
+                                        elif 'company' in h_clean and 'summary' in h_clean:
+                                            col_indices['CompanySummary'] = idx
+                                        elif 'summary' in h_clean:
+                                            col_indices['CompanySummary'] = idx
+                                    
+                                    # Fallback to position if mapping failed
+                                    if 'Website' not in col_indices:
+                                        col_indices['Website'] = 0
+                                    if 'ScrapedText' not in col_indices:
+                                        col_indices['ScrapedText'] = 1
+                                    if 'CompanySummary' not in col_indices:
+                                        col_indices['CompanySummary'] = 2
+                                    
+                                    # Read rows
+                                    for row in csv_reader:
+                                        if len(row) == 0:
+                                            continue
+                                        website = row[col_indices['Website']] if col_indices['Website'] < len(row) else ""
+                                        scraped_text = row[col_indices['ScrapedText']] if col_indices['ScrapedText'] < len(row) else ""
+                                        company_summary = row[col_indices['CompanySummary']] if col_indices['CompanySummary'] < len(row) else ""
+                                        
+                                        # Clean and strip quotes
+                                        website = str(website).strip().strip('"').strip("'") if website else ""
+                                        scraped_text = str(scraped_text).strip().strip('"').strip("'") if scraped_text else ""
+                                        company_summary = str(company_summary).strip().strip('"').strip("'") if company_summary else ""
+                                        
+                                        if website:  # Only add rows with URLs
+                                            rows_data.append({
+                                                'Website': website,
+                                                'ScrapedText': scraped_text,
+                                                'CompanySummary': company_summary
+                                            })
+                                
+                                if rows_data:
+                                    df_csv = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
+                                    csv_all_data.append(df_csv)
+                        except Exception as e:
+                            st.warning(f"⚠️ Error reading CSV {csv_file} for Excel: {e}")
+                            import traceback
+                            st.error(f"Traceback: {traceback.format_exc()}")
+                            continue
+                    
+                    # Use CSV data (read with csv.reader) - this is the source of truth
+                    if csv_all_data:
+                        combined_df = pd.concat(csv_all_data, ignore_index=True)
+                        # Ensure structure
+                        if "CompanySummary" not in combined_df.columns:
+                            combined_df["CompanySummary"] = ""
+                        combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    elif all_data:
+                        # Fallback to Excel data if CSV reading failed
+                        combined_df = pd.concat(all_data, ignore_index=True)
+                        if "CompanySummary" not in combined_df.columns:
+                            combined_df["CompanySummary"] = ""
+                        combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    else:
+                        st.error("❌ No data available to combine")
+                        raise ValueError("No data available to combine for Excel file")
+                    
                     # Clean the combined DataFrame
                     def clean_dataframe_for_excel(df):
                         """Clean all string columns in DataFrame for Excel"""
@@ -3014,8 +3146,28 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         return df
                     combined_df = clean_dataframe_for_excel(combined_df.copy())
                     
+                    # CRITICAL: Use openpyxl directly to write with explicit headers to avoid corruption
+                    from openpyxl import Workbook
                     excel_buffer = BytesIO()
-                    combined_df.to_excel(excel_buffer, index=False, engine='openpyxl')
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.title = "Scraped Data"
+                    
+                    # Write headers explicitly
+                    ws.append(["Website", "ScrapedText", "CompanySummary"])
+                    
+                    # Write data rows
+                    for _, row in combined_df.iterrows():
+                        website = str(row["Website"]) if pd.notna(row["Website"]) else ""
+                        text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
+                        summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
+                        # Truncate to Excel limits
+                        website = website[:255]
+                        text = text[:32767]
+                        summary = summary[:32767]
+                        ws.append([website, text, summary])
+                    
+                    wb.save(excel_buffer)
                     excel_buffer.seek(0)
                     excel_data = excel_buffer.read()
                     
@@ -3058,32 +3210,72 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             st.warning(f"⚠️ CSV file is empty: {csv_file}")
                             continue
                         
-                        # Read CSV with proper quoting handling
-                        df_part = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
+                        # CRITICAL: Read CSV using Python's csv.reader (not pandas) for perfect round-trip compatibility
+                        # pandas read_csv can misinterpret CSV files even with QUOTE_ALL
+                        rows_data = []
+                        with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                            csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
+                            header = next(csv_reader, None)
+                            if not header:
+                                st.warning(f"⚠️ CSV file {csv_file} has no header")
+                                continue
+                            
+                            # Normalize header - handle any variations
+                            header_normalized = []
+                            for h in header:
+                                h_clean = str(h).strip().strip('"').strip("'")
+                                header_normalized.append(h_clean)
+                            
+                            # Map header to standard columns
+                            col_indices = {}
+                            for idx, h in enumerate(header_normalized):
+                                h_lower = h.lower()
+                                if 'website' in h_lower or h_lower == 'url':
+                                    col_indices['Website'] = idx
+                                elif 'scraped' in h_lower and 'text' in h_lower:
+                                    col_indices['ScrapedText'] = idx
+                                elif 'company' in h_lower and 'summary' in h_lower:
+                                    col_indices['CompanySummary'] = idx
+                                elif 'summary' in h_lower:
+                                    col_indices['CompanySummary'] = idx
+                            
+                            # If we couldn't map by name, use position (first 3 columns)
+                            if 'Website' not in col_indices and len(header_normalized) >= 1:
+                                col_indices['Website'] = 0
+                            if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
+                                col_indices['ScrapedText'] = 1
+                            if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
+                                col_indices['CompanySummary'] = 2
+                            
+                            # Read all rows
+                            for row in csv_reader:
+                                if len(row) == 0:
+                                    continue
+                                
+                                # Extract values by column index, pad if needed
+                                website = row[col_indices.get('Website', 0)] if col_indices.get('Website', 0) < len(row) else ""
+                                scraped_text = row[col_indices.get('ScrapedText', 1)] if col_indices.get('ScrapedText', 1) < len(row) else ""
+                                company_summary = row[col_indices.get('CompanySummary', 2)] if col_indices.get('CompanySummary', 2) < len(row) else ""
+                                
+                                # Clean values
+                                website = str(website).strip().strip('"').strip("'") if website else ""
+                                scraped_text = str(scraped_text).strip().strip('"').strip("'") if scraped_text else ""
+                                company_summary = str(company_summary).strip().strip('"').strip("'") if company_summary else ""
+                                
+                                # Only add rows with valid URLs
+                                if website:
+                                    rows_data.append({
+                                        'Website': website,
+                                        'ScrapedText': scraped_text,
+                                        'CompanySummary': company_summary
+                                    })
                         
-                        # Check if DataFrame is empty
-                        if df_part.empty:
-                            st.warning(f"⚠️ CSV file {csv_file} contains no data")
+                        if not rows_data:
+                            st.warning(f"⚠️ CSV file {csv_file} contains no valid data rows")
                             continue
                         
-                        # Normalize column structure: ensure all DataFrames have same columns
-                        # Standard columns: Website, ScrapedText, CompanySummary
-                        if "CompanySummary" not in df_part.columns:
-                            df_part["CompanySummary"] = ""
-                        
-                        # Ensure correct column order
-                        if "Website" in df_part.columns and "ScrapedText" in df_part.columns:
-                            if "CompanySummary" in df_part.columns:
-                                df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
-                            else:
-                                df_part = df_part[["Website", "ScrapedText"]]
-                        else:
-                            st.warning(f"⚠️ CSV file {csv_file} missing required columns (Website, ScrapedText)")
-                            continue
-                        
-                        # Remove any extra columns that might cause issues
-                        expected_cols = ["Website", "ScrapedText", "CompanySummary"]
-                        df_part = df_part[[col for col in expected_cols if col in df_part.columns]]
+                        # Create DataFrame from clean data
+                        df_part = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
                         
                         # Only add if DataFrame has rows
                         if len(df_part) > 0:
@@ -3120,31 +3312,97 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     combined_df = clean_dataframe_for_csv(combined_df.copy())
                     
                     # PERFECT CSV WRITING with manual writer for absolute control
+                    # CRITICAL: Ensure DataFrame has exactly 3 columns in correct order
+                    if "CompanySummary" not in combined_df.columns:
+                        combined_df["CompanySummary"] = ""
+                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    
                     # Use StringIO for text-based CSV writing, then encode to bytes
                     csv_buffer = StringIO()
                     csv_writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                    # Write header - ALWAYS 3 columns
+                    
+                    # Write header - ALWAYS 3 columns in exact order
                     csv_writer.writerow(["Website", "ScrapedText", "CompanySummary"])
-                    # Write rows - ensure exactly 3 values per row
-                    for _, row in combined_df.iterrows():
+                    
+                    # Write rows - ensure exactly 3 values per row in correct order
+                    for idx, row in combined_df.iterrows():
                         row_values = []
-                        # Always extract exactly 3 values in correct order
-                        website = str(row["Website"]) if "Website" in row and pd.notna(row["Website"]) else ""
-                        scraped_text = str(row["ScrapedText"]) if "ScrapedText" in row and pd.notna(row["ScrapedText"]) else ""
-                        company_summary = str(row["CompanySummary"]) if "CompanySummary" in row and pd.notna(row["CompanySummary"]) else ""
                         
-                        # Clean each value
-                        for val in [website, scraped_text, company_summary]:
-                            val_str = val.replace('\n', ' ').replace('\r', ' ')
+                        # CRITICAL: Extract values by column name, not position, to ensure correct order
+                        # Always extract exactly 3 values in correct order: Website, ScrapedText, CompanySummary
+                        website = ""
+                        scraped_text = ""
+                        company_summary = ""
+                        
+                        # Extract Website
+                        if "Website" in combined_df.columns:
+                            val = row["Website"]
+                            website = "" if pd.isna(val) else str(val)
+                        
+                        # Extract ScrapedText
+                        if "ScrapedText" in combined_df.columns:
+                            val = row["ScrapedText"]
+                            scraped_text = "" if pd.isna(val) else str(val)
+                        
+                        # Extract CompanySummary
+                        if "CompanySummary" in combined_df.columns:
+                            val = row["CompanySummary"]
+                            company_summary = "" if pd.isna(val) else str(val)
+                        
+                        # Clean each value to prevent CSV formatting issues
+                        def clean_csv_value(val_str):
+                            """Clean a single CSV value"""
+                            if not val_str:
+                                return ""
                             import re
-                            val_str = re.sub(r'\s+', ' ', val_str).strip()
-                            row_values.append(val_str)
+                            # Remove null bytes
+                            val_str = val_str.replace('\x00', '')
+                            # Replace newlines/carriage returns with space
+                            val_str = val_str.replace('\n', ' ').replace('\r', ' ')
+                            # Replace tabs with space
+                            val_str = val_str.replace('\t', ' ')
+                            # Remove other control characters
+                            val_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', val_str)
+                            # Collapse multiple spaces
+                            val_str = re.sub(r'\s+', ' ', val_str)
+                            # Strip whitespace
+                            val_str = val_str.strip()
+                            return val_str
+                        
+                        # Clean and add values in correct order
+                        row_values.append(clean_csv_value(website))
+                        row_values.append(clean_csv_value(scraped_text))
+                        row_values.append(clean_csv_value(company_summary))
+                        
+                        # CRITICAL: Verify we have exactly 3 values
+                        if len(row_values) != 3:
+                            # Fallback: pad or truncate to exactly 3
+                            while len(row_values) < 3:
+                                row_values.append("")
+                            row_values = row_values[:3]
                         
                         csv_writer.writerow(row_values)
+                    
                     csv_buffer.seek(0)
                     
                     # Get string content and encode to bytes with UTF-8 BOM for Excel compatibility
                     csv_data = csv_buffer.getvalue().encode('utf-8-sig')
+                    
+                    # CRITICAL: Validate the CSV by reading it back
+                    try:
+                        csv_buffer.seek(0)
+                        test_reader = csv.reader(csv_buffer, quoting=csv.QUOTE_ALL)
+                        test_rows = list(test_reader)
+                        if len(test_rows) > 0:
+                            # Check header
+                            if test_rows[0] != ["Website", "ScrapedText", "CompanySummary"]:
+                                st.warning(f"⚠️ CSV header validation failed. Expected 3 columns, got: {test_rows[0]}")
+                            # Check all rows have 3 columns
+                            for i, test_row in enumerate(test_rows[1:], start=2):
+                                if len(test_row) != 3:
+                                    st.warning(f"⚠️ CSV row {i} has {len(test_row)} columns instead of 3")
+                    except Exception as e:
+                        st.warning(f"⚠️ CSV validation error: {e}")
                     
                     # Store for Google Sheets section and persistence
                     st.session_state['combined_csv_data'] = csv_data
