@@ -1,0 +1,25 @@
+﻿Header: ['Website', 'ScrapedText', 'CompanySummary']
+
+Success Row 1:
+  Website: https://80thoreau.com
+  ScrapedText length: 6129
+  ScrapedText preview: ================================================================================ PAGE: https://www.80thoreau.com/ ====================================
+  CompanySummary length: 2292
+  CompanySummary preview: ===SUMMARY=== 80thoreau.com offers a range of services focused on digital marketing, including SEO, content marketing, and social media management. They target small to medium-sized businesses looking
+
+Success Row 2:
+  Website: https://lsu.edu
+  ScrapedText length: 3047
+  ScrapedText preview: ================================================================================ PAGE: https://lsu.edu ===============================================
+  CompanySummary length: 2259
+  CompanySummary preview: ===SUMMARY=== LSU.edu is the official website of Louisiana State University, providing information on academic programs, admissions, campus life, and research initiatives. The university serves a dive
+
+Success Row 3:
+  Website: https://chca-oh.org
+  ScrapedText length: 2770
+  ScrapedText preview: ================================================================================ PAGE: https://chca-oh.org ===========================================
+  CompanySummary length: 2146
+  CompanySummary preview: ===SUMMARY=== chca-oh.org is an organization focused on providing resources and support for individuals and families affected by mental health issues. They offer a range of services including educatio
+
+
+Total successful rows found: 3

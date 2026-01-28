@@ -1,0 +1,18 @@
+﻿python :   File "<string>", line 1
+At C:\Users\MG\AppData\Local\Temp\ps-script-977e3853-c2b4-4f2a-829c-a9b16eb7928c.ps1:82 char:60
++ ... bScrapper"; python -c "import csv, pandas as pd; f=open('outputs/run_ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "<string>", line 1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    import csv, pandas as pd; f=open('outputs/run_20251002_132013/run_20260128_175136_combined.csv', 'r', 
+encoding='utf-8-sig'); reader=csv.reader(f, quoting=csv.QUOTE_ALL); header=next(reader); success_count=0; for i, row 
+in enumerate(reader): if len(row)==3 and not str(row[1]).startswith('[ERROR]') and not 
+str(row[1]).startswith('Γ\x9dî'): success_count+=1; if success_count<=3: print(f'Success Row {success_count}:'); 
+print(f'  Website: {row[0][:60]}'); print(f'  ScrapedText length: {len(row[1])}'); print(f'  ScrapedText preview: 
+{row[1][:100]}'); print(f'  CompanySummary length: {len(row[2])}'); print(f'  CompanySummary preview: 
+{row[2][:150]}'); print(); if success_count>=3: break; print(f'Total successful rows found: {success_count}'); 
+f.close()
+                                                                                                                       
+                                                                                             ^^^
+SyntaxError: invalid syntax

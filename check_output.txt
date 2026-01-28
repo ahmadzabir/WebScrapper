@@ -1,0 +1,49 @@
+﻿=== CSV FILE ANALYSIS ===
+Header: ['Website', 'ScrapedText', 'CompanySummary']
+Header count: 3
+Row 1: 3 columns
+  Col 0 (Website): https://purdueforlife.org
+  Col 1 (ScrapedText): [ERROR] HTTP 403 at https://www.purdueforlife.org/
+  Col 2 (CompanySummary): [ERROR] No valid scraped content available
+Row 2: 3 columns
+  Col 0 (Website): https://saic.edu
+  Col 1 (ScrapedText): [ERROR] HTTP 403 at https://www.saic.edu/
+  Col 2 (CompanySummary): [ERROR] No valid scraped content available
+Row 3: 3 columns
+  Col 0 (Website): https://centralreg.k12.nj.us
+  Col 1 (ScrapedText): [ERROR] HTTP 403 at https://www.centralreg.k12.nj.us/
+  Col 2 (CompanySummary): [ERROR] No valid scraped content available
+Row 4: 3 columns
+  Col 0 (Website): https://collegepressbox.com
+  Col 1 (ScrapedText): [ERROR] HTTP 403 at https://collegepressbox.com/
+  Col 2 (CompanySummary): [ERROR] No valid scraped content available
+Row 5: 3 columns
+  Col 0 (Website): https://kawasakiofcaldwell.com
+  Col 1 (ScrapedText): [ERROR] CONTENT MISMATCH: Scraped content is from kocout
+  Col 2 (CompanySummary): [ERROR] No valid scraped content available
+
+Total rows: 129
+
+=== EXCEL FILE ANALYSIS ===
+Excel Columns: ['Website', 'ScrapedText', 'CompanySummary']
+Excel Shape: (129, 3)
+
+First 3 rows:
+
+Row 1:
+  Website: https://purdueforlife.org
+  ScrapedText: [ERROR] HTTP 403 at https://www.purdueforlife.org/
+  CompanySummary: [ERROR] No valid scraped content available
+
+Row 2:
+  Website: https://saic.edu
+  ScrapedText: [ERROR] HTTP 403 at https://www.saic.edu/
+  CompanySummary: [ERROR] No valid scraped content available
+
+Row 3:
+  Website: https://centralreg.k12.nj.us
+  ScrapedText: [ERROR] HTTP 403 at https://www.centralreg.k12.nj.us/
+  CompanySummary: [ERROR] No valid scraped content available
+
+Rows with real scraped data (not errors): 93
+Rows with only errors: 36

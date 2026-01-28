@@ -2861,13 +2861,13 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             for f in output_files:
                 file_path = os.path.join(output_dir, f)
                 if os.path.isfile(file_path):  # Only process files, not directories
-                    if f.endswith(".csv") and f != zip_name:
+                    if f.endswith(".csv") and f != zip_name and "combined" not in f.lower():
                         try:
                             zf.write(file_path, arcname=f)
                             csv_files.append(f)
                         except Exception as e:
                             st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
-                    elif f.endswith(".xlsx") and f != zip_name:
+                    elif f.endswith(".xlsx") and f != zip_name and "combined" not in f.lower():
                         try:
                             zf.write(file_path, arcname=f)
                             excel_files.append(f)
@@ -3057,6 +3057,10 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     # This ensures we read exactly what we wrote, avoiding pandas parsing issues
                     csv_all_data = []
                     for csv_file in sorted(csv_files):
+                        # CRITICAL: Skip combined CSV files - they should not be re-read
+                        if "combined" in csv_file.lower():
+                            continue
+                        
                         csv_path = os.path.join(output_dir, csv_file)
                         try:
                             if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
@@ -3067,39 +3071,53 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                     if not header:
                                         continue
                                     
-                                    # Map header to column indices
+                                    # Normalize header
+                                    header_normalized = [str(h).strip().strip('"').strip("'") for h in header]
+                                    
+                                    # Map header to column indices - be strict
                                     col_indices = {}
-                                    for idx, h in enumerate(header):
-                                        h_clean = str(h).strip().strip('"').strip("'").lower()
-                                        if 'website' in h_clean or h_clean == 'url':
+                                    for idx, h in enumerate(header_normalized):
+                                        h_lower = h.lower().strip()
+                                        if h_lower == 'website' or h_lower == 'url':
                                             col_indices['Website'] = idx
-                                        elif 'scraped' in h_clean and 'text' in h_clean:
+                                        elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
                                             col_indices['ScrapedText'] = idx
-                                        elif 'company' in h_clean and 'summary' in h_clean:
-                                            col_indices['CompanySummary'] = idx
-                                        elif 'summary' in h_clean:
+                                        elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
                                             col_indices['CompanySummary'] = idx
                                     
                                     # Fallback to position if mapping failed
-                                    if 'Website' not in col_indices:
+                                    if 'Website' not in col_indices and len(header_normalized) >= 1:
                                         col_indices['Website'] = 0
-                                    if 'ScrapedText' not in col_indices:
+                                    if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
                                         col_indices['ScrapedText'] = 1
-                                    if 'CompanySummary' not in col_indices:
+                                    if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
                                         col_indices['CompanySummary'] = 2
+                                    
+                                    # Verify we have all 3 columns
+                                    if len(col_indices) != 3:
+                                        continue
                                     
                                     # Read rows
                                     for row in csv_reader:
                                         if len(row) == 0:
                                             continue
-                                        website = row[col_indices['Website']] if col_indices['Website'] < len(row) else ""
-                                        scraped_text = row[col_indices['ScrapedText']] if col_indices['ScrapedText'] < len(row) else ""
-                                        company_summary = row[col_indices['CompanySummary']] if col_indices['CompanySummary'] < len(row) else ""
                                         
-                                        # Clean and strip quotes
-                                        website = str(website).strip().strip('"').strip("'") if website else ""
-                                        scraped_text = str(scraped_text).strip().strip('"').strip("'") if scraped_text else ""
-                                        company_summary = str(company_summary).strip().strip('"').strip("'") if company_summary else ""
+                                        # Ensure row has at least 3 columns
+                                        while len(row) < 3:
+                                            row.append("")
+                                        
+                                        website_idx = col_indices.get('Website', 0)
+                                        scraped_idx = col_indices.get('ScrapedText', 1)
+                                        summary_idx = col_indices.get('CompanySummary', 2)
+                                        
+                                        website = str(row[website_idx]).strip() if website_idx < len(row) else ""
+                                        scraped_text = str(row[scraped_idx]).strip() if scraped_idx < len(row) else ""
+                                        company_summary = str(row[summary_idx]).strip() if summary_idx < len(row) else ""
+                                        
+                                        # Remove any remaining quote characters
+                                        website = website.strip('"').strip("'")
+                                        scraped_text = scraped_text.strip('"').strip("'")
+                                        company_summary = company_summary.strip('"').strip("'")
                                         
                                         if website:  # Only add rows with URLs
                                             rows_data.append({
@@ -3199,6 +3217,10 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             try:
                 all_data = []
                 for csv_file in sorted(csv_files):
+                    # CRITICAL: Skip combined CSV files - they should not be re-read
+                    if "combined" in csv_file.lower():
+                        continue
+                    
                     csv_path = os.path.join(output_dir, csv_file)
                     try:
                         # Check if file exists and has content
@@ -3226,20 +3248,23 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                 h_clean = str(h).strip().strip('"').strip("'")
                                 header_normalized.append(h_clean)
                             
-                            # Map header to standard columns
+                            # CRITICAL: Expect exactly 3 columns: Website, ScrapedText, CompanySummary
+                            # If header doesn't match, log warning but try to map by position
+                            if len(header_normalized) != 3:
+                                st.warning(f"⚠️ CSV file {csv_file} has {len(header_normalized)} columns instead of 3: {header_normalized}")
+                            
+                            # Map header to standard columns - be more strict
                             col_indices = {}
                             for idx, h in enumerate(header_normalized):
-                                h_lower = h.lower()
-                                if 'website' in h_lower or h_lower == 'url':
+                                h_lower = h.lower().strip()
+                                if h_lower == 'website' or h_lower == 'url':
                                     col_indices['Website'] = idx
-                                elif 'scraped' in h_lower and 'text' in h_lower:
+                                elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
                                     col_indices['ScrapedText'] = idx
-                                elif 'company' in h_lower and 'summary' in h_lower:
-                                    col_indices['CompanySummary'] = idx
-                                elif 'summary' in h_lower:
+                                elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
                                     col_indices['CompanySummary'] = idx
                             
-                            # If we couldn't map by name, use position (first 3 columns)
+                            # If we couldn't map by name, use position (first 3 columns) as fallback
                             if 'Website' not in col_indices and len(header_normalized) >= 1:
                                 col_indices['Website'] = 0
                             if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
@@ -3247,20 +3272,34 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
                                 col_indices['CompanySummary'] = 2
                             
+                            # Verify we have all 3 columns mapped
+                            if len(col_indices) != 3:
+                                st.warning(f"⚠️ CSV file {csv_file} column mapping incomplete. Expected 3 columns, mapped {len(col_indices)}: {col_indices}")
+                                continue
+                            
                             # Read all rows
-                            for row in csv_reader:
+                            for row_num, row in enumerate(csv_reader, start=2):
+                                # Skip empty rows
                                 if len(row) == 0:
                                     continue
                                 
-                                # Extract values by column index, pad if needed
-                                website = row[col_indices.get('Website', 0)] if col_indices.get('Website', 0) < len(row) else ""
-                                scraped_text = row[col_indices.get('ScrapedText', 1)] if col_indices.get('ScrapedText', 1) < len(row) else ""
-                                company_summary = row[col_indices.get('CompanySummary', 2)] if col_indices.get('CompanySummary', 2) < len(row) else ""
+                                # CRITICAL: Ensure row has at least 3 columns, pad if needed
+                                while len(row) < 3:
+                                    row.append("")
                                 
-                                # Clean values
-                                website = str(website).strip().strip('"').strip("'") if website else ""
-                                scraped_text = str(scraped_text).strip().strip('"').strip("'") if scraped_text else ""
-                                company_summary = str(company_summary).strip().strip('"').strip("'") if company_summary else ""
+                                # Extract values by column index - csv.reader already unquotes values
+                                website_idx = col_indices.get('Website', 0)
+                                scraped_idx = col_indices.get('ScrapedText', 1)
+                                summary_idx = col_indices.get('CompanySummary', 2)
+                                
+                                website = str(row[website_idx]).strip() if website_idx < len(row) else ""
+                                scraped_text = str(row[scraped_idx]).strip() if scraped_idx < len(row) else ""
+                                company_summary = str(row[summary_idx]).strip() if summary_idx < len(row) else ""
+                                
+                                # Remove any remaining quote characters (csv.reader should have already unquoted)
+                                website = website.strip('"').strip("'")
+                                scraped_text = scraped_text.strip('"').strip("'")
+                                company_summary = company_summary.strip('"').strip("'")
                                 
                                 # Only add rows with valid URLs
                                 if website:
@@ -3351,22 +3390,25 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         
                         # Clean each value to prevent CSV formatting issues
                         def clean_csv_value(val_str):
-                            """Clean a single CSV value"""
+                            """Clean a single CSV value - csv.writer will handle quoting automatically"""
                             if not val_str:
                                 return ""
                             import re
-                            # Remove null bytes
+                            # Convert to string if not already
+                            val_str = str(val_str)
+                            # Remove null bytes (can break CSV parsing)
                             val_str = val_str.replace('\x00', '')
-                            # Replace newlines/carriage returns with space
+                            # Replace newlines/carriage returns with space (newlines break CSV row structure)
                             val_str = val_str.replace('\n', ' ').replace('\r', ' ')
                             # Replace tabs with space
                             val_str = val_str.replace('\t', ' ')
-                            # Remove other control characters
+                            # Remove other control characters (except space)
                             val_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', val_str)
-                            # Collapse multiple spaces
+                            # Collapse multiple spaces to single space
                             val_str = re.sub(r'\s+', ' ', val_str)
-                            # Strip whitespace
+                            # Strip leading/trailing whitespace
                             val_str = val_str.strip()
+                            # Note: csv.writer with QUOTE_ALL will automatically escape any quotes in the value
                             return val_str
                         
                         # Clean and add values in correct order
