@@ -720,42 +720,44 @@ def extract_links(html: str, base_url: str):
 
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int):
     """Fetch URL with improved error handling and encoding detection."""
+    from urllib.parse import urlparse
+    
     for attempt in range(retries + 1):
         try:
             # Use proper headers to avoid being blocked or getting different content
             headers = {
-                "User-Agent": session.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate",
+                "User-Agent": session.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1"
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Cache-Control": "max-age=0"
             }
+            
+            # Parse original URL to extract domain
+            parsed_original = urlparse(url)
+            original_domain = parsed_original.netloc.replace('www.', '').lower()
             
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers) as resp:
                 # Handle redirects properly - use the final URL after redirects
                 final_url = str(resp.url)
-                
-                # Verify we're on the correct domain (prevent redirects to wrong sites)
-                from urllib.parse import urlparse
                 parsed_final = urlparse(final_url)
-                parsed_original = urlparse(url)
+                final_domain = parsed_final.netloc.replace('www.', '').lower()
                 
-                # Check if redirect went to a completely different domain (not just subdomain)
-                if parsed_final.netloc != parsed_original.netloc:
-                    # Allow subdomains and www variations, but warn about major redirects
-                    original_domain = parsed_original.netloc.replace('www.', '')
-                    final_domain = parsed_final.netloc.replace('www.', '')
-                    if not (final_domain == original_domain or final_domain.endswith('.' + original_domain)):
-                        # Major redirect detected - log but continue
-                        pass
+                # STRICT domain validation - reject if redirected to completely different domain
+                if final_domain != original_domain:
+                    # Check if it's just a subdomain variation (e.g., www.example.com -> example.com)
+                    if not (final_domain.endswith('.' + original_domain) or original_domain.endswith('.' + final_domain)):
+                        # Completely different domain - this is wrong!
+                        return f"❌ Redirected to wrong domain: {final_url} (expected: {url})"
                 
                 # Check status code
                 if resp.status >= 400:
                     return f"HTTP {resp.status} at {final_url}"
-                
-                # Check content type more flexibly
-                content_type = resp.headers.get("Content-Type", "").lower()
                 
                 # Read content once
                 html = await resp.text(errors="replace")
@@ -764,11 +766,29 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 html_lower = html.lower()
                 if '<html' not in html_lower and '<!doctype' not in html_lower:
                     # Check if it's a redirect page or error
-                    if 'redirect' in html_lower[:500] or 'location.replace' in html_lower[:500]:
-                        return f"JavaScript redirect detected at {final_url}"
+                    if 'redirect' in html_lower[:500] or 'location.replace' in html_lower[:500] or 'window.location' in html_lower[:500]:
+                        return f"❌ JavaScript redirect detected at {final_url}"
                     # Might be valid content without HTML tags (rare), but check length
                     if len(html.strip()) < 100:
-                        return f"Non-HTML or empty content at {final_url}"
+                        return f"❌ Non-HTML or empty content at {final_url}"
+                
+                # Additional validation: Check if content seems wrong (e.g., contains common e-commerce patterns when we expect a business site)
+                # This is a safety check - if URL doesn't match content, warn
+                if len(html) > 1000:
+                    # Check for common indicators of wrong content
+                    suspicious_patterns = [
+                        'amazon.com', 'ebay.com', 'etsy.com', 'shopify',
+                        'add to cart', 'buy now', 'shopping cart',
+                        'product reviews', 'customer reviews'
+                    ]
+                    html_lower_sample = html_lower[:5000]  # Check first 5k chars
+                    suspicious_count = sum(1 for pattern in suspicious_patterns if pattern in html_lower_sample)
+                    
+                    # If multiple suspicious patterns found, it might be wrong content
+                    # But don't block it - just log for debugging
+                    if suspicious_count >= 3:
+                        # This might be wrong content, but continue anyway
+                        pass
                 
                 # Return final URL (after redirects) and HTML
                 return (final_url, html)
@@ -803,9 +823,22 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 
     page_url, html = homepage
     
+    # STRICT validation: Verify we're on the correct domain
+    from urllib.parse import urlparse
+    parsed_page = urlparse(page_url)
+    parsed_original = urlparse(normalized_url)
+    
+    page_domain = parsed_page.netloc.replace('www.', '').lower()
+    original_domain = parsed_original.netloc.replace('www.', '').lower()
+    
     # Log the actual URL we fetched (useful for debugging redirects)
     if page_url != normalized_url:
         errors.append(f"ℹ️ Redirected from {normalized_url} to {page_url}")
+    
+    # CRITICAL: Verify domain matches (allow subdomains but not completely different domains)
+    if page_domain != original_domain:
+        if not (page_domain.endswith('.' + original_domain) or original_domain.endswith('.' + page_domain)):
+            return f"❌ Domain mismatch! Expected {original_domain}, got {page_domain} at {page_url}"
     
     # Validate HTML content before processing
     if not html or len(html.strip()) < 50:
@@ -829,6 +862,29 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         if 'location.href' in html_lower or 'window.location' in html_lower or 'meta http-equiv="refresh"' in html_lower:
             return f"❌ JavaScript/Meta redirect detected at {page_url}. Content may not be accessible."
         # Might still have content, continue
+    
+    # ADDITIONAL SAFETY CHECK: Detect if content seems wrong for the domain
+    # Check for common e-commerce patterns that shouldn't be on a business consultant site
+    if len(html) > 500:
+        html_sample = html_lower[:10000]  # Check first 10k chars
+        
+        # E-commerce indicators
+        ecommerce_patterns = [
+            'add to cart', 'shopping cart', 'buy now', 'add to bag',
+            'product reviews', 'customer reviews', 'star rating',
+            'amazon.com', 'ebay.com', 'etsy.com', 'shopify store',
+            'price:', '$', 'usd', 'eur', 'gbp',
+            'remote helicopter', 'rc helicopter', 'replacement parts'
+        ]
+        
+        ecommerce_count = sum(1 for pattern in ecommerce_patterns if pattern in html_sample)
+        
+        # If we find many e-commerce patterns, it's likely wrong content
+        if ecommerce_count >= 5:
+            # Check if domain name appears in content (if not, it's definitely wrong)
+            domain_in_content = original_domain.split('.')[0] in html_sample
+            if not domain_in_content:
+                return f"❌ Content mismatch detected! Page at {page_url} contains e-commerce content that doesn't match expected domain {original_domain}. This might be a redirect or wrong content."
     
     cleaned = cleanup_html(html)
     
@@ -976,6 +1032,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                            depth, keywords, max_chars, retries, timeout,
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
                            lead_data_map=None, ai_status_callback=None):
+    from urllib.parse import urlparse
     while True:
         item = await url_queue.get()
         if item is None:
@@ -1012,6 +1069,23 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             # Scrape the website
             scraped_text = await scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout)
             
+            # CRITICAL VALIDATION: Verify scraped content matches the URL
+            # Extract the first PAGE: URL from scraped content to verify
+            if scraped_text and not scraped_text.startswith("❌"):
+                # Check if scraped content contains PAGE: header
+                page_header_match = re.search(r'PAGE:\s*(https?://[^\s\n]+)', scraped_text[:5000])
+                if page_header_match:
+                    actual_scraped_url = page_header_match.group(1)
+                    # Normalize both URLs for comparison
+                    actual_domain = urlparse(actual_scraped_url).netloc.replace('www.', '').lower()
+                    expected_domain = urlparse(normalized_url).netloc.replace('www.', '').lower()
+                    
+                    # Verify domains match
+                    if actual_domain != expected_domain:
+                        if not (actual_domain.endswith('.' + expected_domain) or expected_domain.endswith('.' + actual_domain)):
+                            # Domain mismatch - content doesn't match URL!
+                            scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
+            
             # Generate AI summary if enabled
             if ai_enabled and ai_api_key and ai_provider and ai_model:
                 # Create URL-specific status callback
@@ -1027,6 +1101,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 ai_summary = ""  # Empty if AI not enabled
         
         # Output format: (url, scraped_text, ai_summary)
+        # Use original_url to maintain consistency with input CSV
         out = (original_url, scraped_text, ai_summary)
         await result_queue.put(out)
         url_queue.task_done()
