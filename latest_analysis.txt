@@ -1,0 +1,72 @@
+﻿=== ANALYZING LATEST RUN OUTPUT ===
+Directory: outputs/run_20260128_232125
+
+Files found: ['output_part_1.csv', 'output_part_1.xlsx', 'run_20260128_232125.zip']
+
+Combined CSV: None
+Combined Excel: None
+Individual CSV files: 1
+Individual Excel files: 1
+
+=== ANALYZING INDIVIDUAL CSV FILE ===
+File: outputs/run_20260128_232125\output_part_1.csv
+
+Header: ['Website', 'ScrapedText', 'CompanySummary']
+Header length: 3
+
+Row 1: 3 columns
+  Website: https://purdueforlife.org
+  ScrapedText: length=44, preview=Γ¥î HTTP 403 at https://www.purdueforlife.org/
+  CompanySummary: length=36, preview=Γ¥î No valid scraped content available
+
+Row 2: 3 columns
+  Website: https://centralreg.k12.nj.us
+  ScrapedText: length=47, preview=Γ¥î HTTP 403 at https://www.centralreg.k12.nj.us/
+  CompanySummary: length=36, preview=Γ¥î No valid scraped content available
+
+Row 3: 3 columns
+  Website: https://saic.edu
+  ScrapedText: length=35, preview=Γ¥î HTTP 403 at https://www.saic.edu/
+  CompanySummary: length=36, preview=Γ¥î No valid scraped content available
+
+Row 4: 3 columns
+  Website: https://chca-oh.org
+  ScrapedText: length=2770, preview=================================================================================
+    ΓÜá∩╕Å UNQUOTED COMMA DETECTED!
+  CompanySummary: length=1911, preview====SUMMARY=== The website chca-oh.org presents the services and mission of the o
+
+Row 5: 3 columns
+  Website: https://savannahphilharmonic.org
+  ScrapedText: length=789, preview=================================================================================
+    ΓÜá∩╕Å UNQUOTED COMMA DETECTED!
+  CompanySummary: length=2132, preview====SUMMARY=== Savannah Philharmonic is a nonprofit organization dedicated to pro
+
+Row 6: 3 columns
+  Website: https://80thoreau.com
+  ScrapedText: length=6129, preview=================================================================================
+    ΓÜá∩╕Å UNQUOTED COMMA DETECTED!
+  CompanySummary: length=1974, preview====SUMMARY=== 80thoreau.com specializes in providing strategic consulting and op
+
+Row 7: 3 columns
+  Website: https://lsu.edu
+  ScrapedText: length=3047, preview=================================================================================
+    ΓÜá∩╕Å UNQUOTED COMMA DETECTED!
+  CompanySummary: length=2697, preview====SUMMARY=== LSU.edu is the official website of Louisiana State University, pro
+
+Row 8: 3 columns
+  Website: https://millsaps.edu
+  ScrapedText: length=33, preview=Γ¥î HTTP 403 at http://millsaps.edu
+  CompanySummary: length=36, preview=Γ¥î No valid scraped content available
+
+Row 9: 3 columns
+  Website: https://choptsalad.com
+  ScrapedText: length=18258, preview=================================================================================
+    ΓÜá∩╕Å UNQUOTED COMMA DETECTED!
+  CompanySummary: length=1957, preview====SUMMARY=== Chopt Salad is a fast-casual restaurant chain specializing in cust
+
+Row 10: 3 columns
+  Website: https://collegepressbox.com
+  ScrapedText: length=42, preview=Γ¥î HTTP 403 at https://collegepressbox.com/
+  CompanySummary: length=36, preview=Γ¥î No valid scraped content available
+
+Γ£à All rows have 3 columns

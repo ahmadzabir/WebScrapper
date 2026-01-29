@@ -1,0 +1,32 @@
+﻿=== CHECKING RAW CSV FILE STRUCTURE ===
+File: outputs/run_20260128_232125/output_part_1.csv
+
+Raw file analysis (first 10 lines):
+
+Line 1:
+  Length: 44 bytes
+  Quotes: 6
+  Commas: 2
+  Preview: '\ufeff"Website","ScrapedText","CompanySummary"\n'
+  WARNING: Line doesn't start with quote but has commas!
+
+Line 2:
+  Length: 118 bytes
+  Quotes: 6
+  Commas: 2
+python : Traceback (most recent call last):
+At C:\Users\MG\AppData\Local\Temp\ps-script-f773228d-247c-4017-8d9c-ebee250c5136.ps1:84 char:60
++ ... ocuments\Code Play\WebScrapper"; python check_raw_csv.py 2>&1 | Out-F ...
++                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\MG\OneDrive\Documents\Code Play\WebScrapper\check_raw_csv.py", line 41, in <module>
+    print(f"  Preview: {repr(preview)}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program 
+Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.2544.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 
+19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u274c' in position 41: character maps to <undefined>

@@ -1,0 +1,105 @@
+﻿=== ANALYZING COMBINED CSV ===
+File: outputs/run_20251002_132013/run_20260128_175136_combined.csv
+
+Header: ['Website', 'ScrapedText', 'CompanySummary']
+Header length: 3
+
+Row 1: 3 columns
+  Website: https://purdueforlife.org
+  ScrapedText length: 44, preview: Γ¥î HTTP 403 at https://www.purdueforlife.org/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 2: 3 columns
+  Website: https://saic.edu
+  ScrapedText length: 35, preview: Γ¥î HTTP 403 at https://www.saic.edu/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 3: 3 columns
+  Website: https://centralreg.k12.nj.us
+  ScrapedText length: 47, preview: Γ¥î HTTP 403 at https://www.centralreg.k12.nj.us/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 4: 3 columns
+  Website: https://collegepressbox.com
+  ScrapedText length: 42, preview: Γ¥î HTTP 403 at https://collegepressbox.com/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 5: 3 columns
+  Website: https://kawasakiofcaldwell.com
+  ScrapedText length: 141, preview: Γ¥î CONTENT MISMATCH: Scraped content is from kocoutdoors.com but expected kawasak
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 6: 3 columns
+  Website: https://80thoreau.com
+  ScrapedText length: 6129, preview: ================================================================================
+    WARNING: Unquoted comma in ScrapedText!
+  CompanySummary length: 2292, preview: ===SUMMARY=== 80thoreau.com offers a range of services focused on digital market
+
+Row 7: 3 columns
+  Website: https://lsu.edu
+  ScrapedText length: 3047, preview: ================================================================================
+    WARNING: Unquoted comma in ScrapedText!
+  CompanySummary length: 2259, preview: ===SUMMARY=== LSU.edu is the official website of Louisiana State University, pro
+
+Row 8: 3 columns
+  Website: https://chca-oh.org
+  ScrapedText length: 2770, preview: ================================================================================
+    WARNING: Unquoted comma in ScrapedText!
+  CompanySummary length: 2146, preview: ===SUMMARY=== chca-oh.org is an organization focused on providing resources and 
+
+Row 9: 3 columns
+  Website: https://savannahphilharmonic.org
+  ScrapedText length: 789, preview: ================================================================================
+    WARNING: Unquoted comma in ScrapedText!
+  CompanySummary length: 2073, preview: ===SUMMARY=== The Savannah Philharmonic is a nonprofit organization dedicated to
+
+Row 10: 3 columns
+  Website: https://millsaps.edu
+  ScrapedText length: 33, preview: Γ¥î HTTP 403 at http://millsaps.edu
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Total rows: 129
+Rows with wrong column count: 0
+
+=== CHECKING RAW FILE ===
+First 10 lines (showing first 300 bytes each):
+
+Line 1:
+  Length: 44 bytes
+  First 300 bytes: b'\xef\xbb\xbf"Website","ScrapedText","CompanySummary"\n'
+
+Line 2:
+  Length: 118 bytes
+  First 300 bytes: b'"https://purdueforlife.org","\xe2\x9d\x8c HTTP 403 at https://www.purdueforlife.org/","\xe2\x9d\x8c No valid scraped content available"\n'
+
+Line 3:
+  Length: 100 bytes
+  First 300 bytes: b'"https://saic.edu","\xe2\x9d\x8c HTTP 403 at https://www.saic.edu/","\xe2\x9d\x8c No valid scraped content available"\n'
+
+Line 4:
+  Length: 124 bytes
+  First 300 bytes: b'"https://centralreg.k12.nj.us","\xe2\x9d\x8c HTTP 403 at https://www.centralreg.k12.nj.us/","\xe2\x9d\x8c No valid scraped content available"\n'
+
+Line 5:
+  Length: 118 bytes
+  First 300 bytes: b'"https://collegepressbox.com","\xe2\x9d\x8c HTTP 403 at https://collegepressbox.com/","\xe2\x9d\x8c No valid scraped content available"\n'
+
+Line 6:
+  Length: 220 bytes
+  First 300 bytes: b'"https://kawasakiofcaldwell.com","\xe2\x9d\x8c CONTENT MISMATCH: Scraped content is from kocoutdoors.com but expected kawasakiofcaldwell.com. Original URL: https://kawasakiofcaldwell.com","\xe2\x9d\x8c No valid scraped content available"\n'
+
+Line 7:
+  Length: 9437 bytes
+  First 300 bytes: b'"https://80thoreau.com","================================================================================ PAGE: https://www.80thoreau.com/ ================================================================================ 80 Thoreau | American Restaurant in Concord, MA - # Home Main content starts her'
+
+Line 8:
+  Length: 5353 bytes
+  First 300 bytes: b'"https://lsu.edu","================================================================================ PAGE: https://lsu.edu ================================================================================ Welcome to LSU, a top research university | Baton Rouge, La. Skip to main content # We Build Team'
+
+Line 9:
+  Length: 4984 bytes
+  First 300 bytes: b'"https://chca-oh.org","================================================================================ PAGE: https://chca-oh.org ================================================================================ CHCA | Christ-Centered Private PK\xe2\x80\x9312 School In Cincinnati Skip to content # Home ## Wel'
+
+Line 10:
+  Length: 2917 bytes
+  First 300 bytes: b'"https://savannahphilharmonic.org","================================================================================ PAGE: https://savannahphilharmonic.org ================================================================================ Home - The Savannah Philharmonic Orchestra and Chorus Skip to c'

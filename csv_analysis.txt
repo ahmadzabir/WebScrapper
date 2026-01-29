@@ -1,0 +1,64 @@
+﻿=== ANALYZING INDIVIDUAL CSV FILE ===
+Header: ['Website', 'ScrapedText', 'CompanySummary']
+Header length: 3
+
+Row 1: 3 columns
+  Website length: 25, preview: https://purdueforlife.org
+  ScrapedText length: 44, preview: Γ¥î HTTP 403 at https://www.purdueforlife.org/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 2: 3 columns
+  Website length: 28, preview: https://centralreg.k12.nj.us
+  ScrapedText length: 47, preview: Γ¥î HTTP 403 at https://www.centralreg.k12.nj.us/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 3: 3 columns
+  Website length: 16, preview: https://saic.edu
+  ScrapedText length: 35, preview: Γ¥î HTTP 403 at https://www.saic.edu/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 4: 3 columns
+  Website length: 19, preview: https://chca-oh.org
+  ScrapedText length: 2770, preview: ================================================================================
+  CompanySummary length: 1911, preview: ===SUMMARY=== The website chca-oh.org presents the services and mission of the o
+
+Row 5: 3 columns
+  Website length: 32, preview: https://savannahphilharmonic.org
+  ScrapedText length: 789, preview: ================================================================================
+  CompanySummary length: 2132, preview: ===SUMMARY=== Savannah Philharmonic is a nonprofit organization dedicated to pro
+
+Row 6: 3 columns
+  Website length: 21, preview: https://80thoreau.com
+  ScrapedText length: 6129, preview: ================================================================================
+  CompanySummary length: 1974, preview: ===SUMMARY=== 80thoreau.com specializes in providing strategic consulting and op
+
+Row 7: 3 columns
+  Website length: 15, preview: https://lsu.edu
+  ScrapedText length: 3047, preview: ================================================================================
+  CompanySummary length: 2697, preview: ===SUMMARY=== LSU.edu is the official website of Louisiana State University, pro
+
+Row 8: 3 columns
+  Website length: 20, preview: https://millsaps.edu
+  ScrapedText length: 33, preview: Γ¥î HTTP 403 at http://millsaps.edu
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+Row 9: 3 columns
+  Website length: 22, preview: https://choptsalad.com
+  ScrapedText length: 18258, preview: ================================================================================
+  CompanySummary length: 1957, preview: ===SUMMARY=== Chopt Salad is a fast-casual restaurant chain specializing in cust
+
+Row 10: 3 columns
+  Website length: 27, preview: https://collegepressbox.com
+  ScrapedText length: 42, preview: Γ¥î HTTP 403 at https://collegepressbox.com/
+  CompanySummary length: 36, preview: Γ¥î No valid scraped content available
+
+=== PROBLEM ROWS ===
+No rows with wrong column count found
+
+=== CHECKING RAW FILE FOR ISSUES ===
+First 5 lines (raw bytes, first 200 chars each):
+Line 1: b'\xef\xbb\xbf"Website","ScrapedText","CompanySummary"'
+Line 2: b'"https://purdueforlife.org","\xe2\x9d\x8c HTTP 403 at https://www.purdueforlife.org/","\xe2\x9d\x8c No valid scraped content available"'
+Line 3: b'"https://centralreg.k12.nj.us","\xe2\x9d\x8c HTTP 403 at https://www.centralreg.k12.nj.us/","\xe2\x9d\x8c No valid scraped content available"'
+Line 4: b'"https://saic.edu","\xe2\x9d\x8c HTTP 403 at https://www.saic.edu/","\xe2\x9d\x8c No valid scraped content available"'
+Line 5: b'"https://chca-oh.org","================================================================================ PAGE: https://chca-oh.org ======================================================================'

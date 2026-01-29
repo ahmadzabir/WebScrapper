@@ -11,6 +11,7 @@ import streamlit as st
 from datetime import datetime
 from io import BytesIO, StringIO, StringIO
 import json
+import random
 
 # AI imports (optional - only if API keys provided)
 try:
@@ -973,9 +974,141 @@ def extract_links(html: str, base_url: str):
 # -------------------------
 
 
+def get_random_user_agent():
+    """Generate a random realistic user agent."""
+    import random
+    user_agents = [
+        # Chrome on Windows (most common)
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        # Chrome on Mac
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        # Firefox on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
+        # Firefox on Mac
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0",
+        # Safari on Mac
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+        # Edge on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+    ]
+    return random.choice(user_agents)
+
+def get_realistic_headers(user_agent=None, target_url=None):
+    """Generate realistic browser headers based on user agent - EPIC version."""
+    import random
+    if user_agent is None:
+        user_agent = get_random_user_agent()
+    
+    # Detect browser type from user agent
+    is_chrome = "Chrome" in user_agent and "Edg" not in user_agent
+    is_firefox = "Firefox" in user_agent
+    is_safari = "Safari" in user_agent and "Chrome" not in user_agent
+    is_edge = "Edg" in user_agent
+    
+    # EPIC referer strategy - sometimes no referer (direct navigation), sometimes search engines
+    # 30% chance of no referer (direct navigation), 70% chance of search engine referer
+    referers = [
+        None,  # Direct navigation - no referer
+        "https://www.google.com/",
+        "https://www.google.com/search?q=example",
+        "https://www.google.com/search?q=site",
+        "https://www.bing.com/",
+        "https://duckduckgo.com/",
+        "https://www.yahoo.com/",
+        "https://www.google.com/search?client=firefox-b-d&q=example",
+    ]
+    
+    # If target_url provided, sometimes use it as referer (internal navigation)
+    if target_url and random.random() < 0.1:
+        referer = target_url.rsplit('/', 1)[0] + '/'  # Parent directory
+    else:
+        referer = random.choice(referers)
+    
+    # Random viewport sizes (common resolutions)
+    viewports = [
+        (1920, 1080),
+        (1366, 768),
+        (1536, 864),
+        (1440, 900),
+        (1280, 720),
+    ]
+    viewport_width, viewport_height = random.choice(viewports)
+    
+    headers = {
+        "User-Agent": user_agent,
+        "Accept-Language": random.choice([
+            "en-US,en;q=0.9",
+            "en-US,en;q=0.9,es;q=0.8",
+            "en-US,en;q=0.9,fr;q=0.8",
+            "en-US,en;q=0.9,de;q=0.8",
+            "en-GB,en;q=0.9",
+        ]),
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": random.choice(["1", "0"]),  # Sometimes DNT, sometimes not
+    }
+    
+    # Only add referer if we have one (30% chance of None for direct navigation)
+    if referer:
+        headers["Referer"] = referer
+    
+    if is_chrome or is_edge:
+        headers.update({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": random.choice(["none", "cross-site", "same-origin"]),
+            "Sec-Fetch-User": "?1",
+            "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"Windows"',
+            "Cache-Control": random.choice(["max-age=0", "no-cache"]),
+            "Viewport-Width": str(viewport_width),
+        })
+    elif is_firefox:
+        headers.update({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        })
+    elif is_safari:
+        headers.update({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        })
+    
+    return headers
+
+# Global domain-based rate limiting - EPIC anti-bot feature
+_domain_request_times = {}  # Track last request time per domain
+_domain_lock = asyncio.Lock()  # Lock for thread-safe access to domain timing
+
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int):
-    """Fetch URL with improved error handling, bot detection avoidance, and encoding support."""
+    """Fetch URL with EPIC anti-bot detection avoidance - maximum stealth mode."""
     from urllib.parse import urlparse
+    import random
+    
+    parsed = urlparse(url)
+    domain = parsed.netloc.replace('www.', '').lower()
+    
+    # CRITICAL: Domain-based rate limiting - prevent hammering same domain
+    async with _domain_lock:
+        if domain in _domain_request_times:
+            last_request_time = _domain_request_times[domain]
+            time_since_last = time.time() - last_request_time
+            # Enforce minimum 2-5 seconds between requests to same domain
+            min_delay = random.uniform(2.0, 5.0)
+            if time_since_last < min_delay:
+                wait_time = min_delay - time_since_last
+                await asyncio.sleep(wait_time)
+        _domain_request_times[domain] = time.time()
+    
+    # Add random delay before request (simulate human reading/thinking time)
+    # Longer delays to appear more human-like
+    await asyncio.sleep(random.uniform(1.0, 3.0))
     
     # Try different URL variations and header combinations for better success rate
     url_variations = [url]
@@ -994,51 +1127,42 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
         if url.startswith('https://'):
             url_variations.append(url.replace('https://', 'http://'))
     
-    # Try different header combinations
-    header_variations = [
-        # Modern Chrome headers
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",  # Try with brotli first
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-            "DNT": "1"
-        },
-        # Fallback: without brotli
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate",  # No brotli
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
-        },
-        # Simple headers (less bot-like)
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
-    ]
+    # Generate MANY realistic header sets - more variations = better success rate
+    header_variations = []
+    for _ in range(15):  # Generate 15 different header combinations
+        headers = get_realistic_headers(target_url=url)
+        header_variations.append(headers)
+    
+    # Add variations without brotli (for compatibility)
+    for _ in range(5):
+        headers = get_realistic_headers(target_url=url)
+        headers["Accept-Encoding"] = "gzip, deflate"
+        header_variations.append(headers)
+    
+    # Shuffle header variations for maximum randomness
+    random.shuffle(header_variations)
     
     last_error = None
     
     # Try URL variations and header combinations
     for url_to_try in url_variations:
         for headers in header_variations:
-            # Use session's user agent if available
+            # Override with session's user agent if provided, but regenerate headers to maintain consistency
             if session.headers.get("User-Agent"):
-                headers["User-Agent"] = session.headers.get("User-Agent")
+                # Regenerate headers with the session's user agent to maintain consistency
+                headers = get_realistic_headers(session.headers.get("User-Agent"), target_url=url_to_try)
             
             for attempt in range(retries + 1):
+                # Increase timeout for retries (some sites are slow)
+                retry_timeout = timeout + (attempt * 5)  # Add 5s per retry attempt
+                
                 try:
+                    # Add random delay between retries (human-like behavior)
+                    # Longer delays for retries - humans don't retry instantly
+                    if attempt > 0:
+                        delay = random.uniform(3.0, 6.0) + (attempt * 1.5)
+                        await asyncio.sleep(delay)
+                    
                     # Parse URL
                     parsed_original = urlparse(url_to_try)
                     if not parsed_original.netloc:
@@ -1046,7 +1170,11 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                     
                     original_domain = parsed_original.netloc.replace('www.', '').lower()
                     
-                    async with session.get(url_to_try, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, headers=headers) as resp:
+                    # Add random delay before each request (simulate human behavior)
+                    # Longer delays to appear more human-like
+                    await asyncio.sleep(random.uniform(0.5, 2.0))
+                    
+                    async with session.get(url_to_try, timeout=aiohttp.ClientTimeout(total=retry_timeout), allow_redirects=True, headers=headers) as resp:
                         # Handle redirects properly - use the final URL after redirects
                         final_url = str(resp.url)
                         parsed_final = urlparse(final_url)
@@ -1068,11 +1196,28 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                                     # Only log for debugging, don't block
                                     pass
                         
-                        # Check status code - handle 403 specially
+                        # Check status code - handle 403 and 429 specially
                         if resp.status == 403:
-                            # 403 Forbidden - try next URL variation or header combination
+                            # 403 Forbidden - EPIC retry strategy with exponential backoff
                             last_error = f"HTTP 403 at {final_url}"
+                            # Much longer delay - simulate human giving up and trying again later
+                            # Exponential backoff: 5-10s first attempt, 10-20s second, etc.
+                            backoff_delay = random.uniform(5.0, 10.0) * (2 ** attempt)
+                            # Cap at 60 seconds max
+                            backoff_delay = min(backoff_delay, 60.0)
+                            await asyncio.sleep(backoff_delay)
+                            
+                            # Also add domain cooldown - if we got 403, wait longer before next request to this domain
+                            async with _domain_lock:
+                                _domain_request_times[domain] = time.time() + random.uniform(10.0, 20.0)
+                            
                             break  # Try next variation
+                        elif resp.status == 429:
+                            # Rate limited - exponential backoff
+                            retry_after = int(resp.headers.get('Retry-After', 5 + attempt * 2))
+                            last_error = f"HTTP 429 at {final_url} (rate limited)"
+                            await asyncio.sleep(min(retry_after, 30))  # Max 30s wait
+                            continue  # Retry same URL/headers
                         elif resp.status >= 400:
                             # Other 4xx/5xx errors
                             last_error = f"HTTP {resp.status} at {final_url}"
@@ -1118,16 +1263,26 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                         return (final_url, html)
                         
                 except asyncio.TimeoutError:
-                    last_error = f"Timeout fetching {url_to_try} (exceeded {timeout}s)"
+                    last_error = f"Timeout fetching {url_to_try} (exceeded {retry_timeout}s)"
                     if attempt < retries:
-                        await asyncio.sleep(1 + attempt * 0.5)
+                        # Exponential backoff for timeouts
+                        await asyncio.sleep(2 + attempt * 1)
                     continue
-                except (aiohttp.ClientError, ConnectionResetError) as e:
+                except (aiohttp.ClientError, ConnectionResetError, OSError) as e:
                     error_str = str(e).lower()
                     # Handle brotli encoding error specifically
                     if 'brotli' in error_str or 'br' in error_str or 'content-encoding' in error_str:
                         # Try without brotli in next iteration
                         last_error = f"Brotli encoding error: {str(e)}"
+                        if attempt < retries:
+                            await asyncio.sleep(1 + attempt * 0.5)
+                        continue
+                    # Handle connection errors with exponential backoff
+                    if 'connection' in error_str or 'disconnected' in error_str or 'getaddrinfo' in error_str:
+                        last_error = f"Error fetching {url_to_try}: {str(e)}"
+                        if attempt < retries:
+                            # Exponential backoff for connection errors
+                            await asyncio.sleep(2 + attempt * 1)
                         continue
                     last_error = f"Error fetching {url_to_try}: {str(e)}"
                     if attempt < retries:
@@ -1385,6 +1540,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
                            lead_data_map=None, ai_status_callback=None):
     from urllib.parse import urlparse
+    import random
+    
+    # Worker-level delay - stagger workers to avoid synchronized requests
+    worker_id = int(name.split('-')[-1]) if '-' in name else 0
+    initial_delay = worker_id * random.uniform(0.5, 1.5)
+    await asyncio.sleep(initial_delay)
+    
     while True:
         item = await url_queue.get()
         if item is None:
@@ -1393,6 +1555,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
         
         # CRITICAL: Wrap entire processing in try-finally to ensure task_done() is always called
         try:
+            # Add random delay between processing URLs (human-like behavior)
+            # This prevents workers from processing URLs too quickly
+            await asyncio.sleep(random.uniform(0.5, 2.0))
             # Handle both old format (just URL) and new format (URL, index)
             if isinstance(item, tuple):
                 original_url, url_index = item
@@ -1422,9 +1587,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 ai_summary = "❌ Invalid URL: URL is empty or too short"
             else:
                 # CRITICAL: Add a global timeout wrapper to prevent workers from hanging indefinitely
-                # Use a more aggressive timeout: max 2 minutes per URL regardless of settings
-                # This prevents one slow URL from blocking everything
-                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + 30, 120)  # Max 2 minutes per URL
+                # Use a more reasonable timeout: max 3 minutes per URL for slow sites
+                # This prevents one slow URL from blocking everything, but allows slow sites to complete
+                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + 60, 180)  # Max 3 minutes per URL
                 
                 try:
                     # Wrap scraping in a timeout to prevent infinite hangs
@@ -1435,6 +1600,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 except asyncio.TimeoutError:
                     # Global timeout exceeded - this URL is taking too long
                     scraped_text = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
+                    # Log but don't fail completely - some sites are just slow
                 except Exception as e:
                     # If scraping fails with an exception, try once more with a more lenient approach
                     try:
@@ -1453,8 +1619,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     except Exception as e2:
                         scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
                 
-                # CRITICAL VALIDATION: Verify scraped content matches the URL
-                # Extract the first PAGE: URL from scraped content to verify
+                # RELAXED VALIDATION: Only flag obvious mismatches
+                # Many sites legitimately redirect to different domains (same organization)
+                # Only check for obvious content mismatches, not domain redirects
                 if scraped_text and not scraped_text.startswith("❌"):
                     # Check if scraped content contains PAGE: header
                     page_header_match = re.search(r'PAGE:\s*(https?://[^\s\n]+)', scraped_text[:5000])
@@ -1464,11 +1631,21 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         actual_domain = urlparse(actual_scraped_url).netloc.replace('www.', '').lower()
                         expected_domain = urlparse(normalized_url).netloc.replace('www.', '').lower()
                         
-                        # Verify domains match
-                        if actual_domain != expected_domain:
+                        # Extract base domains (last two parts)
+                        actual_base = '.'.join(actual_domain.split('.')[-2:]) if '.' in actual_domain else actual_domain
+                        expected_base = '.'.join(expected_domain.split('.')[-2:]) if '.' in expected_domain else expected_domain
+                        
+                        # Only flag if:
+                        # 1. Base domains are completely different (not related)
+                        # 2. AND it's not a subdomain variation
+                        # 3. AND content is suspiciously short (might be wrong page)
+                        if actual_base != expected_base:
                             if not (actual_domain.endswith('.' + expected_domain) or expected_domain.endswith('.' + actual_domain)):
-                                # Domain mismatch - content doesn't match URL!
-                                scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
+                                # Check if content is suspiciously short (might be wrong page)
+                                if len(scraped_text.strip()) < 500:
+                                    # Very short content from different domain - likely wrong
+                                    scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
+                                # Otherwise, allow it - many sites redirect to related domains
                 
                 # Generate AI summary if enabled
                 if ai_enabled and ai_api_key and ai_provider and ai_model:
@@ -1682,15 +1859,130 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 if "CompanySummary" not in df.columns:
                     df["CompanySummary"] = ""
                 
-                # Ensure correct column order
-                if "CompanySummary" in df.columns:
-                    df = df[["Website", "ScrapedText", "CompanySummary"]]
-                else:
-                    df = df[["Website", "ScrapedText"]]
+                # CRITICAL: Always ensure CompanySummary exists and enforce 3-column structure
+                if "CompanySummary" not in df.columns:
+                    df["CompanySummary"] = ""
+                # Always enforce 3 columns in correct order
+                df = df[["Website", "ScrapedText", "CompanySummary"]]
                 
                 if len(df) == 0:
                     # Skip writing if DataFrame is empty after filtering
                     continue
+                
+                # CRITICAL: Write Excel file FIRST (more reliable than CSV)
+                # Excel files are always generated and are more accurate for Excel compatibility
+                excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
+                excel_written = False
+                try:
+                    # CRITICAL: Ensure DataFrame has exactly 3 columns with correct names before writing
+                    if "CompanySummary" not in df.columns:
+                        df["CompanySummary"] = ""
+                    df_excel = df[["Website", "ScrapedText", "CompanySummary"]].copy()
+                    
+                    # CRITICAL: Always use openpyxl directly to ensure values are treated as text (not formulas)
+                    from openpyxl import Workbook
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.title = "Scraped Data"
+                    
+                    # Write headers explicitly - CRITICAL: Always 3 columns
+                    ws.append(["Website", "ScrapedText", "CompanySummary"])
+                    
+                    # Write data rows - CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                    for idx in range(len(df_excel)):
+                        row = df_excel.iloc[idx]
+                        
+                        # Extract values by column name to ensure correct order
+                        website = str(row["Website"]) if pd.notna(row["Website"]) else ""
+                        text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
+                        summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
+                        
+                        # CRITICAL: Comprehensive cleaning for Excel compatibility
+                        def clean_excel_value(val):
+                            """Clean value to prevent Excel corruption - very strict"""
+                            if not val:
+                                return ""
+                            import re
+                            # Convert to string and ensure it's a plain string, not an object
+                            val = str(val)
+                            # Remove null bytes first
+                            val = val.replace('\x00', '')
+                            # Remove ALL control characters (including tab, newline, carriage return)
+                            val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
+                            # Remove invalid XML characters (Excel files are XML-based)
+                            # XML 1.0 allows: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD]
+                            # We'll be very strict and only allow printable ASCII + common Unicode
+                            val = ''.join(char for char in val if (
+                                (0x20 <= ord(char) <= 0x7E) or  # Printable ASCII
+                                (0xA0 <= ord(char) <= 0xD7FF) or  # Latin-1 Supplement and beyond
+                                (0xE000 <= ord(char) <= 0xFFFD)  # Private Use and Specials
+                            ))
+                            # Replace any remaining problematic characters with space
+                            val = re.sub(r'[^\x20-\x7E\xA0-\xD7FF\xE000-\xFFFD]', ' ', val)
+                            # Normalize whitespace - replace all whitespace with single space
+                            val = re.sub(r'\s+', ' ', val).strip()
+                            # Ensure it's a valid UTF-8 string
+                            try:
+                                val = val.encode('utf-8', errors='ignore').decode('utf-8')
+                            except:
+                                val = ""
+                            # Truncate to Excel cell limit
+                            val = val[:32767]
+                            # Final check - ensure it's a plain string
+                            if not isinstance(val, str):
+                                val = str(val)
+                            return val
+                        
+                        website = clean_excel_value(website)
+                        text = clean_excel_value(text)
+                        summary = clean_excel_value(summary)
+                        
+                        # CRITICAL: Prepend with single quote if value starts with =, +, -, @ to prevent Excel formula interpretation
+                        row_data = []
+                        for val in [website, text, summary]:
+                            # If value starts with formula-like characters, prepend with single quote to force text mode
+                            if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
+                                val = "'" + val
+                            row_data.append(val)
+                        
+                        # CRITICAL: Write cells directly instead of append to ensure proper string handling
+                        row_num = ws.max_row + 1
+                        for col_idx, val in enumerate(row_data, start=1):
+                            cell = ws.cell(row=row_num, column=col_idx)
+                            # Ensure value is a plain string
+                            if val is None:
+                                val = ""
+                            val = str(val)
+                            # Set value and force string type - this prevents string property issues
+                            cell.value = val
+                            cell.data_type = 's'  # Force string type
+                    
+                    # CRITICAL: Save with explicit error handling
+                    try:
+                        wb.save(excel_path)
+                    except Exception as save_error:
+                        # If save fails, try to save with minimal data
+                        print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
+                        # Create a fresh workbook with just headers
+                        wb_recovery = Workbook()
+                        ws_recovery = wb_recovery.active
+                        ws_recovery.title = "Scraped Data"
+                        ws_recovery.append(["Website", "ScrapedText", "CompanySummary"])
+                        wb_recovery.save(excel_path)
+                        raise save_error
+                    
+                    # Verify Excel file was written
+                    if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
+                        files_written.append(excel_path)
+                        excel_written = True
+                        print(f"✅ Writer: Successfully wrote Excel file: {excel_path} ({len(df_excel)} rows)")
+                    else:
+                        print(f"❌ Writer: Excel file was not created or is empty: {excel_path}")
+                except Exception as e:
+                    # If Excel fails, log error but continue
+                    print(f"⚠️ Writer: Excel export failed for part {part}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
                 # PERFECT CSV WRITING - Zero tolerance for errors
                 csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
@@ -1713,8 +2005,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         # Write header - ALWAYS 3 columns in exact order
                         writer.writerow(["Website", "ScrapedText", "CompanySummary"])
                         # Write rows - ensure all values are strings and properly cleaned
-                        # CRITICAL: Extract by column name to ensure correct order
-                        for idx, row in df.iterrows():
+                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                        for idx in range(len(df)):
+                            row = df.iloc[idx]
                             row_values = []
                             
                             # Extract values by column name (not position) to ensure correct order
@@ -1722,15 +2015,16 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
                             company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
                             
-                            # Clean each value
+                            # Clean each value - CRITICAL: Remove newlines and normalize whitespace
                             def clean_val(v):
                                 if not v:
                                     return ""
                                 import re
-                                v = v.replace('\x00', '')
-                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
-                                v = re.sub(r'\s+', ' ', v).strip()
+                                v = str(v)
+                                v = v.replace('\x00', '')  # Remove null bytes
+                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')  # Replace newlines/tabs with space
+                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)  # Remove control chars
+                                v = re.sub(r'\s+', ' ', v).strip()  # Normalize whitespace
                                 return v
                             
                             # Add values in correct order: Website, ScrapedText, CompanySummary
@@ -1744,6 +2038,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                                     row_values.append("")
                                 row_values = row_values[:3]
                             
+                            # CRITICAL: csv.writer with QUOTE_ALL will automatically quote all fields
+                            # and escape internal quotes by doubling them (Excel standard)
                             writer.writerow(row_values)
                     
                     # Verify file was written
@@ -1758,56 +2054,43 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         test_df = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
                         # Check row count matches
                         if len(test_df) != len(df):
-                            raise ValueError(f"CSV validation failed: row count mismatch")
-                        # Check column count matches
-                        if len(test_df.columns) != len(df.columns):
-                            raise ValueError(f"CSV validation failed: column count mismatch")
+                            raise ValueError(f"CSV validation failed: row count mismatch (expected {len(df)}, got {len(test_df)})")
+                        # CRITICAL: Check column count is exactly 3
+                        if len(test_df.columns) != 3:
+                            raise ValueError(f"CSV validation failed: column count is {len(test_df.columns)}, expected 3. Columns: {list(test_df.columns)}")
+                        # Check column names match expected
+                        expected_cols = ["Website", "ScrapedText", "CompanySummary"]
+                        if list(test_df.columns) != expected_cols:
+                            raise ValueError(f"CSV validation failed: column names don't match. Expected {expected_cols}, got {list(test_df.columns)}")
                     except Exception as e:
                         # If validation fails, log but don't rewrite (already used manual writer)
                         import logging
                         logging.warning(f"CSV validation warning: {e}")
+                        # Also print to console for debugging
+                        print(f"⚠️ CSV validation warning for {csv_path}: {e}")
                 except Exception as e:
-                    # Final fallback: manual CSV writing
+                    # Final fallback: manual CSV writing - CRITICAL: Always write 3 columns
                     import logging
                     logging.error(f"CSV write failed: {e}. Using manual writer...")
-                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
-                        writer.writerow(df.columns.tolist())
-                        for _, row in df.iterrows():
-                            writer.writerow([str(val) if pd.notna(val) else '' for val in row])
-                
-                # Save Excel file (optimized for large files)
-                excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
-                try:
-                    # CRITICAL: Ensure DataFrame has exactly 3 columns with correct names before writing
+                    # Ensure CompanySummary exists before fallback write
                     if "CompanySummary" not in df.columns:
                         df["CompanySummary"] = ""
                     df = df[["Website", "ScrapedText", "CompanySummary"]]
-                    
-                    # For very large files, use write_only mode to save memory
-                    if len(df) > 10000:
-                        from openpyxl import Workbook
-                        wb = Workbook(write_only=True)
-                        ws = wb.create_sheet()
-                        # Always write 3 columns with explicit headers
-                        ws.append(["Website", "ScrapedText", "CompanySummary"])
-                        for _, row in df.iterrows():
-                            website = str(row["Website"]) if pd.notna(row["Website"]) else ""
-                            text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
-                            summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
-                            # Truncate to Excel limits
-                            website = website[:255]
-                            text = text[:32767]
-                            summary = summary[:32767]
-                            ws.append([website, text, summary])
-                        wb.save(excel_path)
-                    else:
-                        # Use pandas to_excel with explicit column names
-                        df.to_excel(excel_path, index=False, engine='openpyxl', sheet_name='Sheet1')
-                except Exception as e:
-                    # If Excel fails, log but continue (CSV is more important)
-                    import logging
-                    logging.warning(f"Excel export failed for part {part}: {e}")
+                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
+                        # ALWAYS write 3-column header
+                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                        for idx in range(len(df)):
+                            row = df.iloc[idx]
+                            # Extract by column name to ensure correct order, always 3 values
+                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                            writer.writerow([website, scraped_text, company_summary])
+                
+                # Excel file already written above, skip duplicate writing
+                pass
             except Exception as e:
                 # If Excel fails for large file, at least save CSV with perfect formatting
                 try:
@@ -1825,28 +2108,69 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         return df
                     df = clean_dataframe_for_csv(df.copy())
                     
+                    # CRITICAL: Ensure CompanySummary exists before writing
+                    if "CompanySummary" not in df.columns:
+                        df["CompanySummary"] = ""
+                    df = df[["Website", "ScrapedText", "CompanySummary"]]
+                    
                     # Use manual CSV writer for perfect quoting
+                    # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                         writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                        writer.writerow(df.columns.tolist())
-                        for _, row in df.iterrows():
+                        # ALWAYS write 3-column header
+                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                        
+                        # CRITICAL: Use iloc to prevent iterrows() misalignment issues
+                        for idx in range(len(df)):
+                            row = df.iloc[idx]
                             row_values = []
-                            for val in row:
-                                if pd.isna(val):
-                                    row_values.append('')
-                                else:
-                                    val_str = str(val).replace('\n', ' ').replace('\r', ' ')
-                                    import re
-                                    val_str = re.sub(r'\s+', ' ', val_str).strip()
-                                    row_values.append(val_str)
+                            
+                            # Extract by column name to ensure correct order
+                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                            
+                            # Clean values - CRITICAL: Remove newlines and normalize whitespace
+                            def clean_csv_val(v):
+                                if not v:
+                                    return ''
+                                import re
+                                v = str(v)
+                                v = v.replace('\x00', '')  # Remove null bytes
+                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')  # Replace newlines/tabs with space
+                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)  # Remove control chars
+                                v = re.sub(r'\s+', ' ', v).strip()  # Normalize whitespace
+                                return v
+                            
+                            row_values.append(clean_csv_val(website))
+                            row_values.append(clean_csv_val(scraped_text))
+                            row_values.append(clean_csv_val(company_summary))
+                            
+                            # Ensure exactly 3 values
+                            while len(row_values) < 3:
+                                row_values.append('')
+                            row_values = row_values[:3]
+                            
+                            # CRITICAL: csv.writer with QUOTE_ALL will automatically quote all fields
+                            # and escape internal quotes by doubling them (Excel standard)
                             writer.writerow(row_values)
                 except:
-                    # Ultimate fallback: manual writer
+                    # Ultimate fallback: manual writer - CRITICAL: Always write 3 columns
+                    if "CompanySummary" not in df.columns:
+                        df["CompanySummary"] = ""
+                    df = df[["Website", "ScrapedText", "CompanySummary"]]
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                         writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
-                        writer.writerow(df.columns.tolist())
-                        for _, row in df.iterrows():
-                            writer.writerow([str(val) if pd.notna(val) else '' for val in row])
+                        # ALWAYS write 3-column header
+                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                        for idx in range(len(df)):
+                            row = df.iloc[idx]
+                            # Extract by column name to ensure correct order, always 3 values
+                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                            writer.writerow([website, scraped_text, company_summary])
 
         result_queue.task_done()
 
@@ -1908,7 +2232,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         writer.writerow(["Website", "ScrapedText", "CompanySummary"])
                         
                         # Write rows - extract by column name to ensure correct order
-                        for idx, row in df.iterrows():
+                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                        for idx in range(len(df)):
+                            row = df.iloc[idx]
                             row_values = []
                             
                             # Extract values by column name (not position) to ensure correct order
@@ -1948,25 +2274,79 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             df["CompanySummary"] = ""
                         df = df[["Website", "ScrapedText", "CompanySummary"]]
                         
-                        if len(df) > 10000:
-                            from openpyxl import Workbook
-                            wb = Workbook(write_only=True)
-                            ws = wb.create_sheet()
-                            # Always write 3 columns with explicit headers
-                            ws.append(["Website", "ScrapedText", "CompanySummary"])
-                            for _, row in df.iterrows():
-                                website = str(row["Website"]) if pd.notna(row["Website"]) else ""
-                                text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
-                                summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
-                                # Truncate to Excel limits
-                                website = website[:255]
-                                text = text[:32767]
-                                summary = summary[:32767]
-                                ws.append([website, text, summary])
+                        # CRITICAL: Always write Excel files (not just for large files)
+                        # Excel files are more reliable than CSV for Excel compatibility
+                        from openpyxl import Workbook
+                        wb = Workbook()
+                        ws = wb.active
+                        ws.title = "Scraped Data"
+                        
+                        # Write headers explicitly - CRITICAL: Always 3 columns
+                        ws.append(["Website", "ScrapedText", "CompanySummary"])
+                        
+                        # Write data rows - CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                        for idx in range(len(df)):
+                            row = df.iloc[idx]
+                            
+                            # Extract values by column name to ensure correct order
+                            website = str(row["Website"]) if pd.notna(row["Website"]) else ""
+                            text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
+                            summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
+                            
+                            # CRITICAL: Comprehensive cleaning for Excel compatibility
+                            def clean_excel_value(val):
+                                """Clean value to prevent Excel corruption"""
+                                if not val:
+                                    return ""
+                                import re
+                                val = str(val)
+                                val = val.replace('\x00', '')
+                                val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
+                                # Remove invalid XML characters (Excel files are XML-based)
+                                val = ''.join(char for char in val if (
+                                    ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or
+                                    (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
+                                ))
+                                val = val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                                val = re.sub(r'\s+', ' ', val).strip()
+                                val = val[:32767]
+                                return val
+                            
+                            website = clean_excel_value(website)
+                            text = clean_excel_value(text)
+                            summary = clean_excel_value(summary)
+                            
+                            # CRITICAL: Prepend with single quote if value starts with =, +, -, @ to prevent Excel formula interpretation
+                            row_data = []
+                            for val in [website, text, summary]:
+                                # If value starts with formula-like characters, prepend with single quote to force text mode
+                                if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
+                                    val = "'" + val
+                                row_data.append(val)
+                            
+                            # CRITICAL: Write cells directly instead of append to ensure proper string handling
+                            row_num = ws.max_row + 1
+                            for col_idx, val in enumerate(row_data, start=1):
+                                cell = ws.cell(row=row_num, column=col_idx)
+                                # Ensure value is a plain string
+                                if val is None:
+                                    val = ""
+                                val = str(val)
+                                # Set value and force string type - this prevents string property issues
+                                cell.value = val
+                                cell.data_type = 's'  # Force string type
+                        
+                        # CRITICAL: Save with explicit error handling
+                        try:
                             wb.save(excel_path)
-                        else:
-                            # Use pandas to_excel with explicit column names
-                            df.to_excel(excel_path, index=False, engine='openpyxl', sheet_name='Sheet1')
+                        except Exception as save_error:
+                            print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
+                            wb_recovery = Workbook()
+                            ws_recovery = wb_recovery.active
+                            ws_recovery.title = "Scraped Data"
+                            ws_recovery.append(["Website", "ScrapedText", "CompanySummary"])
+                            wb_recovery.save(excel_path)
+                            raise save_error
                         
                         # Verify Excel file was written
                         if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
@@ -2008,9 +2388,26 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         await url_queue.put((u, idx))
 
     timeout_obj = aiohttp.ClientTimeout(total=None)
-    connector = aiohttp.TCPConnector(limit=0, ssl=False)
+    # Use cookie jar for session persistence (makes requests look more legitimate)
+    cookie_jar = aiohttp.CookieJar(unsafe=True)  # Allow cross-domain cookies
+    # EPIC connector settings for maximum stealth
+    connector = aiohttp.TCPConnector(
+        limit=100,  # Connection pool limit
+        limit_per_host=5,  # Max 5 connections per host (prevents hammering)
+        ssl=False,
+        enable_cleanup_closed=True,
+        keepalive_timeout=30,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+    )
+    # Store user agent in session headers for fetch() to use when generating realistic headers
     session = aiohttp.ClientSession(
-        headers={"User-Agent": user_agent}, connector=connector, timeout=timeout_obj)
+        headers={"User-Agent": user_agent}, 
+        connector=connector, 
+        timeout=timeout_obj, 
+        cookie_jar=cookie_jar,
+        trust_env=True  # Use system proxy settings if available
+    )
 
     writer_task = asyncio.create_task(writer_coroutine(
         result_queue, rows_per_file, output_dir, total, progress_callback))
@@ -2143,24 +2540,237 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 # Streamlit UI
 # -------------------------
 
-st.set_page_config(page_title="Web Scraper", layout="wide", page_icon="🌐")
+st.set_page_config(
+    page_title="Web Scraper", 
+    layout="wide", 
+    page_icon="🌐",
+    initial_sidebar_state="collapsed"
+)
 
-# Clean header
-st.title("🌐 Website Scraper")
-st.caption("Scrape websites from your CSV file and get clean text content")
-
-# Main tabs - Step by step flow
-tab1, tab2, tab3 = st.tabs(["📁 Step 1: Upload CSV", "⚙️ Step 2: Settings", "🤖 Step 3: AI (Optional)"])
-
-with tab1:
-    st.markdown("### Upload Your CSV File")
-    st.info("💡 Your CSV should have a column with website URLs (one per row)")
+# Comprehensive modern UI styling
+st.markdown("""
+<style>
+    /* Main container improvements */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1200px;
+    }
     
-    uploaded_file = st.file_uploader(
-        "Choose CSV file", 
-        type=["csv"],
-        help="Upload a CSV file with website URLs"
-    )
+    /* Header styling */
+    h1 {
+        color: #1f2937;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+        font-size: 2.5rem;
+    }
+    
+    /* Step containers with modern design */
+    .step1-container {
+        background: linear-gradient(135deg, #E3F2FD 0%, #BBDEFB 100%);
+        padding: 2rem;
+        border-radius: 12px;
+        border-left: 5px solid #2196F3;
+        margin-bottom: 2rem;
+        box-shadow: 0 2px 8px rgba(33, 150, 243, 0.15);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    .step1-container:hover {
+        box-shadow: 0 4px 12px rgba(33, 150, 243, 0.25);
+    }
+    
+    .step2-container {
+        background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
+        padding: 2rem;
+        border-radius: 12px;
+        border-left: 5px solid #4CAF50;
+        margin-bottom: 2rem;
+        box-shadow: 0 2px 8px rgba(76, 175, 80, 0.15);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    .step2-container:hover {
+        box-shadow: 0 4px 12px rgba(76, 175, 80, 0.25);
+    }
+    
+    .step3-container {
+        background: linear-gradient(135deg, #F3E5F5 0%, #E1BEE7 100%);
+        padding: 2rem;
+        border-radius: 12px;
+        border-left: 5px solid #9C27B0;
+        margin-bottom: 2rem;
+        box-shadow: 0 2px 8px rgba(156, 39, 176, 0.15);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    .step3-container:hover {
+        box-shadow: 0 4px 12px rgba(156, 39, 176, 0.25);
+    }
+    
+    /* Section headers */
+    h3 {
+        color: #1f2937;
+        font-weight: 600;
+        margin-top: 0;
+        margin-bottom: 1rem;
+        font-size: 1.5rem;
+    }
+    
+    h4 {
+        color: #374151;
+        font-weight: 600;
+        margin-top: 1.5rem;
+        margin-bottom: 0.75rem;
+    }
+    
+    /* Info boxes */
+    .stInfo {
+        background-color: #f0f9ff;
+        border-left: 4px solid #0ea5e9;
+        border-radius: 8px;
+        padding: 1rem;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        font-weight: 600;
+        padding: 0.75rem 2rem;
+        border-radius: 8px;
+        border: none;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
+    }
+    
+    /* Input fields */
+    .stTextInput > div > div > input {
+        border-radius: 8px;
+        border: 2px solid #e5e7eb;
+        transition: border-color 0.3s ease;
+    }
+    
+    .stTextInput > div > div > input:focus {
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+    
+    /* Select boxes */
+    .stSelectbox > div > div > select {
+        border-radius: 8px;
+        border: 2px solid #e5e7eb;
+    }
+    
+    /* Sliders */
+    .stSlider > div > div {
+        border-radius: 8px;
+    }
+    
+    /* File uploader */
+    .stFileUploader > div {
+        border-radius: 8px;
+        border: 2px dashed #cbd5e1;
+        padding: 2rem;
+        transition: all 0.3s ease;
+    }
+    
+    .stFileUploader > div:hover {
+        border-color: #667eea;
+        background-color: #f8fafc;
+    }
+    
+    /* Success/Error messages */
+    .stSuccess {
+        border-radius: 8px;
+        padding: 1rem;
+    }
+    
+    .stError {
+        border-radius: 8px;
+        padding: 1rem;
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        font-weight: 600;
+        color: #374151;
+    }
+    
+    /* Captions */
+    .stCaption {
+        color: #6b7280;
+        font-size: 0.9rem;
+    }
+    
+    /* Dividers */
+    hr {
+        margin: 2rem 0;
+        border: none;
+        border-top: 2px solid #e5e7eb;
+    }
+    
+    /* Radio buttons */
+    .stRadio > div {
+        gap: 1rem;
+    }
+    
+    .stRadio > div > label {
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        transition: background-color 0.2s ease;
+    }
+    
+    /* Number inputs */
+    .stNumberInput > div > div > input {
+        border-radius: 8px;
+        border: 2px solid #e5e7eb;
+    }
+    
+    /* Remove default Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# Modern header with better styling
+st.markdown("""
+<div style="text-align: center; padding: 2rem 0; margin-bottom: 2rem;">
+    <h1 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+               -webkit-background-clip: text;
+               -webkit-text-fill-color: transparent;
+               background-clip: text;
+               margin-bottom: 0.5rem;
+               font-size: 3rem;
+               font-weight: 800;">
+        🌐 Website Scraper
+    </h1>
+    <p style="color: #6b7280; font-size: 1.1rem; margin-top: 0.5rem;">
+        Scrape websites from your CSV file and get clean, structured text content
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+# Step 1: Upload CSV
+st.markdown('<div class="step1-container">', unsafe_allow_html=True)
+st.markdown("### 📁 Step 1: Upload CSV")
+st.markdown("""
+<div style="background-color: #f0f9ff; border-left: 4px solid #0ea5e9; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+    <strong>💡 Tip:</strong> Your CSV should have a column with website URLs (one per row)
+</div>
+""", unsafe_allow_html=True)
+
+uploaded_file = st.file_uploader(
+    "Choose CSV file", 
+    type=["csv"],
+    help="Upload a CSV file with website URLs"
+)
 
 # CSV Configuration (shown after file upload)
 csv_has_headers = None
@@ -2299,226 +2909,240 @@ if uploaded_file is not None:
         st.error(f"❌ Error reading CSV: {str(e)}")
         st.info("Please check your CSV file format and try again.")
 
-with tab2:
-    st.markdown("### Configure Scraping Settings")
-    st.info("💡 Most settings have good defaults. You can leave them as-is or adjust if needed.")
-    
-    col1, col2 = st.columns(2)
+st.markdown('</div>', unsafe_allow_html=True)
 
-    with col1:
-        st.markdown("#### Basic Settings")
-        
-        # Keywords - Simplified
-        keywords_input = st.text_input(
-            "Keywords to find (optional)",
-            value=st.session_state.get('keywords_input', "about,service,product"),
-            help="Comma-separated keywords. The scraper will look for pages with these in the URL (e.g., 'about', 'service', 'product')",
-            key="keywords_input"
-        )
-        keywords = process_keywords(keywords_input)
-        st.session_state['keywords'] = keywords
-        
-        if keywords:
-            st.caption(f"✅ Looking for: {', '.join(keywords)}")
-        else:
-            st.caption("💡 Leave empty to scrape homepage only")
-        
-        # Speed
-        concurrency = st.slider(
-            "Speed (parallel workers)", 
-            1, 50, st.session_state.get('concurrency', 20),
-            help="How many websites to scrape at the same time. Higher = faster but may cause errors. 20-30 is usually best.",
-            key="concurrency"
-        )
-        
-        # Pages to scrape
-        depth = st.slider(
-            "Pages to scrape per site", 
-            0, 5, st.session_state.get('depth', 3),
-            help="How many pages to scrape from each website. 0 = homepage only, 3 = homepage + 3 more pages",
-            key="depth"
-        )
-        
-        # Retries
-        retries = st.number_input(
-            "Retries if failed", 
-            0, 5, st.session_state.get('retries', 2),
-            help="If a website fails, how many times to try again. 2 is usually enough.",
-            key="retries"
-        )
+# Step 2: Settings
+st.markdown('<div class="step2-container">', unsafe_allow_html=True)
+st.markdown("### ⚙️ Step 2: Settings")
+st.markdown("""
+<div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+    <strong>💡 Tip:</strong> Most settings have good defaults. You can leave them as-is or adjust if needed.
+</div>
+""", unsafe_allow_html=True)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("#### Basic Settings")
     
-    with col2:
-        st.markdown("#### Advanced Settings")
-        
-        # Timeout
-        timeout = st.number_input(
-            "Wait time per site (seconds)", 
-            2, 60, st.session_state.get('timeout', 15),
-            help="How long to wait for each website before giving up. 15 seconds is usually fine.",
-            key="timeout"
-        )
-        
-        # Max chars
-        max_chars = st.number_input(
-            "Text limit per site", 
-            1000, 200000, st.session_state.get('max_chars', 50000),
-            step=5000,
-            help="Maximum characters to scrape from each website. Higher = more content but larger files.",
-            key="max_chars"
-        )
-        
-        # Rows per file
-        rows_per_file = st.number_input(
-            "Split files every X rows", 
-            1000, 50000, st.session_state.get('rows_per_file', 2000), step=1000,
-            help="Large results will be split into multiple files. 2000 rows per file is usually good.",
-            key="rows_per_file"
-        )
-        
-        # User Agent - Hidden in expander
-        with st.expander("🔧 User-Agent (Advanced)", expanded=False):
-            user_agent = st.text_input(
-                "User-Agent", 
-                value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
-                help="Browser identifier sent to websites. Usually don't need to change this.",
-                key="user_agent"
-            )
+    # Keywords - Simplified
+    keywords_input = st.text_input(
+        "Keywords to find (optional)",
+        value=st.session_state.get('keywords_input', "about,service,product"),
+        help="Comma-separated keywords. The scraper will look for pages with these in the URL (e.g., 'about', 'service', 'product')",
+        key="keywords_input"
+    )
+    keywords = process_keywords(keywords_input)
+    st.session_state['keywords'] = keywords
     
-    # Output Settings
+    if keywords:
+        st.caption(f"✅ Looking for: {', '.join(keywords)}")
+    else:
+        st.caption("💡 Leave empty to scrape homepage only")
+    
+    # Speed
+    concurrency = st.slider(
+        "Speed (parallel workers)", 
+        1, 50, st.session_state.get('concurrency', 20),
+        help="How many websites to scrape at the same time. Higher = faster but may cause errors. 20-30 is usually best.",
+        key="concurrency"
+    )
+    
+    # Pages to scrape
+    depth = st.slider(
+        "Pages to scrape per site", 
+        0, 5, st.session_state.get('depth', 3),
+        help="How many pages to scrape from each website. 0 = homepage only, 3 = homepage + 3 more pages",
+        key="depth"
+    )
+    
+    # Retries
+    retries = st.number_input(
+        "Retries if failed", 
+        0, 5, st.session_state.get('retries', 2),
+        help="If a website fails, how many times to try again. 2 is usually enough.",
+        key="retries"
+    )
+
+with col2:
+    st.markdown("#### Advanced Settings")
+    
+    # Timeout
+    timeout = st.number_input(
+        "Wait time per site (seconds)", 
+        2, 60, st.session_state.get('timeout', 15),
+        help="How long to wait for each website before giving up. 15 seconds is usually fine.",
+        key="timeout"
+    )
+    
+    # Max chars
+    max_chars = st.number_input(
+        "Text limit per site", 
+        1000, 200000, st.session_state.get('max_chars', 50000),
+        step=5000,
+        help="Maximum characters to scrape from each website. Higher = more content but larger files.",
+        key="max_chars"
+    )
+    
+    # Rows per file
+    rows_per_file = st.number_input(
+        "Split files every X rows", 
+        1000, 50000, st.session_state.get('rows_per_file', 2000), step=1000,
+        help="Large results will be split into multiple files. 2000 rows per file is usually good.",
+        key="rows_per_file"
+    )
+    
+    # User Agent - Hidden in expander
+    with st.expander("🔧 User-Agent (Advanced)", expanded=False):
+        user_agent = st.text_input(
+            "User-Agent", 
+            value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+            help="Browser identifier sent to websites. Usually don't need to change this.",
+            key="user_agent"
+        )
+
+# Output Settings
+st.markdown("---")
+st.markdown("#### Output Folder")
+
+run_name = st.text_input(
+    "Folder name (optional)", 
+    value=st.session_state.get('run_name', ""),
+    help="Give your results folder a custom name. Leave empty for automatic name.",
+    key="run_name"
+)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Step 3: AI (Optional)
+st.markdown('<div class="step3-container">', unsafe_allow_html=True)
+st.markdown("### 🤖 Step 3: AI (Optional)")
+st.markdown("""
+<div style="background-color: #faf5ff; border-left: 4px solid #a855f7; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+    <strong>💡 Tip:</strong> Use AI to automatically create company summaries from scraped content. Requires an API key.
+</div>
+""", unsafe_allow_html=True)
+
+ai_enabled = st.checkbox(
+    "Generate AI summaries",
+    value=st.session_state.get('ai_enabled', False),
+    help="Check this to enable AI-powered company summary generation",
+    key="ai_enabled_checkbox"
+)
+st.session_state['ai_enabled'] = ai_enabled
+
+if ai_enabled:
     st.markdown("---")
-    st.markdown("#### Output Folder")
-    
-    run_name = st.text_input(
-        "Folder name (optional)", 
-        value=st.session_state.get('run_name', ""),
-        help="Give your results folder a custom name. Leave empty for automatic name.",
-        key="run_name"
+    # Step 1: Choose AI service
+    st.markdown("#### Step 1: Choose AI Service")
+    ai_provider = st.selectbox(
+        "Which AI service?",
+        ["OpenAI", "Gemini"],
+        help="OpenAI (GPT models) or Google Gemini",
+        key="ai_provider_select"
     )
-
-with tab3:
-    st.markdown("### Generate AI Summaries (Optional)")
-    st.info("💡 Use AI to automatically create company summaries from scraped content. Requires an API key.")
+    st.session_state['ai_provider'] = ai_provider
     
-    ai_enabled = st.checkbox(
-        "Generate AI summaries",
-        value=st.session_state.get('ai_enabled', False),
-        help="Check this to enable AI-powered company summary generation",
-        key="ai_enabled_checkbox"
+    # Step 2: Enter API key
+    st.markdown("#### Step 2: Enter API Key")
+    api_key_key = f"{ai_provider.lower()}_api_key"
+    stored_api_key = st.session_state.get(api_key_key, "")
+    
+    if ai_provider == "OpenAI":
+        st.caption("Get your API key from: https://platform.openai.com/api-keys")
+    else:
+        st.caption("Get your API key from: https://makersuite.google.com/app/apikey")
+    
+    ai_api_key = st.text_input(
+        f"{ai_provider} API Key",
+        value=stored_api_key,
+        type="password",
+        help=f"Paste your {ai_provider} API key here"
     )
-    st.session_state['ai_enabled'] = ai_enabled
     
-    if ai_enabled:
-        st.markdown("---")
-        # Step 1: Choose AI service
-        st.markdown("#### Step 1: Choose AI Service")
-        ai_provider = st.selectbox(
-            "Which AI service?",
-            ["OpenAI", "Gemini"],
-            help="OpenAI (GPT models) or Google Gemini",
-            key="ai_provider_select"
-        )
-        st.session_state['ai_provider'] = ai_provider
-        
-        # Step 2: Enter API key
-        st.markdown("#### Step 2: Enter API Key")
-        api_key_key = f"{ai_provider.lower()}_api_key"
-        stored_api_key = st.session_state.get(api_key_key, "")
-        
-        if ai_provider == "OpenAI":
-            st.caption("Get your API key from: https://platform.openai.com/api-keys")
-        else:
-            st.caption("Get your API key from: https://makersuite.google.com/app/apikey")
-        
-        ai_api_key = st.text_input(
-            f"{ai_provider} API Key",
-            value=stored_api_key,
-            type="password",
-            help=f"Paste your {ai_provider} API key here"
-        )
-        
-        # Save API key
-        if ai_api_key:
-            if ai_api_key != stored_api_key:
-                st.session_state[api_key_key] = ai_api_key
-                st.session_state['ai_api_key'] = ai_api_key
-                st.session_state[f"{ai_provider.lower()}_models"] = None
-            st.success("✅ API key saved")
-        elif stored_api_key and not ai_api_key:
-            st.session_state[api_key_key] = ""
-            st.session_state['ai_api_key'] = ""
+    # Save API key
+    if ai_api_key:
+        if ai_api_key != stored_api_key:
+            st.session_state[api_key_key] = ai_api_key
+            st.session_state['ai_api_key'] = ai_api_key
             st.session_state[f"{ai_provider.lower()}_models"] = None
-        
-        # Always sync generic key
-        st.session_state['ai_api_key'] = st.session_state.get(api_key_key, "")
-        
-        # Step 3: Choose model
-        st.markdown("#### Step 3: Choose Model")
-        models_cache_key = f"{ai_provider.lower()}_models"
-        cached_models = st.session_state.get(models_cache_key)
-        
-        if ai_api_key and ai_api_key.strip():
-            if cached_models is None:
-                with st.spinner(f"Loading available models..."):
-                    try:
-                        if os.name == "nt":
-                            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-                        
-                        if ai_provider == "OpenAI":
-                            models = asyncio.run(fetch_openai_models(ai_api_key))
-                        else:
-                            models = asyncio.run(fetch_gemini_models(ai_api_key))
-                        
-                        if models:
-                            st.session_state[models_cache_key] = models
-                            cached_models = models
-                        else:
-                            cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
-                            st.session_state[models_cache_key] = cached_models
-                    except Exception as e:
-                        st.warning("⚠️ Could not load models. Using defaults.")
+        st.success("✅ API key saved")
+    elif stored_api_key and not ai_api_key:
+        st.session_state[api_key_key] = ""
+        st.session_state['ai_api_key'] = ""
+        st.session_state[f"{ai_provider.lower()}_models"] = None
+    
+    # Always sync generic key
+    st.session_state['ai_api_key'] = st.session_state.get(api_key_key, "")
+    
+    # Step 3: Choose model
+    st.markdown("#### Step 3: Choose Model")
+    models_cache_key = f"{ai_provider.lower()}_models"
+    cached_models = st.session_state.get(models_cache_key)
+    
+    if ai_api_key and ai_api_key.strip():
+        if cached_models is None:
+            with st.spinner(f"Loading available models..."):
+                try:
+                    if os.name == "nt":
+                        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                    
+                    if ai_provider == "OpenAI":
+                        models = asyncio.run(fetch_openai_models(ai_api_key))
+                    else:
+                        models = asyncio.run(fetch_gemini_models(ai_api_key))
+                    
+                    if models:
+                        st.session_state[models_cache_key] = models
+                        cached_models = models
+                    else:
                         cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
                         st.session_state[models_cache_key] = cached_models
-            
-            if cached_models:
-                default_index = 0
-                if ai_provider == "OpenAI":
-                    if "gpt-4o-mini" in cached_models:
-                        default_index = cached_models.index("gpt-4o-mini")
-                    elif "gpt-4o" in cached_models:
-                        default_index = cached_models.index("gpt-4o")
-                else:
-                    if "gemini-1.5-flash" in cached_models:
-                        default_index = cached_models.index("gemini-1.5-flash")
-                    elif "gemini-1.5-pro" in cached_models:
-                        default_index = cached_models.index("gemini-1.5-pro")
-                
-                ai_model = st.selectbox(
-                    "Select model",
-                    options=cached_models,
-                    index=default_index,
-                    help="Choose which AI model to use. Defaults are usually best.",
-                    key=f"{ai_provider}_model_select"
-                )
-                st.session_state['ai_model'] = ai_model
-                st.session_state['ai_provider'] = ai_provider
-                
-                st.caption(f"✅ {len(cached_models)} models available")
+                except Exception as e:
+                    st.warning("⚠️ Could not load models. Using defaults.")
+                    cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                    st.session_state[models_cache_key] = cached_models
+        
+        if cached_models:
+            default_index = 0
+            if ai_provider == "OpenAI":
+                if "gpt-4o-mini" in cached_models:
+                    default_index = cached_models.index("gpt-4o-mini")
+                elif "gpt-4o" in cached_models:
+                    default_index = cached_models.index("gpt-4o")
             else:
-                ai_model = None
+                if "gemini-1.5-flash" in cached_models:
+                    default_index = cached_models.index("gemini-1.5-flash")
+                elif "gemini-1.5-pro" in cached_models:
+                    default_index = cached_models.index("gemini-1.5-pro")
+            
+            ai_model = st.selectbox(
+                "Select model",
+                options=cached_models,
+                index=default_index,
+                help="Choose which AI model to use. Defaults are usually best.",
+                key=f"{ai_provider}_model_select"
+            )
+            st.session_state['ai_model'] = ai_model
+            st.session_state['ai_provider'] = ai_provider
+            
+            st.caption(f"✅ {len(cached_models)} models available")
         else:
-            st.info("👆 Enter your API key above to see available models")
             ai_model = None
-        
-        # Step 4: Prompt (simplified)
-        st.markdown("#### Step 4: Prompt (Optional)")
-        prompt_mode = st.radio(
-            "Prompt options",
-            ["Use default prompt", "Customize prompt"],
-            horizontal=True,
-            help="Default prompt works great for most cases"
-        )
-        
-        default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
+    else:
+        st.info("👆 Enter your API key above to see available models")
+        ai_model = None
+    
+    # Step 4: Prompt (simplified)
+    st.markdown("#### Step 4: Prompt (Optional)")
+    prompt_mode = st.radio(
+        "Prompt options",
+        ["Use default prompt", "Customize prompt"],
+        horizontal=True,
+        help="Default prompt works great for most cases"
+    )
+    
+    default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
 INPUT
 You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
@@ -2603,42 +3227,51 @@ CRITICAL:
 - Do NOT truncate words mid-word
 - Do NOT mix facts into hypotheses section
 - Keep facts grounded (from webcopy), hypotheses inferred (from signals)"""
-        
-        if 'master_prompt' not in st.session_state:
-            st.session_state['master_prompt'] = default_prompt_template
-        
-        if prompt_mode == "Customize prompt":
-            st.caption("💡 Use {url}, {company_name}, and {scraped_content} as placeholders")
-            ai_prompt = st.text_area(
-                "Custom prompt",
-                value=st.session_state.get('master_prompt', default_prompt_template),
-                height=300,
-                help="Edit the prompt that will be sent to AI",
-                key="ai_prompt_edit"
-            )
-            st.session_state['master_prompt'] = ai_prompt
-        else:
-            ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
-        
-        st.session_state['ai_prompt'] = ai_prompt
-        
-        with st.expander("👁️ Preview how prompt will look", expanded=False):
-            sample_url = "https://example.com"
-            sample_company = "Example Company"
-            sample_content = "Sample website content..."
-            preview = ai_prompt.replace('{url}', sample_url).replace('{company_name}', sample_company).replace('{scraped_content}', sample_content[:200])
-            st.code(preview, language=None)
     
+    if 'master_prompt' not in st.session_state:
+        st.session_state['master_prompt'] = default_prompt_template
+    
+    if prompt_mode == "Customize prompt":
+        st.caption("💡 Use {url}, {company_name}, and {scraped_content} as placeholders")
+        ai_prompt = st.text_area(
+            "Custom prompt",
+            value=st.session_state.get('master_prompt', default_prompt_template),
+            height=300,
+            help="Edit the prompt that will be sent to AI",
+            key="ai_prompt_edit"
+        )
+        st.session_state['master_prompt'] = ai_prompt
     else:
-        ai_api_key = None
-        ai_provider = None
-        ai_model = None
-        ai_prompt = None
+        ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
+    
+    st.session_state['ai_prompt'] = ai_prompt
+    
+    with st.expander("👁️ Preview how prompt will look", expanded=False):
+        sample_url = "https://example.com"
+        sample_company = "Example Company"
+        sample_content = "Sample website content..."
+        preview = ai_prompt.replace('{url}', sample_url).replace('{company_name}', sample_company).replace('{scraped_content}', sample_content[:200])
+        st.code(preview, language=None)
 
-# Main action button - Outside tabs
+else:
+    ai_api_key = None
+    ai_provider = None
+    ai_model = None
+    ai_prompt = None
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Main action button with better styling
 st.markdown("---")
-st.markdown("### 🚀 Ready to Start")
-st.info("💡 Make sure you've uploaded your CSV and configured settings above. Then click the button below to start scraping!")
+st.markdown("""
+<div style="text-align: center; padding: 2rem 0;">
+    <h2 style="color: #1f2937; margin-bottom: 1rem;">🚀 Ready to Start</h2>
+    <p style="color: #6b7280; font-size: 1rem; margin-bottom: 1.5rem;">
+        Make sure you've uploaded your CSV and configured settings above.<br>
+        Then click the button below to start scraping!
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 # Get variables from tabs - Use session_state (proper Streamlit way)
 keywords = st.session_state.get('keywords', [])
@@ -2961,101 +3594,10 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         if excel_files:
             # Create a combined Excel file
             try:
-                all_data = []
-                for excel_file in sorted(excel_files):
-                    excel_path = os.path.join(output_dir, excel_file)
-                    try:
-                        # Check if file exists and has content
-                        if not os.path.exists(excel_path):
-                            st.warning(f"⚠️ Excel file not found: {excel_file}")
-                            continue
-                        
-                        if os.path.getsize(excel_path) == 0:
-                            st.warning(f"⚠️ Excel file is empty: {excel_file}")
-                            continue
-                        
-                        # Read Excel file with explicit column handling
-                        df_part = pd.read_excel(excel_path, engine='openpyxl', header=0)
-                        
-                        # Check if DataFrame is empty
-                        if df_part.empty:
-                            st.warning(f"⚠️ Excel file {excel_file} contains no data")
-                            continue
-                        
-                        # CRITICAL: Normalize column names - handle corrupted/merged headers
-                        # Clean column names: strip whitespace, handle case-insensitive matching
-                        df_part.columns = [str(col).strip() for col in df_part.columns]
-                        
-                        # Map columns to standard names (case-insensitive, handle variations)
-                        column_mapping = {}
-                        for col in df_part.columns:
-                            col_lower = col.lower().strip()
-                            if 'website' in col_lower or col_lower == 'url':
-                                column_mapping[col] = 'Website'
-                            elif 'scraped' in col_lower and 'text' in col_lower:
-                                column_mapping[col] = 'ScrapedText'
-                            elif 'company' in col_lower and 'summary' in col_lower:
-                                column_mapping[col] = 'CompanySummary'
-                            elif 'summary' in col_lower and 'company' not in col_lower:
-                                column_mapping[col] = 'CompanySummary'
-                        
-                        # Rename columns
-                        df_part = df_part.rename(columns=column_mapping)
-                        
-                        # If we still don't have the right columns, try to infer from position
-                        # This handles cases where headers might be completely corrupted
-                        if 'Website' not in df_part.columns and len(df_part.columns) >= 1:
-                            df_part.columns.values[0] = 'Website'
-                        if 'ScrapedText' not in df_part.columns and len(df_part.columns) >= 2:
-                            df_part.columns.values[1] = 'ScrapedText'
-                        if 'CompanySummary' not in df_part.columns and len(df_part.columns) >= 3:
-                            df_part.columns.values[2] = 'CompanySummary'
-                        
-                        # Ensure all required columns exist
-                        if "Website" not in df_part.columns:
-                            st.warning(f"⚠️ Excel file {excel_file} missing Website column. Found columns: {list(df_part.columns)}")
-                            continue
-                        
-                        if "ScrapedText" not in df_part.columns:
-                            # If ScrapedText is missing, create it from the second column or empty
-                            if len(df_part.columns) >= 2:
-                                second_col = df_part.columns[1]
-                                df_part = df_part.rename(columns={second_col: 'ScrapedText'})
-                            else:
-                                df_part['ScrapedText'] = ""
-                        
-                        if "CompanySummary" not in df_part.columns:
-                            df_part["CompanySummary"] = ""
-                        
-                        # Ensure correct column order and only keep the 3 standard columns
-                        df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
-                        
-                        # Convert all columns to string and clean
-                        for col in df_part.columns:
-                            df_part[col] = df_part[col].astype(str).replace('nan', '').replace('None', '')
-                        
-                        # Only add if DataFrame has rows
-                        if len(df_part) > 0:
-                            all_data.append(df_part)
-                        else:
-                            st.warning(f"⚠️ Excel file {excel_file} has no valid rows after processing")
-                    except Exception as e:
-                        st.warning(f"⚠️ Error reading Excel file {excel_file}: {e}")
-                        import traceback
-                        st.error(f"Traceback: {traceback.format_exc()}")
-                        continue
-                
-                if all_data:
-                    combined_df = pd.concat(all_data, ignore_index=True)
-                    
-                    # Ensure final DataFrame has correct structure
-                    if "CompanySummary" not in combined_df.columns:
-                        combined_df["CompanySummary"] = ""
-                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
-                    
-                    # CRITICAL: Read from CSV files using csv.reader (not pandas) for perfect compatibility
-                    # This ensures we read exactly what we wrote, avoiding pandas parsing issues
-                    csv_all_data = []
+                # CRITICAL: ALWAYS read from CSV files first (source of truth), NOT Excel files
+                # Excel files may be corrupted or have wrong data, CSV files are the source of truth
+                csv_all_data = []
+                if csv_files:
                     for csv_file in sorted(csv_files):
                         # CRITICAL: Skip combined CSV files - they should not be re-read
                         if "combined" in csv_file.lower():
@@ -3095,36 +3637,44 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                     
                                     # Verify we have all 3 columns
                                     if len(col_indices) != 3:
+                                        st.warning(f"⚠️ CSV file {csv_file} doesn't have 3 columns. Found: {header_normalized}")
                                         continue
                                     
-                                    # Read rows
+                                    # Read rows - CRITICAL: csv.reader already handles unquoting
                                     for row in csv_reader:
+                                        # Skip empty rows
                                         if len(row) == 0:
                                             continue
                                         
-                                        # Ensure row has at least 3 columns
+                                        # CRITICAL: Ensure row has exactly 3 columns, pad if needed
                                         while len(row) < 3:
                                             row.append("")
+                                        # Truncate to 3 columns if somehow more
+                                        if len(row) > 3:
+                                            row = row[:3]
                                         
+                                        # Extract by column index - csv.reader already unquoted values
                                         website_idx = col_indices.get('Website', 0)
                                         scraped_idx = col_indices.get('ScrapedText', 1)
                                         summary_idx = col_indices.get('CompanySummary', 2)
                                         
-                                        website = str(row[website_idx]).strip() if website_idx < len(row) else ""
-                                        scraped_text = str(row[scraped_idx]).strip() if scraped_idx < len(row) else ""
-                                        company_summary = str(row[summary_idx]).strip() if summary_idx < len(row) else ""
+                                        # CRITICAL: Ensure indices are valid
+                                        if website_idx >= len(row) or scraped_idx >= len(row) or summary_idx >= len(row):
+                                            # Skip malformed rows
+                                            continue
                                         
-                                        # Remove any remaining quote characters
-                                        website = website.strip('"').strip("'")
-                                        scraped_text = scraped_text.strip('"').strip("'")
-                                        company_summary = company_summary.strip('"').strip("'")
+                                        # Extract values - csv.reader already unquoted them
+                                        website = str(row[website_idx]).strip()
+                                        scraped_text = str(row[scraped_idx]).strip()
+                                        company_summary = str(row[summary_idx]).strip()
                                         
-                                        if website:  # Only add rows with URLs
-                                            rows_data.append({
-                                                'Website': website,
-                                                'ScrapedText': scraped_text,
-                                                'CompanySummary': company_summary
-                                            })
+                                        # CRITICAL: Add ALL rows, even if website is empty (might be error rows)
+                                        # Don't filter here - we want all data
+                                        rows_data.append({
+                                            'Website': website,
+                                            'ScrapedText': scraped_text,
+                                            'CompanySummary': company_summary
+                                        })
                                 
                                 if rows_data:
                                     df_csv = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
@@ -3134,75 +3684,225 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             import traceback
                             st.error(f"Traceback: {traceback.format_exc()}")
                             continue
+                
+                # Fallback: Read from Excel files ONLY if CSV reading completely failed
+                all_data = []
+                if not csv_all_data:
+                    st.warning("⚠️ No CSV data found, falling back to Excel files (may have wrong data)")
+                    for excel_file in sorted(excel_files):
+                        excel_path = os.path.join(output_dir, excel_file)
+                        try:
+                            # Check if file exists and has content
+                            if not os.path.exists(excel_path):
+                                st.warning(f"⚠️ Excel file not found: {excel_file}")
+                                continue
+                            
+                            if os.path.getsize(excel_path) == 0:
+                                st.warning(f"⚠️ Excel file is empty: {excel_file}")
+                                continue
+                            
+                            # Read Excel file with explicit column handling
+                            df_part = pd.read_excel(excel_path, engine='openpyxl', header=0)
+                            
+                            # Check if DataFrame is empty
+                            if df_part.empty:
+                                st.warning(f"⚠️ Excel file {excel_file} contains no data")
+                                continue
+                            
+                            # CRITICAL: Normalize column names - handle corrupted/merged headers
+                            # Clean column names: strip whitespace, handle case-insensitive matching
+                            df_part.columns = [str(col).strip() for col in df_part.columns]
+                            
+                            # Map columns to standard names (case-insensitive, handle variations)
+                            column_mapping = {}
+                            for col in df_part.columns:
+                                col_lower = col.lower().strip()
+                                if 'website' in col_lower or col_lower == 'url':
+                                    column_mapping[col] = 'Website'
+                                elif 'scraped' in col_lower and 'text' in col_lower:
+                                    column_mapping[col] = 'ScrapedText'
+                                elif 'company' in col_lower and 'summary' in col_lower:
+                                    column_mapping[col] = 'CompanySummary'
+                                elif 'summary' in col_lower and 'company' not in col_lower:
+                                    column_mapping[col] = 'CompanySummary'
+                            
+                            # Rename columns
+                            df_part = df_part.rename(columns=column_mapping)
+                            
+                            # If we still don't have the right columns, try to infer from position
+                            # This handles cases where headers might be completely corrupted
+                            if 'Website' not in df_part.columns and len(df_part.columns) >= 1:
+                                df_part.columns.values[0] = 'Website'
+                            if 'ScrapedText' not in df_part.columns and len(df_part.columns) >= 2:
+                                df_part.columns.values[1] = 'ScrapedText'
+                            if 'CompanySummary' not in df_part.columns and len(df_part.columns) >= 3:
+                                df_part.columns.values[2] = 'CompanySummary'
+                            
+                            # Ensure all required columns exist
+                            if "Website" not in df_part.columns:
+                                st.warning(f"⚠️ Excel file {excel_file} missing Website column. Found columns: {list(df_part.columns)}")
+                                continue
+                            
+                            if "ScrapedText" not in df_part.columns:
+                                # If ScrapedText is missing, create it from the second column or empty
+                                if len(df_part.columns) >= 2:
+                                    second_col = df_part.columns[1]
+                                    df_part = df_part.rename(columns={second_col: 'ScrapedText'})
+                                else:
+                                    df_part['ScrapedText'] = ""
+                            
+                            if "CompanySummary" not in df_part.columns:
+                                df_part["CompanySummary"] = ""
+                            
+                            # Ensure correct column order and only keep the 3 standard columns
+                            df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                            
+                            # Convert all columns to string and clean
+                            for col in df_part.columns:
+                                df_part[col] = df_part[col].astype(str).replace('nan', '').replace('None', '')
+                            
+                            # Only add if DataFrame has rows
+                            if len(df_part) > 0:
+                                all_data.append(df_part)
+                            else:
+                                st.warning(f"⚠️ Excel file {excel_file} has no valid rows after processing")
+                        except Exception as e:
+                            st.warning(f"⚠️ Error reading Excel file {excel_file}: {e}")
+                            import traceback
+                            st.error(f"Traceback: {traceback.format_exc()}")
+                            continue
+                
+                # CRITICAL: Use CSV data (read with csv.reader) - this is the source of truth
+                # CSV files contain the actual scraped text and AI summaries
+                if csv_all_data:
+                    combined_df = pd.concat(csv_all_data, ignore_index=True)
+                    # Ensure structure
+                    if "CompanySummary" not in combined_df.columns:
+                        combined_df["CompanySummary"] = ""
+                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                elif all_data:
+                    # Fallback to Excel data ONLY if CSV reading completely failed
+                    st.warning("⚠️ CSV reading failed, using Excel files (may have incomplete data)")
+                    combined_df = pd.concat(all_data, ignore_index=True)
+                    if "CompanySummary" not in combined_df.columns:
+                        combined_df["CompanySummary"] = ""
+                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                else:
+                    st.error("❌ No data available to combine")
+                    raise ValueError("No data available to combine for Excel file")
+                
+                # Clean the combined DataFrame
+                def clean_dataframe_for_excel(df):
+                    """Clean all string columns in DataFrame for Excel"""
+                    import re
+                    for col in df.columns:
+                        df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                        df[col] = df[col].str.replace('\x00', '', regex=False)
+                        df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                        df[col] = df[col].str.strip()
+                    return df
+                combined_df = clean_dataframe_for_excel(combined_df.copy())
+                
+                # CRITICAL: Use openpyxl directly to write with explicit headers to avoid corruption
+                from openpyxl import Workbook
+                excel_buffer = BytesIO()
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Scraped Data"
+                
+                # Write headers explicitly - CRITICAL: Always 3 columns
+                ws.append(["Website", "ScrapedText", "CompanySummary"])
+                
+                # Write data rows - CRITICAL: Use iloc to prevent iterrows() misalignment issues
+                for idx in range(len(combined_df)):
+                    row = combined_df.iloc[idx]
                     
-                    # Use CSV data (read with csv.reader) - this is the source of truth
-                    if csv_all_data:
-                        combined_df = pd.concat(csv_all_data, ignore_index=True)
-                        # Ensure structure
-                        if "CompanySummary" not in combined_df.columns:
-                            combined_df["CompanySummary"] = ""
-                        combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
-                    elif all_data:
-                        # Fallback to Excel data if CSV reading failed
-                        combined_df = pd.concat(all_data, ignore_index=True)
-                        if "CompanySummary" not in combined_df.columns:
-                            combined_df["CompanySummary"] = ""
-                        combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
-                    else:
-                        st.error("❌ No data available to combine")
-                        raise ValueError("No data available to combine for Excel file")
+                    # CRITICAL: Extract values by column name (not position) to ensure correct order
+                    website = ""
+                    text = ""
+                    summary = ""
                     
-                    # Clean the combined DataFrame
-                    def clean_dataframe_for_excel(df):
-                        """Clean all string columns in DataFrame for Excel"""
+                    if "Website" in combined_df.columns:
+                        val = row["Website"]
+                        website = str(val) if pd.notna(val) else ""
+                    
+                    if "ScrapedText" in combined_df.columns:
+                        val = row["ScrapedText"]
+                        text = str(val) if pd.notna(val) else ""
+                    
+                    if "CompanySummary" in combined_df.columns:
+                        val = row["CompanySummary"]
+                        summary = str(val) if pd.notna(val) else ""
+                    
+                    # CRITICAL: Comprehensive cleaning for Excel compatibility
+                    def clean_excel_value(val):
+                        """Clean value to prevent Excel corruption"""
+                        if not val:
+                            return ""
                         import re
-                        for col in df.columns:
-                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-                            df[col] = df[col].str.replace('\x00', '', regex=False)
-                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
-                            df[col] = df[col].str.strip()
-                        return df
-                    combined_df = clean_dataframe_for_excel(combined_df.copy())
+                        val = str(val)
+                        val = val.replace('\x00', '')
+                        val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
+                        # Remove invalid XML characters (Excel files are XML-based)
+                        val = ''.join(char for char in val if (
+                            ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or
+                            (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
+                        ))
+                        val = val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                        val = re.sub(r'\s+', ' ', val).strip()
+                        val = val[:32767]
+                        return val
                     
-                    # CRITICAL: Use openpyxl directly to write with explicit headers to avoid corruption
-                    from openpyxl import Workbook
-                    excel_buffer = BytesIO()
-                    wb = Workbook()
-                    ws = wb.active
-                    ws.title = "Scraped Data"
+                    website = clean_excel_value(website)
+                    text = clean_excel_value(text)
+                    summary = clean_excel_value(summary)
                     
-                    # Write headers explicitly
-                    ws.append(["Website", "ScrapedText", "CompanySummary"])
+                    # CRITICAL: Prepend with single quote if value starts with =, +, -, @ to prevent Excel formula interpretation
+                    row_data = []
+                    for val in [website, text, summary]:
+                        # If value starts with formula-like characters, prepend with single quote to force text mode
+                        if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
+                            val = "'" + val
+                        row_data.append(val)
                     
-                    # Write data rows
-                    for _, row in combined_df.iterrows():
-                        website = str(row["Website"]) if pd.notna(row["Website"]) else ""
-                        text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
-                        summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
-                        # Truncate to Excel limits
-                        website = website[:255]
-                        text = text[:32767]
-                        summary = summary[:32767]
-                        ws.append([website, text, summary])
-                    
+                    # CRITICAL: Write cells directly instead of append to ensure proper string handling
+                    row_num = ws.max_row + 1
+                    for col_idx, val in enumerate(row_data, start=1):
+                        cell = ws.cell(row=row_num, column=col_idx)
+                        # Ensure value is a plain string
+                        if val is None:
+                            val = ""
+                        val = str(val)
+                        # Set value and force string type - this prevents string property issues
+                        cell.value = val
+                        cell.data_type = 's'  # Force string type
+                
+                # CRITICAL: Save with explicit error handling
+                try:
                     wb.save(excel_buffer)
-                    excel_buffer.seek(0)
-                    excel_data = excel_buffer.read()
-                    
-                    # Store in session_state for persistence
-                    st.session_state['combined_excel_data'] = excel_data
-                    st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
-                    st.session_state['combined_df'] = combined_df  # Store for CSV too
-                    
-                    st.download_button(
-                        label="⬇️ Download Combined Excel",
-                        data=excel_data,
-                        file_name=f"{run_folder}_combined.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="Download all data in a single Excel file",
-                        key="download_excel"
-                    )
-                    st.caption(f"{len(combined_df)} total rows")
+                except Exception as save_error:
+                    st.error(f"❌ Excel save failed: {save_error}")
+                    import traceback
+                    st.error(f"Traceback: {traceback.format_exc()}")
+                    raise save_error
+                
+                excel_buffer.seek(0)
+                excel_data = excel_buffer.read()
+                
+                # Store in session_state for persistence
+                st.session_state['combined_excel_data'] = excel_data
+                st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
+                st.session_state['combined_df'] = combined_df  # Store for CSV too
+                
+                st.download_button(
+                    label="⬇️ Download Combined Excel",
+                    data=excel_data,
+                    file_name=f"{run_folder}_combined.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Download all data in a single Excel file",
+                    key="download_excel"
+                )
+                st.caption(f"{len(combined_df)} total rows")
             except Exception as e:
                 st.warning(f"Could not create combined Excel: {e}")
                 import traceback
@@ -3288,18 +3988,19 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                     row.append("")
                                 
                                 # Extract values by column index - csv.reader already unquotes values
+                                # CRITICAL: csv.reader with QUOTE_ALL automatically handles unquoting
                                 website_idx = col_indices.get('Website', 0)
                                 scraped_idx = col_indices.get('ScrapedText', 1)
                                 summary_idx = col_indices.get('CompanySummary', 2)
                                 
+                                # Extract values - csv.reader has already unquoted them
                                 website = str(row[website_idx]).strip() if website_idx < len(row) else ""
                                 scraped_text = str(row[scraped_idx]).strip() if scraped_idx < len(row) else ""
                                 company_summary = str(row[summary_idx]).strip() if summary_idx < len(row) else ""
                                 
-                                # Remove any remaining quote characters (csv.reader should have already unquoted)
-                                website = website.strip('"').strip("'")
-                                scraped_text = scraped_text.strip('"').strip("'")
-                                company_summary = company_summary.strip('"').strip("'")
+                                # CRITICAL: Don't strip quotes here - csv.reader already did that
+                                # The values are already clean strings without quotes
+                                # Any remaining quotes are part of the actual data content
                                 
                                 # Only add rows with valid URLs
                                 if website:
@@ -3356,16 +4057,49 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         combined_df["CompanySummary"] = ""
                     combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
                     
+                    # CRITICAL: Write CSV directly to ensure Excel compatibility
                     # Use StringIO for text-based CSV writing, then encode to bytes
                     csv_buffer = StringIO()
-                    csv_writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                    # Use QUOTE_ALL and explicit settings for Excel compatibility
+                    csv_writer = csv.writer(
+                        csv_buffer, 
+                        quoting=csv.QUOTE_ALL,  # Quote all fields to handle commas/quotes
+                        doublequote=True,  # Escape quotes by doubling them
+                        lineterminator='\n',  # Unix line endings
+                        quotechar='"'  # Use double quotes
+                    )
                     
                     # Write header - ALWAYS 3 columns in exact order
                     csv_writer.writerow(["Website", "ScrapedText", "CompanySummary"])
                     
+                    # Clean function for CSV values - ensures Excel compatibility
+                    def clean_csv_value_for_excel(val_str):
+                        """Clean a single CSV value ensuring Excel compatibility"""
+                        if not val_str:
+                            return ""
+                        import re
+                        # Convert to string if not already
+                        val_str = str(val_str)
+                        # Remove null bytes (can break CSV parsing)
+                        val_str = val_str.replace('\x00', '')
+                        # CRITICAL: Replace newlines/carriage returns with space (Excel can't handle newlines in CSV fields)
+                        val_str = val_str.replace('\n', ' ').replace('\r', ' ')
+                        # Replace tabs with space
+                        val_str = val_str.replace('\t', ' ')
+                        # Remove other control characters (except space)
+                        val_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', val_str)
+                        # Collapse multiple spaces to single space
+                        val_str = re.sub(r'\s+', ' ', val_str)
+                        # Strip leading/trailing whitespace
+                        val_str = val_str.strip()
+                        # Note: csv.writer with QUOTE_ALL will automatically quote the entire field
+                        # and escape any internal quotes by doubling them (Excel standard)
+                        return val_str
+                    
                     # Write rows - ensure exactly 3 values per row in correct order
-                    for idx, row in combined_df.iterrows():
-                        row_values = []
+                    # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                    for idx in range(len(combined_df)):
+                        row = combined_df.iloc[idx]
                         
                         # CRITICAL: Extract values by column name, not position, to ensure correct order
                         # Always extract exactly 3 values in correct order: Website, ScrapedText, CompanySummary
@@ -3388,42 +4122,15 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             val = row["CompanySummary"]
                             company_summary = "" if pd.isna(val) else str(val)
                         
-                        # Clean each value to prevent CSV formatting issues
-                        def clean_csv_value(val_str):
-                            """Clean a single CSV value - csv.writer will handle quoting automatically"""
-                            if not val_str:
-                                return ""
-                            import re
-                            # Convert to string if not already
-                            val_str = str(val_str)
-                            # Remove null bytes (can break CSV parsing)
-                            val_str = val_str.replace('\x00', '')
-                            # Replace newlines/carriage returns with space (newlines break CSV row structure)
-                            val_str = val_str.replace('\n', ' ').replace('\r', ' ')
-                            # Replace tabs with space
-                            val_str = val_str.replace('\t', ' ')
-                            # Remove other control characters (except space)
-                            val_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', val_str)
-                            # Collapse multiple spaces to single space
-                            val_str = re.sub(r'\s+', ' ', val_str)
-                            # Strip leading/trailing whitespace
-                            val_str = val_str.strip()
-                            # Note: csv.writer with QUOTE_ALL will automatically escape any quotes in the value
-                            return val_str
+                        # Clean values for Excel compatibility
+                        website_clean = clean_csv_value_for_excel(website)
+                        scraped_text_clean = clean_csv_value_for_excel(scraped_text)
+                        company_summary_clean = clean_csv_value_for_excel(company_summary)
                         
-                        # Clean and add values in correct order
-                        row_values.append(clean_csv_value(website))
-                        row_values.append(clean_csv_value(scraped_text))
-                        row_values.append(clean_csv_value(company_summary))
-                        
-                        # CRITICAL: Verify we have exactly 3 values
-                        if len(row_values) != 3:
-                            # Fallback: pad or truncate to exactly 3
-                            while len(row_values) < 3:
-                                row_values.append("")
-                            row_values = row_values[:3]
-                        
-                        csv_writer.writerow(row_values)
+                        # CRITICAL: Always write exactly 3 values in correct order
+                        # csv.writer with QUOTE_ALL will automatically quote each field
+                        # and escape internal quotes by doubling them (Excel standard)
+                        csv_writer.writerow([website_clean, scraped_text_clean, company_summary_clean])
                     
                     csv_buffer.seek(0)
                     
@@ -3446,7 +4153,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     except Exception as e:
                         st.warning(f"⚠️ CSV validation error: {e}")
                     
-                    # Store for Google Sheets section and persistence
+                    # Store for persistence
                     st.session_state['combined_csv_data'] = csv_data
                     st.session_state['combined_df'] = combined_df
                     st.session_state['combined_csv_filename'] = f"{run_folder}_combined.csv"
@@ -3467,72 +4174,6 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         else:
             st.info("No CSV files generated")
     
-    # Google Sheets section
-    st.markdown("---")
-    st.subheader("📊 Import to Google Sheets")
-    
-    if csv_files:
-        try:
-            if 'combined_df' in st.session_state and st.session_state.get('combined_df') is not None:
-                combined_df = st.session_state['combined_df']
-                
-                col_gs1, col_gs2 = st.columns(2)
-                
-                with col_gs1:
-                    st.markdown("""
-                    **🚀 Quick Import Method:**
-                    
-                    1. **Download the CSV file** (button above)
-                    2. Go to [sheets.google.com](https://sheets.google.com)
-                    3. Click **File → Import**
-                    4. Choose **Upload** tab
-                    5. Select your downloaded CSV file
-                    6. Click **Import data**
-                    
-                    ✅ **Done!** Your data is now in Google Sheets.
-                    """)
-                
-                with col_gs2:
-                    st.markdown(f"""
-                    **💡 Alternative Methods:**
-                    
-                    **Method 2: Drag & Drop**
-                    - Download CSV
-                    - Open Google Sheets
-                    - Drag CSV file into the sheet
-                    
-                    **Method 3: Copy-Paste** (for small datasets)
-                    - Open CSV in a text editor
-                    - Copy all content
-                    - Paste into Google Sheets
-                    
-                    **📊 Your Data:**
-                    - **Rows:** {len(combined_df):,}
-                    - **Format:** UTF-8 CSV (perfect for Google Sheets)
-                    - **Compatibility:** ✅ 100% compatible
-                    """)
-                
-                # Show file size info
-                if len(combined_df) > 10000:
-                    st.warning(f"⚠️ **Large dataset ({len(combined_df):,} rows).** Use File → Import method for best results. Google Sheets can handle up to 10 million cells.")
-                elif len(combined_df) > 5000:
-                    st.info(f"ℹ️ Dataset has {len(combined_df):,} rows. File → Import is recommended for best performance.")
-                else:
-                    st.success(f"✅ Dataset ready ({len(combined_df):,} rows). Any import method will work!")
-                
-                # Direct link to create new Google Sheet
-                st.markdown("---")
-                col_link1, col_link2 = st.columns(2)
-                with col_link1:
-                    st.markdown(f"[🔗 Create New Google Sheet](https://sheets.google.com/create) - Opens in new tab")
-                with col_link2:
-                    st.markdown(f"[📤 Upload to Google Drive](https://drive.google.com/drive/my-drive) - Then import to Sheets")
-            else:
-                st.info("💡 Download the combined CSV file above, then use the import instructions to add it to Google Sheets.")
-        except Exception as e:
-            st.warning(f"Could not load data for Google Sheets: {e}")
-    else:
-        st.info("No CSV files available for Google Sheets import.")
     
     # File list
     with st.expander("📋 View Generated Files", expanded=False):
@@ -3622,7 +4263,246 @@ if st.session_state.get('scraping_complete', False):
             if combined_df is not None:
                 st.caption(f"{len(combined_df)} total rows")
         elif excel_files:
-            st.info("Click 'Start Scraping' again to generate Excel file")
+            # Regenerate combined Excel file from existing Excel files
+            if not output_dir:
+                # Try to get output_dir from session_state
+                output_dir = st.session_state.get('output_dir')
+                if not output_dir:
+                    st.warning("⚠️ Output directory not found. Please restart scraping to regenerate Excel file.")
+                    output_dir = None
+            
+            if output_dir:
+                st.info("🔄 Regenerating combined Excel file from existing files...")
+                try:
+                    # CRITICAL: Read from CSV files first (source of truth), NOT Excel files
+                    csv_all_data = []
+                    if csv_files:
+                        for csv_file in sorted(csv_files):
+                            if "combined" in csv_file.lower():
+                                continue
+                            csv_path = os.path.join(output_dir, csv_file)
+                            try:
+                                if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                                    rows_data = []
+                                    with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                                        csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
+                                        header = next(csv_reader, None)
+                                        if not header:
+                                            continue
+                                        header_normalized = [str(h).strip().strip('"').strip("'") for h in header]
+                                        col_indices = {}
+                                        for idx, h in enumerate(header_normalized):
+                                            h_lower = h.lower().strip()
+                                            if h_lower == 'website' or h_lower == 'url':
+                                                col_indices['Website'] = idx
+                                            elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
+                                                col_indices['ScrapedText'] = idx
+                                            elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
+                                                col_indices['CompanySummary'] = idx
+                                        if 'Website' not in col_indices and len(header_normalized) >= 1:
+                                            col_indices['Website'] = 0
+                                        if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
+                                            col_indices['ScrapedText'] = 1
+                                        if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
+                                            col_indices['CompanySummary'] = 2
+                                        if len(col_indices) != 3:
+                                            continue
+                                        for row in csv_reader:
+                                            if len(row) == 0:
+                                                continue
+                                            while len(row) < 3:
+                                                row.append("")
+                                            if len(row) > 3:
+                                                row = row[:3]
+                                            website_idx = col_indices.get('Website', 0)
+                                            scraped_idx = col_indices.get('ScrapedText', 1)
+                                            summary_idx = col_indices.get('CompanySummary', 2)
+                                            if website_idx >= len(row) or scraped_idx >= len(row) or summary_idx >= len(row):
+                                                continue
+                                            website = str(row[website_idx]).strip()
+                                            scraped_text = str(row[scraped_idx]).strip()
+                                            company_summary = str(row[summary_idx]).strip()
+                                            if website:
+                                                rows_data.append({
+                                                    'Website': website,
+                                                    'ScrapedText': scraped_text,
+                                                    'CompanySummary': company_summary
+                                                })
+                                    if rows_data:
+                                        df_csv = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
+                                        csv_all_data.append(df_csv)
+                            except Exception as e:
+                                st.warning(f"⚠️ Error reading CSV {csv_file}: {e}")
+                                continue
+                    
+                    # Use CSV data if available, otherwise fall back to Excel files
+                    if csv_all_data:
+                        combined_df = pd.concat(csv_all_data, ignore_index=True)
+                        if "CompanySummary" not in combined_df.columns:
+                            combined_df["CompanySummary"] = ""
+                        combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    elif excel_files:
+                        # Fallback to Excel files
+                        all_data = []
+                        for excel_file in sorted(excel_files):
+                            excel_path = os.path.join(output_dir, excel_file)
+                            try:
+                                if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
+                                    df_part = pd.read_excel(excel_path, engine='openpyxl', header=0)
+                                    if df_part.empty:
+                                        continue
+                                    df_part.columns = [str(col).strip() for col in df_part.columns]
+                                    column_mapping = {}
+                                    for col in df_part.columns:
+                                        col_lower = col.lower().strip()
+                                        if 'website' in col_lower or col_lower == 'url':
+                                            column_mapping[col] = 'Website'
+                                        elif 'scraped' in col_lower and 'text' in col_lower:
+                                            column_mapping[col] = 'ScrapedText'
+                                        elif 'company' in col_lower and 'summary' in col_lower:
+                                            column_mapping[col] = 'CompanySummary'
+                                    df_part = df_part.rename(columns=column_mapping)
+                                    if 'Website' not in df_part.columns and len(df_part.columns) >= 1:
+                                        df_part.columns.values[0] = 'Website'
+                                    if 'ScrapedText' not in df_part.columns and len(df_part.columns) >= 2:
+                                        df_part.columns.values[1] = 'ScrapedText'
+                                    if 'CompanySummary' not in df_part.columns and len(df_part.columns) >= 3:
+                                        df_part.columns.values[2] = 'CompanySummary'
+                                    if "Website" not in df_part.columns:
+                                        continue
+                                    if "ScrapedText" not in df_part.columns:
+                                        if len(df_part.columns) >= 2:
+                                            second_col = df_part.columns[1]
+                                            df_part = df_part.rename(columns={second_col: 'ScrapedText'})
+                                        else:
+                                            df_part['ScrapedText'] = ""
+                                    if "CompanySummary" not in df_part.columns:
+                                        df_part["CompanySummary"] = ""
+                                    df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                                    for col in df_part.columns:
+                                        df_part[col] = df_part[col].astype(str).replace('nan', '').replace('None', '')
+                                    if len(df_part) > 0:
+                                        all_data.append(df_part)
+                            except Exception as e:
+                                st.warning(f"⚠️ Error reading Excel {excel_file}: {e}")
+                                continue
+                        if all_data:
+                            combined_df = pd.concat(all_data, ignore_index=True)
+                            if "CompanySummary" not in combined_df.columns:
+                                combined_df["CompanySummary"] = ""
+                            combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                        else:
+                            st.error("❌ No data available to combine")
+                            combined_df = None
+                    else:
+                        st.error("❌ No data available to combine")
+                        combined_df = None
+                    
+                    if combined_df is not None and len(combined_df) > 0:
+                        # Clean DataFrame
+                        def clean_dataframe_for_excel(df):
+                            import re
+                            for col in df.columns:
+                                df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                                df[col] = df[col].str.replace('\x00', '', regex=False)
+                                df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                                df[col] = df[col].str.strip()
+                            return df
+                        combined_df = clean_dataframe_for_excel(combined_df.copy())
+                        
+                        # Generate combined Excel file
+                        from openpyxl import Workbook
+                        from io import BytesIO
+                        excel_buffer = BytesIO()
+                        wb = Workbook()
+                        ws = wb.active
+                        ws.title = "Scraped Data"
+                        ws.append(["Website", "ScrapedText", "CompanySummary"])
+                        
+                        for idx in range(len(combined_df)):
+                            row = combined_df.iloc[idx]
+                            website = str(row["Website"]) if pd.notna(row["Website"]) else ""
+                            text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
+                            summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
+                            
+                            # CRITICAL: Comprehensive cleaning for Excel compatibility
+                            def clean_excel_value(val):
+                                """Clean value to prevent Excel corruption"""
+                                if not val:
+                                    return ""
+                                import re
+                                val = str(val)
+                                val = val.replace('\x00', '')
+                                val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
+                                # Remove invalid XML characters (Excel files are XML-based)
+                                val = ''.join(char for char in val if (
+                                    ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or
+                                    (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
+                                ))
+                                val = val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                                val = re.sub(r'\s+', ' ', val).strip()
+                                val = val[:32767]
+                                return val
+                            
+                            website = clean_excel_value(website)
+                            text = clean_excel_value(text)
+                            summary = clean_excel_value(summary)
+                            row_data = []
+                            for val in [website, text, summary]:
+                                if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
+                                    val = "'" + val
+                                row_data.append(val)
+                            # CRITICAL: Write cells directly instead of append to ensure proper string handling
+                            row_num = ws.max_row + 1
+                            for col_idx, val in enumerate(row_data, start=1):
+                                cell = ws.cell(row=row_num, column=col_idx)
+                                # Ensure value is a plain string
+                                if val is None:
+                                    val = ""
+                                val = str(val)
+                                # Set value and force string type - this prevents string property issues
+                                cell.value = val
+                                cell.data_type = 's'  # Force string type
+                        
+                        # CRITICAL: Save with explicit error handling
+                        try:
+                            wb.save(excel_buffer)
+                        except Exception as save_error:
+                            st.error(f"❌ Excel save failed: {save_error}")
+                            import traceback
+                            st.error(f"Traceback: {traceback.format_exc()}")
+                            raise save_error
+                        
+                        excel_buffer.seek(0)
+                        excel_data = excel_buffer.read()
+                        
+                        # Store in session_state
+                        st.session_state['combined_excel_data'] = excel_data
+                        st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
+                        st.session_state['combined_df'] = combined_df
+                        
+                        st.download_button(
+                            label="⬇️ Download Combined Excel",
+                            data=excel_data,
+                            file_name=f"{run_folder}_combined.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            help="Download all data in a single Excel file",
+                            key="download_excel_persistent"
+                        )
+                        st.caption(f"{len(combined_df)} total rows")
+                    else:
+                        st.warning("⚠️ No data found in Excel files to combine")
+                except Exception as e:
+                    st.error(f"❌ Error generating combined Excel file: {e}")
+                    import traceback
+                    st.error(f"Traceback: {traceback.format_exc()}")
+                    st.info("Individual Excel files are available in the ZIP archive")
+                    # Still show that Excel files exist
+                    if excel_files:
+                        st.info(f"Found {len(excel_files)} Excel file(s): {', '.join(excel_files[:3])}{'...' if len(excel_files) > 3 else ''}")
+        elif excel_files:
+            # Excel files exist but output_dir is missing - this shouldn't happen, but handle it
+            st.warning(f"⚠️ Found {len(excel_files)} Excel file(s) but output directory is not set. Please restart scraping.")
         else:
             st.info("No Excel files generated")
     
@@ -3648,64 +4528,6 @@ if st.session_state.get('scraping_complete', False):
         else:
             st.info("No CSV files generated")
     
-    # Google Sheets section (persistent)
-    st.markdown("---")
-    st.subheader("📊 Import to Google Sheets")
-    
-    if csv_files and combined_df is not None:
-        col_gs1, col_gs2 = st.columns(2)
-        
-        with col_gs1:
-            st.markdown("""
-            **🚀 Quick Import Method:**
-            
-            1. **Download the CSV file** (button above)
-            2. Go to [sheets.google.com](https://sheets.google.com)
-            3. Click **File → Import**
-            4. Choose **Upload** tab
-            5. Select your downloaded CSV file
-            6. Click **Import data**
-            
-            ✅ **Done!** Your data is now in Google Sheets.
-            """)
-        
-        with col_gs2:
-            st.markdown(f"""
-            **💡 Alternative Methods:**
-            
-            **Method 2: Drag & Drop**
-            - Download CSV
-            - Open Google Sheets
-            - Drag CSV file into the sheet
-            
-            **Method 3: Copy-Paste** (for small datasets)
-            - Open CSV in a text editor
-            - Copy all content
-            - Paste into Google Sheets
-            
-            **📊 Your Data:**
-            - **Rows:** {len(combined_df):,}
-            - **Format:** UTF-8 CSV (perfect for Google Sheets)
-            - **Compatibility:** ✅ 100% compatible
-            """)
-        
-        # Show file size info
-        if len(combined_df) > 10000:
-            st.warning(f"⚠️ **Large dataset ({len(combined_df):,} rows).** Use File → Import method for best results.")
-        elif len(combined_df) > 5000:
-            st.info(f"ℹ️ Dataset has {len(combined_df):,} rows. File → Import is recommended.")
-        else:
-            st.success(f"✅ Dataset ready ({len(combined_df):,} rows). Any import method will work!")
-        
-        # Direct links
-        st.markdown("---")
-        col_link1, col_link2 = st.columns(2)
-        with col_link1:
-            st.markdown(f"[🔗 Create New Google Sheet](https://sheets.google.com/create) - Opens in new tab")
-        with col_link2:
-            st.markdown(f"[📤 Upload to Google Drive](https://drive.google.com/drive/my-drive) - Then import to Sheets")
-    else:
-        st.info("💡 Download the combined CSV file above, then use the import instructions to add it to Google Sheets.")
     
     # File list
     with st.expander("📋 View Generated Files", expanded=False):

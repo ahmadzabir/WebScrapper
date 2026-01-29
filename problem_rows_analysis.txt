@@ -1,0 +1,106 @@
+﻿=== CHECKING PROBLEM ROWS ===
+File: outputs/run_20260129_020356/output_part_1.csv
+
+
+================================================================================
+ROW 25 (index 24):
+Number of columns: 3
+
+Column 0 (Website): https://htrinity.org
+
+Column 1 (ScrapedText):
+  Length: 33
+  Preview (first 200 chars): Γ¥î HTTP 403 at http://htrinity.org
+  Preview (last 200 chars): Γ¥î HTTP 403 at http://htrinity.org
+  Contains: 0 quotes, 0 commas, 0 newlines
+
+Column 2 (CompanySummary):
+  Length: 36
+  Preview (first 200 chars): Γ¥î No valid scraped content available
+================================================================================
+
+================================================================================
+ROW 43 (index 42):
+Number of columns: 3
+
+Column 0 (Website): https://utk.edu
+
+Column 1 (ScrapedText):
+  Length: 28
+  Preview (first 200 chars): Γ¥î HTTP 403 at http://utk.edu
+  Preview (last 200 chars): Γ¥î HTTP 403 at http://utk.edu
+  Contains: 0 quotes, 0 commas, 0 newlines
+
+Column 2 (CompanySummary):
+  Length: 36
+  Preview (first 200 chars): Γ¥î No valid scraped content available
+================================================================================
+
+================================================================================
+ROW 47 (index 46):
+Number of columns: 3
+
+Column 0 (Website): https://wctech.org
+
+Column 1 (ScrapedText):
+  Length: 64
+  Preview (first 200 chars): Γä╣∩╕Å Redirected from https://wctech.org to https://www.wctech.org/
+  Preview (last 200 chars): Γä╣∩╕Å Redirected from https://wctech.org to https://www.wctech.org/
+  Contains: 0 quotes, 0 commas, 0 newlines
+
+Column 2 (CompanySummary):
+  Length: 1814
+  Preview (first 200 chars): ===SUMMARY=== wctech.org provides technology solutions and services focused on enhancing operational efficiency for various industries. They emphasize their expertise in delivering tailored solutions,
+================================================================================
+
+================================================================================
+ROW 52 (index 51):
+Number of columns: 3
+
+Column 0 (Website): https://kvcc.edu
+
+Column 1 (ScrapedText):
+  Length: 4944
+  Preview (first 200 chars): ================================================================================ PAGE: https://kvcc.edu ================================================================================ Kalamazoo Valle
+  Preview (last 200 chars): e life of a student with financial needs. DONATE TO THE COLLEGE The Kalamazoo Valley Museum is operated by Kalamazoo Valley Community College and is governed by its Board of Trustees. Visit the Museum
+  Contains: 0 quotes, 41 commas, 0 newlines
+
+Column 2 (CompanySummary):
+  Length: 2128
+  Preview (first 200 chars): ===SUMMARY=== KVCC offers a range of educational programs and services, including associate degrees, certificates, and workforce training. The institution serves a diverse student body, focusing on ac
+================================================================================
+
+
+=== CHECKING RAW FILE STRUCTURE ===
+
+Row 25 (raw bytes):
+  Length: 10385 bytes
+  Quote count: 34
+  Comma count: 84
+  Newline count: 0
+  OK: Line starts and ends with quotes
+  First 300 bytes: b'"https://iit.edu","================================================================================ PAGE: https://www.iit.edu ================================================================================ - Illinois Tech | Illinois Institute of Technology Skip to main site navigation Skip to main '
+
+Row 43 (raw bytes):
+  Length: 53883 bytes
+  Quote count: 42
+  Comma count: 276
+  Newline count: 0
+  OK: Line starts and ends with quotes
+  First 300 bytes: b'"https://whitman.edu","================================================================================ PAGE: https://www.whitman.edu/ ================================================================================ Whitman College ** * You\xe2\x80\x99ll Matter Here Welcome to Whitman ## Grow. Think. Explore'
+
+Row 47 (raw bytes):
+  Length: 53224 bytes
+  Quote count: 46
+  Comma count: 353
+  Newline count: 0
+  OK: Line starts and ends with quotes
+  First 300 bytes: b'"https://baysideacademy.org","================================================================================ PAGE: https://www.baysideacademy.org/ ================================================================================ Bayside Academy - Top rated PreK-12 Private school located in Daphne, '
+
+Row 52 (raw bytes):
+  Length: 2175 bytes
+  Quote count: 30
+  Comma count: 7
+  Newline count: 0
+  OK: Line starts and ends with quotes
+  First 300 bytes: b'"https://caferio.com","\xe2\x84\xb9\xef\xb8\x8f Redirected from https://caferio.com to https://www.caferio.com/","===SUMMARY=== Caferio.com offers a range of services focused on digital transformation and technology solutions for businesses. They emphasize their expertise in enhancing operational efficiency and drivi'

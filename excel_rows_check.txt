@@ -1,0 +1,67 @@
+﻿Total data rows: 129
+Header: ['Website', 'ScrapedText', 'CompanySummary']
+
+================================================================================
+Excel Row 25 (CSV data row 24, Python index 23):
+  Number of columns: 3
+  Website: https://iit.edu
+  ScrapedText length: 8102
+  WARNING: ScrapedText contains 72 commas
+  CompanySummary length: 2165
+
+================================================================================
+Excel Row 43 (CSV data row 42, Python index 41):
+  Number of columns: 3
+  Website: https://whitman.edu
+  ScrapedText length: 49882
+  WARNING: ScrapedText contains 267 commas
+  WARNING: ScrapedText contains 2 quotes
+  CompanySummary length: 2303
+
+================================================================================
+Excel Row 47 (CSV data row 46, Python index 45):
+  Number of columns: 3
+  Website: https://baysideacademy.org
+  ScrapedText length: 49894
+  WARNING: ScrapedText contains 339 commas
+  WARNING: ScrapedText contains 8 quotes
+  CompanySummary length: 2354
+
+================================================================================
+Excel Row 52 (CSV data row 51, Python index 50):
+  Number of columns: 3
+  Website: https://caferio.com
+  ScrapedText length: 66
+  CompanySummary length: 2065
+
+
+================================================================================
+RAW FILE STRUCTURE CHECK:
+
+Excel Row 25 (line 24):
+  Length: 10385 bytes
+  Quotes: 34
+  Commas: 84
+  Field separators (","): 2
+  OK: Has 2 field separators (3 fields total)
+
+Excel Row 43 (line 42):
+  Length: 53883 bytes
+  Quotes: 42
+  Commas: 276
+  Field separators (","): 2
+  OK: Has 2 field separators (3 fields total)
+
+Excel Row 47 (line 46):
+  Length: 53224 bytes
+  Quotes: 46
+  Commas: 353
+  Field separators (","): 2
+  OK: Has 2 field separators (3 fields total)
+
+Excel Row 52 (line 51):
+  Length: 2175 bytes
+  Quotes: 30
+  Commas: 7
+  Field separators (","): 2
+  OK: Has 2 field separators (3 fields total)
