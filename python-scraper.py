@@ -30,6 +30,14 @@ except ImportError:
 # Utilities
 # -------------------------
 
+def _is_low_resource_default() -> bool:
+    """Suggest low-resource mode for slower machines (few CPUs or limited RAM)."""
+    try:
+        n = os.cpu_count()
+        return n is None or n <= 4
+    except Exception:
+        return True
+
 
 def normalize_url(url: str) -> str:
     """
@@ -135,6 +143,46 @@ def match_keyword_in_url(keyword: str, url: str) -> bool:
             return True
     
     return False
+
+
+# -------------------------
+# Checkpoint for crash recovery and resume
+# -------------------------
+
+CHECKPOINT_FILENAME = "checkpoint.json"
+
+
+def save_checkpoint(checkpoint_data: dict, checkpoint_path: str) -> None:
+    """Save checkpoint to disk. Handles JSON serialization of completed_urls (set -> list)."""
+    try:
+        data = checkpoint_data.copy()
+        # Convert set to list for JSON
+        data["completed_urls"] = list(data.get("completed_urls", []))
+        data["last_updated"] = datetime.now().isoformat()
+        with open(checkpoint_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Checkpoint save failed: {e}")
+
+
+def load_checkpoint(checkpoint_path: str) -> dict | None:
+    """Load checkpoint from disk. Returns None if file doesn't exist or is invalid."""
+    if not os.path.exists(checkpoint_path):
+        return None
+    try:
+        with open(checkpoint_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Convert list back to set
+        data["completed_urls"] = set(data.get("completed_urls", []))
+        return data
+    except Exception as e:
+        print(f"⚠️ Checkpoint load failed: {e}")
+        return None
+
+
+def get_checkpoint_path(output_dir: str) -> str:
+    """Return the checkpoint file path for a run."""
+    return os.path.join(output_dir, CHECKPOINT_FILENAME)
 
 
 # -------------------------
@@ -1086,29 +1134,32 @@ def get_realistic_headers(user_agent=None, target_url=None):
 _domain_request_times = {}  # Track last request time per domain
 _domain_lock = asyncio.Lock()  # Lock for thread-safe access to domain timing
 
-async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int):
-    """Fetch URL with EPIC anti-bot detection avoidance - maximum stealth mode."""
+async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int, fast_mode: bool = False):
+    """Fetch URL with EPIC anti-bot detection avoidance. fast_mode reduces delays for 4k+ runs."""
     from urllib.parse import urlparse
     import random
     
     parsed = urlparse(url)
     domain = parsed.netloc.replace('www.', '').lower()
     
-    # CRITICAL: Domain-based rate limiting - prevent hammering same domain
+    # Domain rate limit - much shorter in fast mode
+    if fast_mode:
+        min_delay = random.uniform(0.15, 0.4)
+        pre_request_delay = random.uniform(0.02, 0.1)
+    else:
+        min_delay = random.uniform(2.0, 5.0)
+        pre_request_delay = random.uniform(1.0, 3.0)
+    
     async with _domain_lock:
         if domain in _domain_request_times:
             last_request_time = _domain_request_times[domain]
             time_since_last = time.time() - last_request_time
-            # Enforce minimum 2-5 seconds between requests to same domain
-            min_delay = random.uniform(2.0, 5.0)
             if time_since_last < min_delay:
                 wait_time = min_delay - time_since_last
                 await asyncio.sleep(wait_time)
         _domain_request_times[domain] = time.time()
     
-    # Add random delay before request (simulate human reading/thinking time)
-    # Longer delays to appear more human-like
-    await asyncio.sleep(random.uniform(1.0, 3.0))
+    await asyncio.sleep(pre_request_delay)
     
     # Try different URL variations and header combinations for better success rate
     url_variations = [url]
@@ -1154,13 +1205,12 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
             
             for attempt in range(retries + 1):
                 # Increase timeout for retries (some sites are slow)
-                retry_timeout = timeout + (attempt * 5)  # Add 5s per retry attempt
+                retry_timeout = timeout + (attempt * 5)
+                req_timeout = aiohttp.ClientTimeout(total=retry_timeout, connect=10, sock_read=min(retry_timeout, 45))
                 
                 try:
-                    # Add random delay between retries (human-like behavior)
-                    # Longer delays for retries - humans don't retry instantly
                     if attempt > 0:
-                        delay = random.uniform(3.0, 6.0) + (attempt * 1.5)
+                        delay = (random.uniform(0.3, 0.8) + attempt * 0.2) if fast_mode else (random.uniform(3.0, 6.0) + attempt * 1.5)
                         await asyncio.sleep(delay)
                     
                     # Parse URL
@@ -1170,11 +1220,9 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                     
                     original_domain = parsed_original.netloc.replace('www.', '').lower()
                     
-                    # Add random delay before each request (simulate human behavior)
-                    # Longer delays to appear more human-like
-                    await asyncio.sleep(random.uniform(0.5, 2.0))
+                    await asyncio.sleep(random.uniform(0.02, 0.15) if fast_mode else random.uniform(0.5, 2.0))
                     
-                    async with session.get(url_to_try, timeout=aiohttp.ClientTimeout(total=retry_timeout), allow_redirects=True, headers=headers) as resp:
+                    async with session.get(url_to_try, timeout=req_timeout, allow_redirects=True, headers=headers) as resp:
                         # Handle redirects properly - use the final URL after redirects
                         final_url = str(resp.url)
                         parsed_final = urlparse(final_url)
@@ -1198,25 +1246,18 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                         
                         # Check status code - handle 403 and 429 specially
                         if resp.status == 403:
-                            # 403 Forbidden - EPIC retry strategy with exponential backoff
                             last_error = f"HTTP 403 at {final_url}"
-                            # Much longer delay - simulate human giving up and trying again later
-                            # Exponential backoff: 5-10s first attempt, 10-20s second, etc.
-                            backoff_delay = random.uniform(5.0, 10.0) * (2 ** attempt)
-                            # Cap at 60 seconds max
-                            backoff_delay = min(backoff_delay, 60.0)
+                            backoff_delay = (random.uniform(1.0, 3.0) * (1.5 ** attempt)) if fast_mode else (random.uniform(5.0, 10.0) * (2 ** attempt))
+                            backoff_delay = min(backoff_delay, 15.0 if fast_mode else 60.0)
                             await asyncio.sleep(backoff_delay)
-                            
-                            # Also add domain cooldown - if we got 403, wait longer before next request to this domain
                             async with _domain_lock:
-                                _domain_request_times[domain] = time.time() + random.uniform(10.0, 20.0)
+                                _domain_request_times[domain] = time.time() + (random.uniform(2.0, 5.0) if fast_mode else random.uniform(10.0, 20.0))
                             
                             break  # Try next variation
                         elif resp.status == 429:
-                            # Rate limited - exponential backoff
-                            retry_after = int(resp.headers.get('Retry-After', 5 + attempt * 2))
+                            retry_after = int(resp.headers.get('Retry-After', 3 + attempt if fast_mode else 5 + attempt * 2))
                             last_error = f"HTTP 429 at {final_url} (rate limited)"
-                            await asyncio.sleep(min(retry_after, 30))  # Max 30s wait
+                            await asyncio.sleep(min(retry_after, 15 if fast_mode else 30))
                             continue  # Retry same URL/headers
                         elif resp.status >= 400:
                             # Other 4xx/5xx errors
@@ -1265,46 +1306,41 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 except asyncio.TimeoutError:
                     last_error = f"Timeout fetching {url_to_try} (exceeded {retry_timeout}s)"
                     if attempt < retries:
-                        # Exponential backoff for timeouts
-                        await asyncio.sleep(2 + attempt * 1)
+                        await asyncio.sleep(0.5 + attempt * 0.3 if fast_mode else 2 + attempt * 1)
                     continue
                 except (aiohttp.ClientError, ConnectionResetError, OSError) as e:
                     error_str = str(e).lower()
                     # Handle brotli encoding error specifically
                     if 'brotli' in error_str or 'br' in error_str or 'content-encoding' in error_str:
-                        # Try without brotli in next iteration
                         last_error = f"Brotli encoding error: {str(e)}"
                         if attempt < retries:
-                            await asyncio.sleep(1 + attempt * 0.5)
+                            await asyncio.sleep(0.3 + attempt * 0.2 if fast_mode else 1 + attempt * 0.5)
                         continue
-                    # Handle connection errors with exponential backoff
                     if 'connection' in error_str or 'disconnected' in error_str or 'getaddrinfo' in error_str:
                         last_error = f"Error fetching {url_to_try}: {str(e)}"
                         if attempt < retries:
-                            # Exponential backoff for connection errors
-                            await asyncio.sleep(2 + attempt * 1)
+                            await asyncio.sleep(0.5 + attempt * 0.3 if fast_mode else 2 + attempt * 1)
                         continue
                     last_error = f"Error fetching {url_to_try}: {str(e)}"
                     if attempt < retries:
-                        await asyncio.sleep(1 + attempt * 0.5)
+                        await asyncio.sleep(0.3 + attempt * 0.2 if fast_mode else 1 + attempt * 0.5)
                     continue
                 except UnicodeDecodeError as e:
                     last_error = f"Encoding error: {str(e)}"
                     if attempt < retries:
-                        await asyncio.sleep(1 + attempt * 0.5)
+                        await asyncio.sleep(0.3 + attempt * 0.2 if fast_mode else 1 + attempt * 0.5)
                     continue
                 except Exception as e:
-                    # Catch any other unexpected errors
                     last_error = f"Unexpected error fetching {url_to_try}: {str(e)}"
                     if attempt < retries:
-                        await asyncio.sleep(1 + attempt * 0.5)
+                        await asyncio.sleep(0.3 + attempt * 0.2 if fast_mode else 1 + attempt * 0.5)
                     continue
     
     # If we get here, all variations failed
     return last_error or f"Failed to fetch {url} after trying all variations"
 
 
-async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int):
+async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int, fast_mode: bool = False):
     visited, results, errors = set(), [], []
     total_chars = 0
     separator = "\n\n" + "─" * 80 + "\n\n"  # Better visual separator between pages
@@ -1313,7 +1349,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     # Normalize URL before fetching
     normalized_url = normalize_url(url)
     
-    homepage = await fetch(session, normalized_url, timeout, retries)
+    homepage = await fetch(session, normalized_url, timeout, retries, fast_mode)
     if isinstance(homepage, str):
         return f"❌ {homepage}"
 
@@ -1438,7 +1474,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         if total_chars >= max_chars:
             break  # Stop if we've reached the limit
         
-        res = await fetch(session, link, timeout, retries)
+        res = await fetch(session, link, timeout, retries, fast_mode)
         if isinstance(res, str):
             errors.append(f"❌ {res}")
         elif isinstance(res, tuple):
@@ -1538,13 +1574,12 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue: asyncio.Queue,
                            depth, keywords, max_chars, retries, timeout,
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
-                           lead_data_map=None, ai_status_callback=None):
+                           lead_data_map=None, ai_status_callback=None, fast_mode: bool = False):
     from urllib.parse import urlparse
     import random
     
-    # Worker-level delay - stagger workers to avoid synchronized requests
     worker_id = int(name.split('-')[-1]) if '-' in name else 0
-    initial_delay = worker_id * random.uniform(0.5, 1.5)
+    initial_delay = worker_id * (random.uniform(0.03, 0.12) if fast_mode else random.uniform(0.5, 1.5))
     await asyncio.sleep(initial_delay)
     
     while True:
@@ -1555,9 +1590,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
         
         # CRITICAL: Wrap entire processing in try-finally to ensure task_done() is always called
         try:
-            # Add random delay between processing URLs (human-like behavior)
-            # This prevents workers from processing URLs too quickly
-            await asyncio.sleep(random.uniform(0.5, 2.0))
+            await asyncio.sleep(random.uniform(0.03, 0.15) if fast_mode else random.uniform(0.5, 2.0))
             # Handle both old format (just URL) and new format (URL, index)
             if isinstance(item, tuple):
                 original_url, url_index = item
@@ -1586,15 +1619,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 scraped_text = "❌ Invalid URL: URL is empty or too short"
                 ai_summary = "❌ Invalid URL: URL is empty or too short"
             else:
-                # CRITICAL: Add a global timeout wrapper to prevent workers from hanging indefinitely
-                # Use a more reasonable timeout: max 3 minutes per URL for slow sites
-                # This prevents one slow URL from blocking everything, but allows slow sites to complete
-                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + 60, 180)  # Max 3 minutes per URL
+                # Global timeout per URL - shorter in fast mode
+                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), 90 if fast_mode else 180)
                 
                 try:
                     # Wrap scraping in a timeout to prevent infinite hangs
                     scraped_text = await asyncio.wait_for(
-                        scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout),
+                        scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout, fast_mode),
                         timeout=max_total_time
                     )
                 except asyncio.TimeoutError:
@@ -1609,7 +1640,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                             fallback_url = normalized_url.replace("https://", "http://", 1)
                             try:
                                 scraped_text = await asyncio.wait_for(
-                                    scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout),
+                                    scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout, fast_mode),
                                     timeout=max_total_time
                                 )
                             except asyncio.TimeoutError:
@@ -1760,7 +1791,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
 
 
 async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, output_dir: str,
-                           total_urls: int, progress_callback):
+                           total_urls: int, progress_callback,
+                           start_part: int = 0, checkpoint_data: dict | None = None,
+                           checkpoint_path: str | None = None):
+    """
+    Write results to disk. If checkpoint_data and checkpoint_path are provided,
+    saves progress after each file write for crash recovery and resume.
+    """
     # CRITICAL: Create output directory first
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -1772,7 +1809,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         return  # Exit if we can't create directory
     
     buffer = []
-    part = 0
+    part = start_part
     processed = 0
     files_written = []
 
@@ -1784,6 +1821,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             break
         buffer.append(item)
         processed += 1
+        result_queue.task_done()  # CRITICAL: one per item (join() counts these)
         if progress_callback:
             progress_callback(processed, total_urls)
 
@@ -1957,9 +1995,12 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             cell.value = val
                             cell.data_type = 's'  # Force string type
                     
-                    # CRITICAL: Save with explicit error handling
-                    try:
+                    # Run heavy I/O in executor to avoid blocking event loop (fixes progress freeze)
+                    loop = asyncio.get_event_loop()
+                    def _save_excel():
                         wb.save(excel_path)
+                    try:
+                        await loop.run_in_executor(None, _save_excel)
                     except Exception as save_error:
                         # If save fails, try to save with minimal data
                         print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
@@ -2000,47 +2041,23 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         df["CompanySummary"] = ""
                     df = df[["Website", "ScrapedText", "CompanySummary"]]
                     
-                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                        # Write header - ALWAYS 3 columns in exact order
-                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
-                        # Write rows - ensure all values are strings and properly cleaned
-                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
-                        for idx in range(len(df)):
-                            row = df.iloc[idx]
-                            row_values = []
-                            
-                            # Extract values by column name (not position) to ensure correct order
-                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
-                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
-                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
-                            
-                            # Clean each value - CRITICAL: Remove newlines and normalize whitespace
-                            def clean_val(v):
-                                if not v:
-                                    return ""
-                                import re
-                                v = str(v)
-                                v = v.replace('\x00', '')  # Remove null bytes
-                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')  # Replace newlines/tabs with space
-                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)  # Remove control chars
-                                v = re.sub(r'\s+', ' ', v).strip()  # Normalize whitespace
-                                return v
-                            
-                            # Add values in correct order: Website, ScrapedText, CompanySummary
-                            row_values.append(clean_val(website))
-                            row_values.append(clean_val(scraped_text))
-                            row_values.append(clean_val(company_summary))
-                            
-                            # Verify exactly 3 values
-                            if len(row_values) != 3:
-                                while len(row_values) < 3:
-                                    row_values.append("")
-                                row_values = row_values[:3]
-                            
-                            # CRITICAL: csv.writer with QUOTE_ALL will automatically quote all fields
-                            # and escape internal quotes by doubling them (Excel standard)
-                            writer.writerow(row_values)
+                    def _write_csv():
+                        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                            writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                            for idx in range(len(df)):
+                                row = df.iloc[idx]
+                                def clean_val(v):
+                                    if not v: return ""
+                                    v = str(v)
+                                    v = v.replace('\x00', '')
+                                    v = re.sub(r'[\n\r\f\v\t]', ' ', v)
+                                    v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
+                                    return re.sub(r'\s+', ' ', v).strip()
+                                row_values = [clean_val(row["Website"]), clean_val(row["ScrapedText"]), clean_val(row["CompanySummary"])]
+                                row_values = (row_values + [""] * 3)[:3]
+                                writer.writerow(row_values)
+                    await loop.run_in_executor(None, _write_csv)
                     
                     # Verify file was written
                     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
@@ -2068,6 +2085,15 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         logging.warning(f"CSV validation warning: {e}")
                         # Also print to console for debugging
                         print(f"⚠️ CSV validation warning for {csv_path}: {e}")
+                    # CRASH RECOVERY: Update checkpoint after each successful write
+                    if checkpoint_data is not None and checkpoint_path and len(df) > 0:
+                        try:
+                            urls_in_chunk = df["Website"].astype(str).str.strip().tolist()
+                            checkpoint_data.setdefault("completed_urls", set()).update(u for u in urls_in_chunk if u)
+                            checkpoint_data["last_part"] = part
+                            save_checkpoint(checkpoint_data, checkpoint_path)
+                        except Exception as cp_err:
+                            print(f"⚠️ Checkpoint update failed: {cp_err}")
                 except Exception as e:
                     # Final fallback: manual CSV writing - CRITICAL: Always write 3 columns
                     import logging
@@ -2171,8 +2197,6 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
                             company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
                             writer.writerow([website, scraped_text, company_summary])
-
-        result_queue.task_done()
 
     # Write remaining buffer
     if buffer:
@@ -2378,22 +2402,79 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
 async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                       user_agent, rows_per_file, output_dir, progress_callback,
                       ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
-                      lead_data_map=None, ai_status_callback=None):
+                      lead_data_map=None, ai_status_callback=None, run_folder: str = "", fast_mode: bool = False,
+                      low_resource: bool = False):
+    """
+    Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
+    Uses backpressure on result_queue to prevent memory exhaustion with large datasets.
+    Saves checkpoint on every file write and in finally block for crash recovery.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    checkpoint_path = get_checkpoint_path(output_dir)
+    checkpoint_data = load_checkpoint(checkpoint_path)
+    
+    if checkpoint_data is not None:
+        completed_urls = checkpoint_data.get("completed_urls", set())
+        start_part = checkpoint_data.get("last_part", 0)
+        stored_urls = checkpoint_data.get("urls", [])
+        # Only resume if stored URLs match (same run)
+        if set(stored_urls) == set(urls):
+            remaining_with_idx = [(u, idx) for idx, u in enumerate(urls) if u not in completed_urls]
+            if not remaining_with_idx:
+                print("✅ All URLs already completed (resume found nothing to do)")
+                return
+            print(f"📂 Resuming: {len(completed_urls)} already done, {len(remaining_with_idx)} remaining")
+        else:
+            completed_urls = set()
+            start_part = 0
+            remaining_with_idx = list(enumerate(urls))
+    else:
+        completed_urls = set()
+        start_part = 0
+        remaining_with_idx = list(enumerate(urls))
+    
+    total_overall = len(urls)
+    total_this_run = len(remaining_with_idx)
+    completed_before = len(completed_urls)
+    
+    checkpoint_data = {
+        "urls": urls,
+        "completed_urls": completed_urls,
+        "last_part": start_part,
+        "run_folder": run_folder or os.path.basename(output_dir),
+        "started_at": datetime.now().isoformat(),
+    }
+    save_checkpoint(checkpoint_data, checkpoint_path)
+    
+    progress_state = {"last_count": completed_before, "last_time": time.time()}
+    
+    def adapted_progress(done, total_queue):
+        progress_state["last_count"] = completed_before + done
+        progress_state["last_time"] = time.time()
+        if progress_callback:
+            progress_callback(completed_before + done, total_overall)
+    
+    # Backpressure: smaller queue for low-resource machines
+    queue_max = min(200 if low_resource else 500, total_this_run + 10)
+    result_queue = asyncio.Queue(maxsize=queue_max)
     url_queue = asyncio.Queue()
-    result_queue = asyncio.Queue()
-    total = len(urls)
 
-    # Put URLs with their indices for lead data lookup
-    for idx, u in enumerate(urls):
+    for u, idx in remaining_with_idx:
         await url_queue.put((u, idx))
 
     timeout_obj = aiohttp.ClientTimeout(total=None)
     # Use cookie jar for session persistence (makes requests look more legitimate)
     cookie_jar = aiohttp.CookieJar(unsafe=True)  # Allow cross-domain cookies
-    # EPIC connector settings for maximum stealth
+    # Connector - tune for low-resource vs fast mode
+    if low_resource:
+        conn_limit, conn_per_host = 30, 3
+    elif fast_mode:
+        conn_limit, conn_per_host = 200, 8
+    else:
+        conn_limit, conn_per_host = 100, 5
     connector = aiohttp.TCPConnector(
-        limit=100,  # Connection pool limit
-        limit_per_host=5,  # Max 5 connections per host (prevents hammering)
+        limit=conn_limit,
+        limit_per_host=conn_per_host,
         ssl=False,
         enable_cleanup_closed=True,
         keepalive_timeout=30,
@@ -2410,131 +2491,129 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     )
 
     writer_task = asyncio.create_task(writer_coroutine(
-        result_queue, rows_per_file, output_dir, total, progress_callback))
+        result_queue, rows_per_file, output_dir, total_this_run, adapted_progress,
+        start_part=start_part, checkpoint_data=checkpoint_data, checkpoint_path=checkpoint_path))
 
     workers = [asyncio.create_task(worker_coroutine(
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
-        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback)) for i in range(concurrency)]
+        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback, fast_mode)) for i in range(concurrency)]
 
-    # CRITICAL: Add timeout wrapper around url_queue.join() to prevent infinite hangs
-    # Use a more aggressive timeout: max 2 minutes per URL (much more reasonable)
-    max_queue_time = min((timeout * (retries + 1) * (depth + 1) * 2 * total) + (30 * total), 120 * total)  # Max 2 min per URL
-    
-    # Track completed count
-    completed_count = [0]  # Use list to allow modification in nested function
+    # Timeout: cap at 3 hours to prevent infinite hangs
+    base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
+    max_queue_time = min(base_time, 3 * 3600)
     
     async def force_completion_on_stall():
-        """Force completion if queue is stuck"""
-        start_time = time.time()
-        last_size = total
+        """Detect stall using progress_state and drain queue. Use put_nowait to avoid blocking."""
+        stall_threshold = 120 if low_resource else 90
         while True:
-            await asyncio.sleep(10)  # Check every 10 seconds
-            current_size = url_queue.qsize()
-            elapsed = time.time() - start_time
-            
-            # If queue size hasn't changed in 60 seconds and there are still items, force complete
-            if current_size == last_size and current_size > 0 and elapsed > 60:
-                print(f"⚠️ Detected stall: {total - current_size}/{total} completed, {current_size} remaining. Forcing completion...")
-                # Drain remaining URLs and mark as timeout errors
+            await asyncio.sleep(15)
+            elapsed = time.time() - progress_state["last_time"]
+            last_count = progress_state["last_count"]
+            remaining = total_overall - last_count
+            if remaining <= 0:
+                break
+            if elapsed > stall_threshold:
+                print(f"⚠️ Stall detected: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Draining remaining URLs...")
                 drained = 0
-                while not url_queue.empty() and drained < current_size:
+                while drained < remaining + 100:  # Safety cap
                     try:
                         item = url_queue.get_nowait()
-                        if item and item != (None, None):
-                            if isinstance(item, tuple):
-                                url, idx = item
-                            else:
-                                url = item
-                            error_result = (url, f"❌ Timeout: Processing exceeded time limit (stall detected)", "")
-                            await result_queue.put(error_result)
-                            url_queue.task_done()
-                            drained += 1
-                    except Exception as e:
-                        print(f"Error draining queue: {e}")
+                    except asyncio.QueueEmpty:
                         break
+                    if item is None or item == (None, None):
+                        url_queue.task_done()
+                        continue
+                    url, idx = (item[0], item[1]) if isinstance(item, tuple) else (item, None)
+                    err_result = (url, "❌ Stall detected: processing stopped (progress frozen)", "")
+                    for _ in range(20):  # Retry put if queue full
+                        try:
+                            result_queue.put_nowait(err_result)
+                            break
+                        except asyncio.QueueFull:
+                            await asyncio.sleep(0.3)
+                    else:
+                        print("⚠️ Result queue full during stall drain")
+                    url_queue.task_done()
+                    drained += 1
                 break
-            
-            # If queue is empty, we're done
-            if current_size == 0:
-                break
-            
-            last_size = current_size
     
     stall_monitor = asyncio.create_task(force_completion_on_stall())
     
     try:
-        # Wait for queue to complete, but with a timeout
-        await asyncio.wait_for(url_queue.join(), timeout=max_queue_time)
-    except asyncio.TimeoutError:
-        # Queue join timed out - force completion
-        print(f"⚠️ Queue join timed out after {max_queue_time}s. Forcing completion...")
-        # Drain remaining URLs
-        drained = 0
-        while not url_queue.empty() and drained < 1000:  # Safety limit
-            try:
-                item = url_queue.get_nowait()
-                if item and item != (None, None):
-                    if isinstance(item, tuple):
-                        url, idx = item
-                    else:
-                        url = item
-                    error_result = (url, f"❌ Timeout: Processing exceeded {max_queue_time}s limit", "")
-                    await result_queue.put(error_result)
-                    url_queue.task_done()
-                    drained += 1
-            except Exception as e:
-                print(f"Error draining queue: {e}")
-                break
-    
-    # Cancel stall monitor
-    stall_monitor.cancel()
-    try:
-        await stall_monitor
-    except (asyncio.CancelledError, Exception):
-        pass
-
-    # Signal workers to stop
-    for _ in workers:
         try:
-            await url_queue.put(None)
-        except:
+            await asyncio.wait_for(url_queue.join(), timeout=max_queue_time)
+        except asyncio.TimeoutError:
+            print(f"⚠️ Queue join timed out after {max_queue_time}s. Draining remaining URLs...")
+            drained = 0
+            while drained < total_this_run:
+                try:
+                    item = url_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None or item == (None, None):
+                    url_queue.task_done()
+                    continue
+                url = item[0] if isinstance(item, tuple) else item
+                err_result = (url, f"❌ Timeout: exceeded {max_queue_time}s limit", "")
+                for _ in range(30):
+                    try:
+                        result_queue.put_nowait(err_result)
+                        break
+                    except asyncio.QueueFull:
+                        await asyncio.sleep(0.5)
+                else:
+                    print("⚠️ Result queue full during timeout drain")
+                url_queue.task_done()
+                drained += 1
+
+        stall_monitor.cancel()
+        try:
+            await stall_monitor
+        except asyncio.CancelledError:
             pass
-    
-    # Wait for workers to finish (with timeout)
-    try:
-        await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=30)
-    except asyncio.TimeoutError:
-        # Force cancel if still hanging
-        for worker in workers:
-            if not worker.done():
-                worker.cancel()
+        except Exception as e:
+            print(f"⚠️ Stall monitor error: {e}")
 
-    # Signal writer to stop
-    try:
-        await result_queue.put(None)
-    except:
-        pass
-    
-    # Wait for result queue to drain (with timeout)
-    try:
-        await asyncio.wait_for(result_queue.join(), timeout=60)
-    except asyncio.TimeoutError:
-        print("⚠️ Result queue join timed out. Proceeding anyway...")
-    
-    # Wait for writer to finish (with timeout)
-    try:
-        await asyncio.wait_for(writer_task, timeout=120)  # Give writer more time to finish
-    except asyncio.TimeoutError:
-        print("⚠️ Writer task timed out. Proceeding anyway...")
-        writer_task.cancel()
+        for _ in workers:
+            try:
+                await url_queue.put(None)
+            except Exception:
+                pass
+        
+        try:
+            await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=30)
+        except asyncio.TimeoutError:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+
+        try:
+            await result_queue.put(None)
+        except Exception:
+            pass
+        
+        try:
+            await asyncio.wait_for(result_queue.join(), timeout=60)
+        except asyncio.TimeoutError:
+            print("⚠️ Result queue join timed out. Proceeding anyway...")
+        
+        try:
+            await asyncio.wait_for(writer_task, timeout=120)
+        except asyncio.TimeoutError:
+            print("⚠️ Writer task timed out. Proceeding anyway...")
+            writer_task.cancel()
+        except Exception as e:
+            print(f"⚠️ Error waiting for writer: {e}")
+
+        await session.close()
+        await asyncio.sleep(2)
     except Exception as e:
-        print(f"⚠️ Error waiting for writer: {e}")
-
-    await session.close()
-    
-    # CRITICAL: Give files time to be fully written to disk
-    import time
-    await asyncio.sleep(2)  # Wait 2 seconds for file system to sync
+        print(f"⚠️ Scraper error (progress saved): {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        save_checkpoint(checkpoint_data, checkpoint_path)
+        print("💾 Checkpoint saved.")
 
 # -------------------------
 # Streamlit UI
@@ -2757,6 +2836,58 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# -------- RESUME / PARTIAL RESULTS --------
+# Scan outputs/ for checkpoints - show runs that can be resumed or have partial data
+outputs_dir = "outputs"
+if os.path.isdir(outputs_dir):
+    incomplete_runs = []
+    for run_folder in sorted(os.listdir(outputs_dir), reverse=True)[:10]:
+        run_path = os.path.join(outputs_dir, run_folder)
+        if not os.path.isdir(run_path):
+            continue
+        ck_path = get_checkpoint_path(run_path)
+        ck = load_checkpoint(ck_path)
+        if not ck:
+            continue
+        total_urls = len(ck.get("urls", []))
+        completed = len(ck.get("completed_urls", []))
+        if completed > 0 and completed < total_urls:
+            incomplete_runs.append({"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path})
+        elif completed >= total_urls and total_urls > 0:
+            incomplete_runs.append({"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path, "done": True})
+
+    if incomplete_runs:
+        with st.expander("📂 Resume or Download Partial Results", expanded=True):
+            st.markdown("**If the app crashed or stopped, you can:**")
+            for run in incomplete_runs:
+                is_done = run.get("done", False)
+                label = f"✅ {run['folder']}: {run['completed']:,}/{run['total']:,} done" if is_done else f"⏸️ {run['folder']}: {run['completed']:,}/{run['total']:,} done (partial)"
+                with st.container():
+                    col_a, col_b = st.columns([2, 1])
+                    with col_a:
+                        st.markdown(f"**{label}**")
+                        if not is_done:
+                            st.caption("To resume: Re-upload your CSV, use this run name, then click Start.")
+                    with col_b:
+                        zip_path = os.path.join(run["path"], f"{run['folder']}.zip")
+                        if not os.path.exists(zip_path):
+                            csv_files = [f for f in os.listdir(run["path"]) if f.endswith(".csv") and "combined" not in f]
+                            if csv_files:
+                                try:
+                                    import zipfile
+                                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                                        for f in csv_files:
+                                            zf.write(os.path.join(run["path"], f), arcname=f)
+                                        for f in os.listdir(run["path"]):
+                                            if f.endswith(".xlsx") and "combined" not in f:
+                                                zf.write(os.path.join(run["path"], f), arcname=f)
+                                except Exception:
+                                    pass
+                        if os.path.exists(zip_path):
+                            with open(zip_path, "rb") as f:
+                                st.download_button("⬇️ Download", f.read(), file_name=f"{run['folder']}.zip", mime="application/zip", key=f"resume_dl_{run['folder']}")
+                    st.markdown("---")
+
 # Step 1: Upload CSV
 st.markdown('<div class="step1-container">', unsafe_allow_html=True)
 st.markdown("### 📁 Step 1: Upload CSV")
@@ -2940,19 +3071,48 @@ with col1:
     else:
         st.caption("💡 Leave empty to scrape homepage only")
     
-    # Speed
+    # Fast mode - 4k in ~15 min
+    fast_mode = st.checkbox(
+        "⚡ Fast mode (4k leads in ~15 min)",
+        value=st.session_state.get('fast_mode', False),
+        help="Reduces delays for large runs. May increase 403s on strict sites. Best for 1000+ URLs.",
+        key="fast_mode"
+    )
+    st.session_state['fast_mode'] = fast_mode
+    
+    # Low resource mode - for slow/limited computers
+    low_resource_default = _is_low_resource_default()
+    low_resource = st.checkbox(
+        "🐢 Low resource mode (slower computers)",
+        value=st.session_state.get('low_resource', low_resource_default),
+        help="Uses fewer workers and less memory. Recommended if your computer is slow or has limited RAM.",
+        key="low_resource"
+    )
+    st.session_state['low_resource'] = low_resource
+    
+    # Speed - lower limits when low resource
+    if low_resource:
+        concurrency_max = 15
+        concurrency_default = min(st.session_state.get('concurrency', 8), 15)
+    elif fast_mode:
+        concurrency_max = 150
+        concurrency_default = min(st.session_state.get('concurrency', 100), 150)
+    else:
+        concurrency_max = 50
+        concurrency_default = min(st.session_state.get('concurrency', 20), 50)
     concurrency = st.slider(
         "Speed (parallel workers)", 
-        1, 50, st.session_state.get('concurrency', 20),
-        help="How many websites to scrape at the same time. Higher = faster but may cause errors. 20-30 is usually best.",
+        1, concurrency_max, min(concurrency_default, concurrency_max),
+        help="Low resource: 5-10. Normal: 20-30. Fast: 100-150.",
         key="concurrency"
     )
     
-    # Pages to scrape
+    # Pages to scrape - 0 in fast mode for speed
+    depth_default = 0 if fast_mode else st.session_state.get('depth', 3)
     depth = st.slider(
         "Pages to scrape per site", 
-        0, 5, st.session_state.get('depth', 3),
-        help="How many pages to scrape from each website. 0 = homepage only, 3 = homepage + 3 more pages",
+        0, 5, depth_default,
+        help="Fast mode: use 0 (homepage only) for speed. Normal: 3 = homepage + 3 more pages",
         key="depth"
     )
     
@@ -2985,10 +3145,11 @@ with col2:
     )
     
     # Rows per file
+    rows_per_file_default = 1000 if low_resource else st.session_state.get('rows_per_file', 2000)
     rows_per_file = st.number_input(
         "Split files every X rows", 
-        1000, 50000, st.session_state.get('rows_per_file', 2000), step=1000,
-        help="Large results will be split into multiple files. 2000 rows per file is usually good.",
+        500, 50000, min(rows_per_file_default, 50000), step=500,
+        help="Lower = less memory per write. Use 500-1000 on slow computers.",
         key="rows_per_file"
     )
     
@@ -3283,6 +3444,8 @@ max_chars = st.session_state.get('max_chars', 50000)
 rows_per_file = st.session_state.get('rows_per_file', 2000)
 user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 run_name = st.session_state.get('run_name', "")
+fast_mode = st.session_state.get('fast_mode', False)
+low_resource = st.session_state.get('low_resource', _is_low_resource_default())
 ai_enabled = st.session_state.get('ai_enabled', False)
 ai_provider = st.session_state.get('ai_provider', None)
 # Get API key - check provider-specific key first, then generic
@@ -3391,6 +3554,9 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             - With 50k chars/site: ~{total * 50000 / (1024*1024):.0f} MB of text data
             - Will be split into multiple files for better performance
             - Excel files may be large - CSV recommended for very large datasets
+
+            **Crash recovery:** If the scraper stops or restarts, your progress is saved automatically.
+            Re-upload the same CSV, use the same run name, and click Start again to resume.
             """)
     elif total > 5000:
         st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
@@ -3414,6 +3580,16 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         run_folder = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     output_dir = os.path.join("outputs", run_folder)
     os.makedirs(output_dir, exist_ok=True)
+
+    # Check for existing checkpoint (resume support)
+    checkpoint_path = get_checkpoint_path(output_dir)
+    existing_checkpoint = load_checkpoint(checkpoint_path)
+    if existing_checkpoint and total > 100:
+        stored_urls = set(existing_checkpoint.get("urls", []))
+        if set(urls) == stored_urls:
+            completed = len(existing_checkpoint.get("completed_urls", []))
+            if completed > 0 and completed < total:
+                st.info(f"💾 **Resume available:** {completed:,} of {total:,} URLs already completed. Click Start to continue from where you left off.")
 
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -3445,30 +3621,60 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         "🧩 Piecing text together..."
     ]
     start_time = time.time()
+    progress_state_ui = {"done": 0, "total": max(total, 1), "running": True}
 
     def progress_cb(done_count, total_count):
+        progress_state_ui["done"] = done_count
+        progress_state_ui["total"] = max(total_count, 1)
         percent = done_count / max(total_count, 1)
         elapsed = time.time() - start_time
-        avg = elapsed / max(done_count, 1)
-        remaining = avg * (total_count - done_count)
+        avg = elapsed / max(done_count, 1) if done_count > 0 else 0
+        remaining = avg * (total_count - done_count) if done_count > 0 else 0
         progress_bar.progress(min(percent, 1.0))
         idx = (done_count - 1) % len(fun_messages) if done_count > 0 else 0
         status_text.text(f"{fun_messages[idx]}  ({done_count}/{total_count})")
         eta_text.text(f"⏳ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
 
+    import threading
+    scrape_error = [None]  # Mutable to capture exception from thread
+    
+    def run_async_scraper():
+        try:
+            if os.name == "nt":
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            progress_state_ui["running"] = True
+            asyncio.run(
+                run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
+                            user_agent, rows_per_file, output_dir, progress_cb,
+                            ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map,
+                            ai_status_callback if ai_enabled else None, run_folder=run_folder, fast_mode=fast_mode, low_resource=low_resource))
+        except Exception as e:
+            scrape_error[0] = e
+            import traceback
+            traceback.print_exc()
+        finally:
+            progress_state_ui["running"] = False
+
     with st.spinner("Scraping — this runs in the page (do not close)..."):
-        if os.name == "nt":
-            asyncio.set_event_loop_policy(
-                asyncio.WindowsSelectorEventLoopPolicy())
-        # Get lead_data_map from session state
         lead_data_map = st.session_state.get('lead_data_map', None)
         
-        asyncio.run(
-            run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
-                        user_agent, rows_per_file, output_dir, progress_cb,
-                        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map,
-                        ai_status_callback if ai_enabled else None)
-        )
+        thread = threading.Thread(target=run_async_scraper, daemon=False)
+        thread.start()
+        while thread.is_alive():
+            d, t = progress_state_ui["done"], progress_state_ui["total"]
+            pct = d / max(t, 1)
+            elapsed = time.time() - start_time
+            avg = elapsed / max(d, 1) if d > 0 else 0
+            remaining = avg * (t - d) if d > 0 else 0
+            progress_bar.progress(min(pct, 1.0))
+            status_text.text(f"({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+            eta_text.text("")
+            time.sleep(0.8)
+        thread.join()
+        
+        if scrape_error[0]:
+            st.error(f"❌ Scraper error: {scrape_error[0]}")
+            st.info("💾 Partial results may have been saved. Check the output folder or use Resume.")
 
     # Zip all parts at the end with custom name (CSV and Excel files)
     zip_name = f"{run_folder}.zip"

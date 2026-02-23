@@ -3,6 +3,8 @@ headless = true
 port = 8501
 enableCORS = false
 enableXsrfProtection = true
+runOnSave = false
+maxUploadSize = 500
 
 [theme]
 primaryColor = "#1f77b4"
