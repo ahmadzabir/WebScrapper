@@ -2719,49 +2719,6 @@ st.markdown("""
         font-size: 2.5rem;
     }
     
-    /* Step containers with modern design */
-    .step1-container {
-        background: linear-gradient(135deg, #E3F2FD 0%, #BBDEFB 100%);
-        padding: 2rem;
-        border-radius: 12px;
-        border-left: 5px solid #2196F3;
-        margin-bottom: 2rem;
-        box-shadow: 0 2px 8px rgba(33, 150, 243, 0.15);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    
-    .step1-container:hover {
-        box-shadow: 0 4px 12px rgba(33, 150, 243, 0.25);
-    }
-    
-    .step2-container {
-        background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
-        padding: 2rem;
-        border-radius: 12px;
-        border-left: 5px solid #4CAF50;
-        margin-bottom: 2rem;
-        box-shadow: 0 2px 8px rgba(76, 175, 80, 0.15);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    
-    .step2-container:hover {
-        box-shadow: 0 4px 12px rgba(76, 175, 80, 0.25);
-    }
-    
-    .step3-container {
-        background: linear-gradient(135deg, #F3E5F5 0%, #E1BEE7 100%);
-        padding: 2rem;
-        border-radius: 12px;
-        border-left: 5px solid #9C27B0;
-        margin-bottom: 2rem;
-        box-shadow: 0 2px 8px rgba(156, 39, 176, 0.15);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    
-    .step3-container:hover {
-        box-shadow: 0 4px 12px rgba(156, 39, 176, 0.25);
-    }
-    
     /* Section headers */
     h3 {
         color: #1f2937;
@@ -2964,7 +2921,6 @@ if os.path.isdir(outputs_dir):
                     st.markdown("---")
 
 # Step 1: Upload CSV
-st.markdown('<div class="step1-container">', unsafe_allow_html=True)
 st.markdown("### 📁 Step 1: Upload CSV")
 st.markdown("""
 <div style="background-color: #f0f9ff; border-left: 4px solid #0ea5e9; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
@@ -3115,10 +3071,7 @@ if uploaded_file is not None:
         st.error(f"❌ Error reading CSV: {str(e)}")
         st.info("Please check your CSV file format and try again.")
 
-st.markdown('</div>', unsafe_allow_html=True)
-
 # Step 2: Settings
-st.markdown('<div class="step2-container">', unsafe_allow_html=True)
 st.markdown("### ⚙️ Step 2: Settings")
 st.markdown("""
 <div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
@@ -3235,21 +3188,7 @@ with col2:
             key="user_agent"
         )
 
-# Output Settings
-st.markdown("---")
-st.markdown("#### Output Folder")
-
-run_name = st.text_input(
-    "Folder name (optional)", 
-    value=st.session_state.get('run_name', ""),
-    help="Give your results folder a custom name. Leave empty for automatic name.",
-    key="run_name"
-)
-
-st.markdown('</div>', unsafe_allow_html=True)
-
 # Step 3: AI (Optional)
-st.markdown('<div class="step3-container">', unsafe_allow_html=True)
 st.markdown("### 🤖 Step 3: AI (Optional)")
 st.markdown("""
 <div style="background-color: #faf5ff; border-left: 4px solid #a855f7; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
@@ -3492,8 +3431,6 @@ else:
     ai_provider = None
     ai_model = None
     ai_prompt = None
-
-st.markdown('</div>', unsafe_allow_html=True)
 
 # Main action button with better styling
 st.markdown("---")
