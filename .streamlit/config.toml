@@ -5,6 +5,8 @@ enableCORS = false
 enableXsrfProtection = true
 runOnSave = false
 maxUploadSize = 500
+disconnectedSessionTTL = 3600
+fileWatcherType = "none"
 
 [theme]
 primaryColor = "#1f77b4"

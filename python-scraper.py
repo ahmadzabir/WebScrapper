@@ -12,6 +12,7 @@ from datetime import datetime
 from io import BytesIO, StringIO, StringIO
 import json
 import random
+from collections import deque
 
 # AI imports (optional - only if API keys provided)
 try:
@@ -1793,30 +1794,43 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
 async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, output_dir: str,
                            total_urls: int, progress_callback,
                            start_part: int = 0, checkpoint_data: dict | None = None,
-                           checkpoint_path: str | None = None):
+                           checkpoint_path: str | None = None,
+                           log_callback=None):
     """
     Write results to disk. If checkpoint_data and checkpoint_path are provided,
     saves progress after each file write for crash recovery and resume.
     """
+    def emit(msg: str):
+        print(msg)
+        if log_callback:
+            try:
+                log_callback(msg)
+            except Exception:
+                pass
+
     # CRITICAL: Create output directory first
     try:
         os.makedirs(output_dir, exist_ok=True)
-        print(f"📁 Writer: Created output directory: {output_dir}")
+        emit(f"📁 Writer: Created output directory: {output_dir}")
     except Exception as e:
-        print(f"❌ Writer: Failed to create output directory: {e}")
+        emit(f"❌ Writer: Failed to create output directory: {e}")
         import traceback
         traceback.print_exc()
         return  # Exit if we can't create directory
     
+    loop = asyncio.get_running_loop()
     buffer = []
     part = start_part
     processed = 0
     files_written = []
+    last_flush_ts = time.time()
+    emergency_flush_every_s = 20
+    emergency_flush_min_rows = max(25, min(200, rows_per_file // 4))
 
     while True:
         item = await result_queue.get()
         if item is None:
-            print(f"📝 Writer: Received None sentinel. Processed {processed}/{total_urls} items. Buffer has {len(buffer)} items.")
+            emit(f"📝 Writer: Received stop signal. Processed {processed}/{total_urls}. Buffer has {len(buffer)}.")
             result_queue.task_done()
             break
         buffer.append(item)
@@ -1825,11 +1839,19 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         if progress_callback:
             progress_callback(processed, total_urls)
 
-        # Write chunks to disk when buffer reaches threshold (optimized for large files)
-        while len(buffer) >= rows_per_file:
+        # Write chunks to disk when:
+        # 1) regular threshold is reached, or
+        # 2) enough time passed with partial buffer (prevents progress loss on sudden refresh/crash)
+        while len(buffer) >= rows_per_file or (
+            len(buffer) >= emergency_flush_min_rows and (time.time() - last_flush_ts) >= emergency_flush_every_s
+        ):
             part += 1
-            chunk_rows = buffer[:rows_per_file]
-            buffer = buffer[rows_per_file:]
+            chunk_size = rows_per_file if len(buffer) >= rows_per_file else len(buffer)
+            chunk_rows = buffer[:chunk_size]
+            buffer = buffer[chunk_size:]
+            last_flush_ts = time.time()
+            if chunk_size < rows_per_file:
+                emit(f"💾 Early flush: writing {chunk_size} buffered rows to reduce loss risk")
             
             try:
                 # Filter out ONLY truly empty rows (keep error messages as they are valid data)
@@ -1996,7 +2018,6 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             cell.data_type = 's'  # Force string type
                     
                     # Run heavy I/O in executor to avoid blocking event loop (fixes progress freeze)
-                    loop = asyncio.get_event_loop()
                     def _save_excel():
                         wb.save(excel_path)
                     try:
@@ -2016,12 +2037,12 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
                         files_written.append(excel_path)
                         excel_written = True
-                        print(f"✅ Writer: Successfully wrote Excel file: {excel_path} ({len(df_excel)} rows)")
+                        emit(f"✅ Writer: Wrote Excel file: {os.path.basename(excel_path)} ({len(df_excel)} rows)")
                     else:
-                        print(f"❌ Writer: Excel file was not created or is empty: {excel_path}")
+                        emit(f"❌ Writer: Excel file missing/empty: {os.path.basename(excel_path)}")
                 except Exception as e:
                     # If Excel fails, log error but continue
-                    print(f"⚠️ Writer: Excel export failed for part {part}: {e}")
+                    emit(f"⚠️ Writer: Excel export failed for part {part}: {e}")
                     import traceback
                     traceback.print_exc()
                 
@@ -2062,9 +2083,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     # Verify file was written
                     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                         files_written.append(csv_path)
-                        print(f"✅ Writer: Successfully wrote CSV file: {csv_path} ({len(df)} rows)")
+                        emit(f"✅ Writer: Wrote CSV file: {os.path.basename(csv_path)} ({len(df)} rows)")
                     else:
-                        print(f"❌ Writer: CSV file was not created or is empty: {csv_path}")
+                        emit(f"❌ Writer: CSV file missing/empty: {os.path.basename(csv_path)}")
                     
                     # VALIDATION: Verify CSV file is valid by reading it back
                     try:
@@ -2084,7 +2105,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         import logging
                         logging.warning(f"CSV validation warning: {e}")
                         # Also print to console for debugging
-                        print(f"⚠️ CSV validation warning for {csv_path}: {e}")
+                        emit(f"⚠️ CSV validation warning for {os.path.basename(csv_path)}: {e}")
                     # CRASH RECOVERY: Update checkpoint after each successful write
                     if checkpoint_data is not None and checkpoint_path and len(df) > 0:
                         try:
@@ -2385,14 +2406,14 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         traceback.print_exc()
             except Exception as e:
                 # If writing fails, log error
-                print(f"❌ Writer: Failed to write output part {part}: {e}")
+                emit(f"❌ Writer: Failed to write output part {part}: {e}")
                 import traceback
                 traceback.print_exc()
     
     # Final summary
-    print(f"📊 Writer: Finished. Wrote {len(files_written)} files total.")
+    emit(f"📊 Writer: Finished. Wrote {len(files_written)} files total.")
     if files_written:
-        print(f"📁 Writer: Files written: {', '.join([os.path.basename(f) for f in files_written])}")
+        emit(f"📁 Writer: Files written: {', '.join([os.path.basename(f) for f in files_written])}")
 
 # -------------------------
 # Runner
@@ -2403,12 +2424,20 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                       user_agent, rows_per_file, output_dir, progress_callback,
                       ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
                       lead_data_map=None, ai_status_callback=None, run_folder: str = "", fast_mode: bool = False,
-                      low_resource: bool = False):
+                      low_resource: bool = False, log_callback=None):
     """
     Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
     Uses backpressure on result_queue to prevent memory exhaustion with large datasets.
     Saves checkpoint on every file write and in finally block for crash recovery.
     """
+    def emit(msg: str):
+        print(msg)
+        if log_callback:
+            try:
+                log_callback(msg)
+            except Exception:
+                pass
+
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_path = get_checkpoint_path(output_dir)
     checkpoint_data = load_checkpoint(checkpoint_path)
@@ -2421,9 +2450,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         if set(stored_urls) == set(urls):
             remaining_with_idx = [(u, idx) for idx, u in enumerate(urls) if u not in completed_urls]
             if not remaining_with_idx:
-                print("✅ All URLs already completed (resume found nothing to do)")
+                emit("✅ All URLs already completed (resume found nothing to do)")
                 return
-            print(f"📂 Resuming: {len(completed_urls)} already done, {len(remaining_with_idx)} remaining")
+            emit(f"📂 Resuming: {len(completed_urls)} already done, {len(remaining_with_idx)} remaining")
         else:
             completed_urls = set()
             start_part = 0
@@ -2492,7 +2521,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 
     writer_task = asyncio.create_task(writer_coroutine(
         result_queue, rows_per_file, output_dir, total_this_run, adapted_progress,
-        start_part=start_part, checkpoint_data=checkpoint_data, checkpoint_path=checkpoint_path))
+        start_part=start_part, checkpoint_data=checkpoint_data, checkpoint_path=checkpoint_path, log_callback=log_callback))
 
     workers = [asyncio.create_task(worker_coroutine(
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
@@ -2501,6 +2530,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     # Timeout: cap at 3 hours to prevent infinite hangs
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
     max_queue_time = min(base_time, 3 * 3600)
+    emit(f"⚙️ Run config: total={total_overall}, remaining={total_this_run}, queue_max={queue_max}, max_queue_time={int(max_queue_time)}s, fast_mode={fast_mode}, low_resource={low_resource}")
     
     async def force_completion_on_stall():
         """Detect stall using progress_state and drain queue. Use put_nowait to avoid blocking."""
@@ -2513,7 +2543,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             if remaining <= 0:
                 break
             if elapsed > stall_threshold:
-                print(f"⚠️ Stall detected: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Draining remaining URLs...")
+                emit(f"⚠️ Stall detected: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Draining remaining URLs...")
                 drained = 0
                 while drained < remaining + 100:  # Safety cap
                     try:
@@ -2532,18 +2562,26 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                         except asyncio.QueueFull:
                             await asyncio.sleep(0.3)
                     else:
-                        print("⚠️ Result queue full during stall drain")
+                        emit("⚠️ Result queue full during stall drain")
                     url_queue.task_done()
                     drained += 1
                 break
     
     stall_monitor = asyncio.create_task(force_completion_on_stall())
     
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(20)
+            done = progress_state["last_count"]
+            elapsed = int(time.time() - progress_state["last_time"])
+            emit(f"💓 Heartbeat: {done}/{total_overall} done, idle_for={elapsed}s, url_q={url_queue.qsize()}, result_q={result_queue.qsize()}")
+    heartbeat_task = asyncio.create_task(heartbeat())
+    
     try:
         try:
             await asyncio.wait_for(url_queue.join(), timeout=max_queue_time)
         except asyncio.TimeoutError:
-            print(f"⚠️ Queue join timed out after {max_queue_time}s. Draining remaining URLs...")
+            emit(f"⚠️ Queue join timed out after {max_queue_time}s. Draining remaining URLs...")
             drained = 0
             while drained < total_this_run:
                 try:
@@ -2562,17 +2600,24 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                     except asyncio.QueueFull:
                         await asyncio.sleep(0.5)
                 else:
-                    print("⚠️ Result queue full during timeout drain")
+                    emit("⚠️ Result queue full during timeout drain")
                 url_queue.task_done()
                 drained += 1
 
         stall_monitor.cancel()
+        heartbeat_task.cancel()
         try:
             await stall_monitor
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"⚠️ Stall monitor error: {e}")
+            emit(f"⚠️ Stall monitor error: {e}")
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            emit(f"⚠️ Heartbeat monitor error: {e}")
 
         for _ in workers:
             try:
@@ -2595,25 +2640,37 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         try:
             await asyncio.wait_for(result_queue.join(), timeout=60)
         except asyncio.TimeoutError:
-            print("⚠️ Result queue join timed out. Proceeding anyway...")
+            emit("⚠️ Result queue join timed out. Proceeding anyway...")
         
         try:
             await asyncio.wait_for(writer_task, timeout=120)
         except asyncio.TimeoutError:
-            print("⚠️ Writer task timed out. Proceeding anyway...")
+            emit("⚠️ Writer task timed out. Proceeding anyway...")
             writer_task.cancel()
         except Exception as e:
-            print(f"⚠️ Error waiting for writer: {e}")
+            emit(f"⚠️ Error waiting for writer: {e}")
 
         await session.close()
         await asyncio.sleep(2)
     except Exception as e:
-        print(f"⚠️ Scraper error (progress saved): {e}")
+        emit(f"⚠️ Scraper error (progress saved): {e}")
         import traceback
         traceback.print_exc()
     finally:
+        # Always clean up running tasks/session to avoid hidden hangs between runs
+        for task in [stall_monitor, heartbeat_task, writer_task, *workers]:
+            try:
+                if task and not task.done():
+                    task.cancel()
+            except Exception:
+                pass
+        try:
+            if not session.closed:
+                await session.close()
+        except Exception:
+            pass
         save_checkpoint(checkpoint_data, checkpoint_path)
-        print("💾 Checkpoint saved.")
+        emit("💾 Checkpoint saved.")
 
 # -------------------------
 # Streamlit UI
@@ -3602,16 +3659,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         ai_status_text = st.empty()
         ai_status_text.info("AI summaries will start generating after scraping completes...")
     
-    # AI status callback function
+    # AI status callback function (thread-safe: callback must NOT touch Streamlit UI)
     ai_status_messages = {}
-    def ai_status_callback(url, message):
-        """Update AI status display in real-time."""
-        ai_status_messages[url] = message
-        if ai_status_text:
-            # Show last 5 status messages
-            recent_messages = list(ai_status_messages.items())[-5:]
-            status_display = "\n".join([f"**{url[:50]}...**: {msg}" for url, msg in recent_messages])
-            ai_status_text.info(status_display)
 
     fun_messages = [
         "🔍 Scanning the web...",
@@ -3622,34 +3671,48 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     ]
     start_time = time.time()
     progress_state_ui = {"done": 0, "total": max(total, 1), "running": True}
+    progress_samples = deque(maxlen=200)
+    runtime_logs = deque(maxlen=500)
+    
+    import threading
+    runtime_lock = threading.Lock()
+    progress_lock = threading.Lock()
+    ai_status_lock = threading.Lock()
 
     def progress_cb(done_count, total_count):
-        progress_state_ui["done"] = done_count
-        progress_state_ui["total"] = max(total_count, 1)
-        percent = done_count / max(total_count, 1)
-        elapsed = time.time() - start_time
-        avg = elapsed / max(done_count, 1) if done_count > 0 else 0
-        remaining = avg * (total_count - done_count) if done_count > 0 else 0
-        progress_bar.progress(min(percent, 1.0))
-        idx = (done_count - 1) % len(fun_messages) if done_count > 0 else 0
-        status_text.text(f"{fun_messages[idx]}  ({done_count}/{total_count})")
-        eta_text.text(f"⏳ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+        with progress_lock:
+            progress_state_ui["done"] = done_count
+            progress_state_ui["total"] = max(total_count, 1)
+            progress_samples.append((time.time(), done_count))
 
-    import threading
+    def ai_status_callback(url, message):
+        with ai_status_lock:
+            ai_status_messages[url] = message
+
     scrape_error = [None]  # Mutable to capture exception from thread
+    
+    def log_cb(msg: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        with runtime_lock:
+            runtime_logs.append(line)
     
     def run_async_scraper():
         try:
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
+            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={retries}, timeout={timeout}s")
             asyncio.run(
                 run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
                             ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map,
-                            ai_status_callback if ai_enabled else None, run_folder=run_folder, fast_mode=fast_mode, low_resource=low_resource))
+                            ai_status_callback if ai_enabled else None, run_folder=run_folder, fast_mode=fast_mode,
+                            low_resource=low_resource, log_callback=log_cb))
+            log_cb("✅ Run completed")
         except Exception as e:
             scrape_error[0] = e
+            log_cb(f"❌ Run crashed: {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -3657,20 +3720,53 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
 
     with st.spinner("Scraping — this runs in the page (do not close)..."):
         lead_data_map = st.session_state.get('lead_data_map', None)
+        logs_placeholder = st.empty()
         
         thread = threading.Thread(target=run_async_scraper, daemon=False)
         thread.start()
         while thread.is_alive():
-            d, t = progress_state_ui["done"], progress_state_ui["total"]
+            with progress_lock:
+                d, t = progress_state_ui["done"], progress_state_ui["total"]
             pct = d / max(t, 1)
-            elapsed = time.time() - start_time
-            avg = elapsed / max(d, 1) if d > 0 else 0
-            remaining = avg * (t - d) if d > 0 else 0
+            now_ts = time.time()
+            elapsed = now_ts - start_time
+            with progress_lock:
+                if not progress_samples or progress_samples[-1][1] != d:
+                    progress_samples.append((now_ts, d))
+                window = [p for p in progress_samples if now_ts - p[0] <= 120]
+            # Throughput from trailing window (more stable ETA than global average)
+            if len(window) >= 2:
+                dt = max(window[-1][0] - window[0][0], 1e-6)
+                dd = max(window[-1][1] - window[0][1], 0)
+                rate = dd / dt
+            else:
+                rate = 0.0
+            remaining = ((t - d) / rate) if rate > 1e-6 else float("inf")
+            idle_for = int(now_ts - (progress_samples[-1][0] if progress_samples else start_time))
             progress_bar.progress(min(pct, 1.0))
-            status_text.text(f"({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-            eta_text.text("")
+            idx = (d - 1) % len(fun_messages) if d > 0 else 0
+            if remaining == float("inf"):
+                status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: calculating...")
+            else:
+                status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+            if idle_for >= 30:
+                eta_text.warning(f"No progress for {idle_for}s. Could be a slow site; app is still running and logging heartbeat.")
+            else:
+                eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
+            with runtime_lock:
+                logs_text = "\n".join(runtime_logs)
+            logs_placeholder.text_area("Internal runtime logs", value=logs_text, height=220)
+            if ai_enabled and ai_status_text:
+                with ai_status_lock:
+                    recent_ai = list(ai_status_messages.items())[-5:]
+                if recent_ai:
+                    status_display = "\n".join([f"**{u[:50]}...**: {m}" for u, m in recent_ai])
+                    ai_status_text.info(status_display)
             time.sleep(0.8)
         thread.join()
+        with runtime_lock:
+            logs_text = "\n".join(runtime_logs)
+        logs_placeholder.text_area("Internal runtime logs", value=logs_text, height=220)
         
         if scrape_error[0]:
             st.error(f"❌ Scraper error: {scrape_error[0]}")
