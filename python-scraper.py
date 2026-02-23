@@ -186,6 +186,54 @@ def get_checkpoint_path(output_dir: str) -> str:
     return os.path.join(output_dir, CHECKPOINT_FILENAME)
 
 
+def get_actual_completed_from_files(run_path: str) -> tuple[int, set]:
+    """Count actual rows and extract URLs from output_part_*.csv files. Returns (row_count, set of urls)."""
+    total_rows = 0
+    urls = set()
+    try:
+        for f in sorted(os.listdir(run_path)):
+            if f.startswith("output_part_") and f.endswith(".csv") and "combined" not in f.lower():
+                path = os.path.join(run_path, f)
+                try:
+                    df = pd.read_csv(path, encoding="utf-8-sig", usecols=[0], nrows=None)  # Website col
+                    if len(df.columns) > 0:
+                        col = df.columns[0]
+                        for v in df[col].dropna().astype(str).str.strip():
+                            if v and v.strip():
+                                urls.add(v)
+                        total_rows += len(df)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total_rows, urls
+
+
+def reconcile_checkpoint_with_files(output_dir: str) -> int:
+    """If checkpoint has more completed_urls than actual rows in files, fix checkpoint. Returns actual count."""
+    ck_path = get_checkpoint_path(output_dir)
+    ck = load_checkpoint(ck_path)
+    if not ck:
+        return 0
+    actual_rows, actual_urls = get_actual_completed_from_files(output_dir)
+    completed = ck.get("completed_urls", set())
+    if len(completed) > actual_rows and actual_rows >= 0:
+        ck["completed_urls"] = actual_urls
+        part_files = [f for f in os.listdir(output_dir) if f.startswith("output_part_") and (f.endswith(".csv") or f.endswith(".xlsx"))]
+        part_nums = []
+        for f in part_files:
+            try:
+                # output_part_1.csv -> 1
+                n = int(f.replace("output_part_", "").replace(".csv", "").replace(".xlsx", ""))
+                part_nums.append(n)
+            except ValueError:
+                pass
+        ck["last_part"] = max(part_nums) if part_nums else 0
+        save_checkpoint(ck, ck_path)
+        return actual_rows
+    return len(completed)
+
+
 # -------------------------
 # AI Summary Generation
 # -------------------------
@@ -1685,7 +1733,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue: asyncio.Queue,
                            depth, keywords, max_chars, retries, timeout,
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
-                           lead_data_map=None, ai_status_callback=None, fast_mode: bool = False):
+                           lead_data_map=None, ai_status_callback=None, scrape_status_callback=None, fast_mode: bool = False):
     from urllib.parse import urlparse
     import random
     
@@ -1724,11 +1772,20 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]
                 }
             
+            def _scrape_status(status: str, msg: str):
+                if scrape_status_callback:
+                    try:
+                        scrape_status_callback(original_url, status, msg)
+                    except Exception:
+                        pass
+
+            _scrape_status("scraping", "Fetching...")
             # Be lenient with URL validation - let the actual HTTP request determine validity
             # Only reject obviously invalid URLs (empty or completely malformed)
             if not normalized_url or len(normalized_url.strip()) < 4:
                 scraped_text = "❌ Invalid URL: URL is empty or too short"
                 ai_summary = "❌ Invalid URL: URL is empty or too short"
+                _scrape_status("error", scraped_text)
             else:
                 # Global timeout per URL - shorter in fast mode
                 max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), 90 if fast_mode else 180)
@@ -1742,6 +1799,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 except asyncio.TimeoutError:
                     # Global timeout exceeded - this URL is taking too long
                     scraped_text = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
+                    _scrape_status("error", scraped_text)
                     # Log but don't fail completely - some sites are just slow
                 except Exception as e:
                     # If scraping fails with an exception, try once more with a more lenient approach
@@ -1756,10 +1814,12 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 )
                             except asyncio.TimeoutError:
                                 scraped_text = f"❌ Timeout: Scraping {fallback_url} exceeded maximum time limit ({max_total_time}s)"
+                                _scrape_status("error", scraped_text[:120])
                         else:
                             scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
                     except Exception as e2:
                         scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
+                    _scrape_status("error", scraped_text[:120])
                 
                 # RELAXED VALIDATION: Only flag obvious mismatches
                 # Many sites legitimately redirect to different domains (same organization)
@@ -1787,12 +1847,21 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 if len(scraped_text.strip()) < 500:
                                     # Very short content from different domain - likely wrong
                                     scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
+                                    _scrape_status("error", scraped_text[:120])
                                 # Otherwise, allow it - many sites redirect to related domains
+                if scraped_text and not scraped_text.startswith("❌"):
+                    _scrape_status("scraped", f"{len(scraped_text):,} chars scraped")
                 
                 # Generate AI summary if enabled
                 if ai_enabled and ai_api_key and ai_provider and ai_model:
+                    _scrape_status("ai_summarizing", "Generating AI summary...")
                     # Create URL-specific status callback
                     def url_status_callback(msg):
+                        if scrape_status_callback:
+                            try:
+                                scrape_status_callback(original_url, "ai_summarizing", msg)
+                            except Exception:
+                                pass
                         if ai_status_callback:
                             ai_status_callback(original_url, msg)
                     
@@ -1934,8 +2003,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     processed = 0
     files_written = []
     last_flush_ts = time.time()
-    emergency_flush_every_s = 20
-    emergency_flush_min_rows = max(25, min(200, rows_per_file // 4))
+    emergency_flush_every_s = 10  # Flush more often to reduce data loss on crash
+    emergency_flush_min_rows = max(25, min(100, rows_per_file // 10))
 
     while True:
         item = await result_queue.get()
@@ -2515,10 +2584,11 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         import traceback
                         traceback.print_exc()
             except Exception as e:
-                # If writing fails, log error
-                emit(f"❌ Writer: Failed to write output part {part}: {e}")
                 import traceback
-                traceback.print_exc()
+                tb = traceback.format_exc()
+                emit(f"❌ Writer: Failed to write output part {part}: {type(e).__name__}: {e}")
+                for line in tb.strip().split("\n"):
+                    emit(line)
     
     # Final summary
     emit(f"📊 Writer: Finished. Wrote {len(files_written)} files total.")
@@ -2533,7 +2603,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
 async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                       user_agent, rows_per_file, output_dir, progress_callback,
                       ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
-                      lead_data_map=None, ai_status_callback=None, run_folder: str = "", fast_mode: bool = False,
+                      lead_data_map=None, ai_status_callback=None, scrape_status_callback=None,
+                      run_folder: str = "", fast_mode: bool = False,
                       low_resource: bool = False, log_callback=None):
     """
     Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
@@ -2635,7 +2706,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 
     workers = [asyncio.create_task(worker_coroutine(
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
-        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback, fast_mode)) for i in range(concurrency)]
+        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback,
+        scrape_status_callback, fast_mode)) for i in range(concurrency)]
 
     # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
@@ -2781,9 +2853,13 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         await session.close()
         await asyncio.sleep(2)
     except Exception as e:
-        emit(f"⚠️ Scraper error (progress saved): {e}")
         import traceback
-        traceback.print_exc()
+        tb = traceback.format_exc()
+        emit(f"⚠️ Scraper error (progress saved): {type(e).__name__}: {e}")
+        emit("--- Full traceback ---")
+        for line in tb.strip().split("\n"):
+            emit(line)
+        emit("--- End traceback ---")
     finally:
         # Always clean up running tasks/session to avoid hidden hangs between runs
         for task in [stall_monitor, heartbeat_task, writer_task, *workers]:
@@ -2992,7 +3068,9 @@ if os.path.isdir(outputs_dir):
         if not ck:
             continue
         total_urls = len(ck.get("urls", []))
-        completed = len(ck.get("completed_urls", []))
+        # Use actual row count from files (source of truth) — checkpoint can be wrong after crash
+        actual_rows, _ = get_actual_completed_from_files(run_path)
+        completed = actual_rows if actual_rows > 0 else len(ck.get("completed_urls", []))
         if completed > 0 and completed < total_urls:
             incomplete_runs.append({"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path})
         elif completed >= total_urls and total_urls > 0:
@@ -3003,13 +3081,13 @@ if os.path.isdir(outputs_dir):
             st.markdown("**If the app crashed or stopped, you can:**")
             for run in incomplete_runs:
                 is_done = run.get("done", False)
-                label = f"✅ {run['folder']}: {run['completed']:,}/{run['total']:,} done" if is_done else f"⏸️ {run['folder']}: {run['completed']:,}/{run['total']:,} done (partial)"
+                label = f"✅ {run['folder']}: {run['completed']:,}/{run['total']:,} rows" if is_done else f"⏸️ {run['folder']}: {run['completed']:,}/{run['total']:,} rows in files (partial)"
                 with st.container():
                     col_a, col_b = st.columns([2, 1])
                     with col_a:
                         st.markdown(f"**{label}**")
                         if not is_done:
-                            st.caption("To resume: Re-upload your CSV, use this run name, then click Start.")
+                            st.caption("To resume: Re-upload your CSV and click Start — the app will auto-detect and continue.")
                     with col_b:
                         zip_path = os.path.join(run["path"], f"{run['folder']}.zip")
                         if not os.path.exists(zip_path):
@@ -3021,7 +3099,7 @@ if os.path.isdir(outputs_dir):
                                         for f in csv_files:
                                             zf.write(os.path.join(run["path"], f), arcname=f)
                                         for f in os.listdir(run["path"]):
-                                            if f.endswith(".xlsx") and "combined" not in f:
+                                            if (f.endswith(".xlsx") or (f.endswith(".txt") and f.startswith("crash_log_"))) and "combined" not in f.lower():
                                                 zf.write(os.path.join(run["path"], f), arcname=f)
                                 except Exception:
                                     pass
@@ -3692,8 +3770,9 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             - Will be split into multiple files for better performance
             - Excel files may be large - CSV recommended for very large datasets
 
-            **Crash recovery:** If the scraper stops or restarts, your progress is saved automatically.
-            Re-upload the same CSV, use the same run name, and click Start again to resume.
+            **Crash recovery:** Progress is saved automatically every ~10 seconds. If the app crashes,
+            scroll to the top → "Resume or Download Partial Results" to download what you have, or
+            re-upload your CSV and click Start to resume automatically (no run name needed).
             """)
     elif total > 5000:
         st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
@@ -3710,36 +3789,50 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     elif total > 5000:
         st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
 
-    # Use user input or fallback to timestamp
-    if run_name.strip():
-        run_folder = run_name.strip().replace(" ", "_")
-    else:
-        run_folder = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    output_dir = os.path.join("outputs", run_folder)
-    os.makedirs(output_dir, exist_ok=True)
+    # AUTO-RESUME: Find existing run with same URLs before creating new folder
+    output_dir = None
+    run_folder = None
+    url_set = set(urls)
+    outputs_dir = "outputs"
+    if os.path.isdir(outputs_dir):
+        best_match = None  # (output_dir, completed_count)
+        for fn in os.listdir(outputs_dir):
+            run_path = os.path.join(outputs_dir, fn)
+            if not os.path.isdir(run_path):
+                continue
+            ck = load_checkpoint(get_checkpoint_path(run_path))
+            if not ck:
+                continue
+            stored = set(ck.get("urls", []))
+            if stored != url_set:
+                continue
+            completed = len(ck.get("completed_urls", []))
+            total_stored = len(ck.get("urls", []))
+            if 0 < completed < total_stored:
+                if best_match is None or completed > best_match[1]:
+                    best_match = (run_path, completed)
+        if best_match:
+            output_dir = best_match[0]
+            run_folder = os.path.basename(output_dir)
+            # Reconcile checkpoint with actual file contents (checkpoint can overstate after crash)
+            reconcile_checkpoint_with_files(output_dir)
+            actual_rows, _ = get_actual_completed_from_files(output_dir)
+            display_count = actual_rows if actual_rows > 0 else best_match[1]
+            st.success(f"🔄 **Resuming:** Found existing run with {display_count:,}/{total:,} rows in files. Continuing from where you left off.")
 
-    # Check for existing checkpoint (resume support)
-    checkpoint_path = get_checkpoint_path(output_dir)
-    existing_checkpoint = load_checkpoint(checkpoint_path)
-    if existing_checkpoint and total > 100:
-        stored_urls = set(existing_checkpoint.get("urls", []))
-        if set(urls) == stored_urls:
-            completed = len(existing_checkpoint.get("completed_urls", []))
-            if completed > 0 and completed < total:
-                st.info(f"💾 **Resume available:** {completed:,} of {total:,} URLs already completed. Click Start to continue from where you left off.")
+    if output_dir is None:
+        run_folder = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        output_dir = os.path.join("outputs", run_folder)
+        os.makedirs(output_dir, exist_ok=True)
 
     progress_bar = st.progress(0)
     status_text = st.empty()
     eta_text = st.empty()
     
-    # AI status display (only if AI enabled)
-    ai_status_text = None
-    if ai_enabled:
-        st.subheader("🤖 AI Summary Status")
-        ai_status_text = st.empty()
-        ai_status_text.info("AI summaries will start generating after scraping completes...")
+    # Real-time activity dashboard placeholders
+    dashboard_placeholder = st.empty()
     
-    # AI status callback function (thread-safe: callback must NOT touch Streamlit UI)
+    # AI status callback (thread-safe)
     ai_status_messages = {}
 
     fun_messages = [
@@ -3752,18 +3845,34 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     start_time = time.time()
     progress_state_ui = {"done": 0, "total": max(total, 1), "running": True}
     progress_samples = deque(maxlen=200)
-    runtime_logs = deque(maxlen=500)
+    runtime_logs = deque(maxlen=2000)  # Keep enough for full tracebacks + run history
     
     import threading
     runtime_lock = threading.Lock()
     progress_lock = threading.Lock()
+    scrape_status_lock = threading.Lock()
     ai_status_lock = threading.Lock()
+    
+    scrape_in_progress = {}  # url -> {status, message}
+    scrape_recent = deque(maxlen=30)  # [{url, status, message}, ...]
+    scrape_errors = deque(maxlen=20)  # [{url, message}, ...]
 
     def progress_cb(done_count, total_count):
         with progress_lock:
             progress_state_ui["done"] = done_count
             progress_state_ui["total"] = max(total_count, 1)
             progress_samples.append((time.time(), done_count))
+
+    def scrape_status_callback(url: str, status: str, message: str):
+        with scrape_status_lock:
+            if status in ("scraping", "ai_summarizing"):
+                scrape_in_progress[url] = {"status": status, "message": message}
+            else:
+                scrape_in_progress.pop(url, None)
+                entry = {"url": url, "status": status, "message": message}
+                scrape_recent.append(entry)
+                if status == "error":
+                    scrape_errors.append({"url": url, "message": message[:150]})
 
     def ai_status_callback(url, message):
         with ai_status_lock:
@@ -3787,20 +3896,37 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
                             ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map,
-                            ai_status_callback if ai_enabled else None, run_folder=run_folder, fast_mode=fast_mode,
+                            ai_status_callback if ai_enabled else None, scrape_status_callback,
+                            run_folder=run_folder, fast_mode=fast_mode,
                             low_resource=low_resource, log_callback=log_cb))
             log_cb("✅ Run completed")
         except Exception as e:
             scrape_error[0] = e
-            log_cb(f"❌ Run crashed: {e}")
             import traceback
+            tb = traceback.format_exc()
+            log_cb(f"❌ Run crashed: {type(e).__name__}: {e}")
+            log_cb("--- Full traceback (send this for bug reports) ---")
+            for line in tb.strip().split("\n"):
+                log_cb(line)
+            log_cb("--- End traceback ---")
             traceback.print_exc()
+            # Persist crash logs to output dir so they survive page refresh
+            try:
+                with runtime_lock:
+                    crash_log_content = "\n".join(runtime_logs)
+                crash_log_path = os.path.join(output_dir, f"crash_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                with open(crash_log_path, "w", encoding="utf-8") as f:
+                    f.write(crash_log_content)
+                log_cb(f"📄 Crash log saved to: {crash_log_path}")
+            except Exception:
+                pass
         finally:
             progress_state_ui["running"] = False
 
     with st.spinner("Scraping — runs in-page. Progress is saved; if you refresh or lose connection, re-upload the CSV and click Start to resume."):
         lead_data_map = st.session_state.get('lead_data_map', None)
-        logs_placeholder = st.empty()
+        with st.expander("📋 Detailed logs", expanded=False):
+            logs_placeholder = st.empty()
         
         thread = threading.Thread(target=run_async_scraper, daemon=False)
         thread.start()
@@ -3836,21 +3962,77 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             with runtime_lock:
                 logs_text = "\n".join(runtime_logs)
             logs_placeholder.code(logs_text or "(no logs yet)", language=None)
-            if ai_enabled and ai_status_text:
-                with ai_status_lock:
-                    recent_ai = list(ai_status_messages.items())[-5:]
-                if recent_ai:
-                    status_display = "\n".join([f"**{u[:50]}...**: {m}" for u, m in recent_ai])
-                    ai_status_text.info(status_display)
+            
+            # Real-time activity dashboard
+            with dashboard_placeholder.container():
+                st.markdown("### 📊 Live activity")
+                with scrape_status_lock:
+                    in_progress = list(scrape_in_progress.items())[-12:]
+                    recent = list(scrape_recent)[-15:]
+                    errors = list(scrape_errors)[-10:]
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown("#### ⏳ In progress")
+                    if in_progress:
+                        for url, d in in_progress:
+                            short_url = (url[:45] + "…") if len(url) > 45 else url
+                            icon = "🤖" if d["status"] == "ai_summarizing" else "🔍"
+                            st.caption(f"{icon} {short_url}")
+                            st.caption(f"   _{d['message']}_")
+                    else:
+                        st.caption("_Waiting for workers..._")
+                with col2:
+                    st.markdown("#### ✅ Recently completed")
+                    if recent:
+                        for e in reversed(recent[-8:]):
+                            short_url = (e["url"][:40] + "…") if len(e["url"]) > 40 else e["url"]
+                            if e["status"] == "scraped":
+                                st.caption(f"✓ {short_url} — {e['message']}")
+                            else:
+                                st.caption(f"✗ {short_url}")
+                    else:
+                        st.caption("_None yet_")
+                with col3:
+                    st.markdown("#### ⚠️ Issues")
+                    if errors:
+                        for e in errors[-6:]:
+                            short_url = (e["url"][:35] + "…") if len(e["url"]) > 35 else e["url"]
+                            st.caption(f"**{short_url}**")
+                            st.caption(f"   {e['message'][:60]}…" if len(e['message']) > 60 else f"   {e['message']}")
+                    else:
+                        st.caption("_No issues_")
+                
+                if ai_enabled and ai_status_messages:
+                    st.markdown("---")
+                    st.markdown("#### 🤖 AI summary status")
+                    with ai_status_lock:
+                        recent_ai = list(ai_status_messages.items())[-5:]
+                    if recent_ai:
+                        for u, m in recent_ai:
+                            short_u = (u[:50] + "…") if len(u) > 50 else u
+                            st.caption(f"**{short_u}** — {m}")
+            
             time.sleep(0.8)
         thread.join()
         with runtime_lock:
-            logs_text = "\n".join(runtime_logs)
-        logs_placeholder.code(logs_text or "(no logs yet)", language=None)
+            logs_text = "\n".join(runtime_logs) or "(no logs yet)"
+        logs_placeholder.code(logs_text, language=None)
+        
+        # Always show download logs button so users can share for bug reports
+        st.download_button(
+            "📥 Download run logs",
+            logs_text,
+            file_name=f"scraper_logs_{run_folder}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain",
+            help="Download logs to share when reporting bugs or crashes",
+            key="download_run_logs"
+        )
         
         if scrape_error[0]:
             st.error(f"❌ Scraper error: {scrape_error[0]}")
-            st.info("💾 Partial results may have been saved. Check the output folder or use Resume.")
+            st.warning("💾 **Partial results may have been saved.** Scroll up to **'Resume or Download Partial Results'** at the top to download what you have or re-upload your CSV and click Start to resume automatically.")
+            st.info("📋 **Found a bug?** Click **Download run logs** above and send the file when reporting the issue.")
 
     # Zip all parts at the end with custom name (CSV and Excel files)
     zip_name = f"{run_folder}.zip"
