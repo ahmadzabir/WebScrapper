@@ -414,6 +414,114 @@ async def fetch_gemini_models(api_key: str) -> list:
         return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
 
 
+async def fetch_openrouter_models(api_key: str = "") -> list:
+    """Fetch available models from OpenRouter API. No API key needed for listing."""
+    fallback = [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o",
+        "google/gemini-2.0-flash-exp:free",
+        "anthropic/claude-3.5-sonnet",
+        "google/gemini-1.5-flash",
+    ]
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {}
+            if api_key and api_key.strip():
+                headers["Authorization"] = f"Bearer {api_key.strip()}"
+            async with session.get("https://openrouter.ai/api/v1/models", headers=headers) as resp:
+                if resp.status != 200:
+                    return fallback
+                data = await resp.json()
+        models_data = data.get("data", [])
+        if not models_data:
+            return fallback
+        model_ids = [m.get("id") for m in models_data if m.get("id")]
+        if not model_ids:
+            return fallback
+        priority = [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "google/gemini-2.0-flash-exp:free",
+            "google/gemini-2.0-flash",
+            "anthropic/claude-3.5-sonnet",
+            "google/gemini-1.5-flash",
+        ]
+        ordered = [m for m in priority if m in model_ids]
+        for m in model_ids:
+            if m not in ordered:
+                ordered.append(m)
+        return ordered
+    except Exception:
+        return fallback
+
+
+async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
+    """Generate company summary using OpenRouter API (OpenAI-compatible)."""
+    if not OPENAI_AVAILABLE:
+        return "❌ OpenAI library not installed. Install with: pip install openai"
+    
+    client = AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key.strip(),
+    )
+    
+    for attempt in range(max_retries):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: ===SUMMARY===, ===FACTS=== (with complete evidence quotes), and ===HYPOTHESES=== (with signals, commercial implications, and confidence levels). CRITICAL: Use EXACT section headers (===SUMMARY===, ===FACTS===, ===HYPOTHESES===). Do NOT use markdown formatting (**, __, #). Evidence quotes must be COMPLETE sentences, not truncated. Do NOT truncate words mid-word. Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format STRICTLY."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=4000,
+                top_p=0.9,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            error_str = str(e).lower()
+            error_msg = str(e)
+            
+            is_rate_limit = (
+                "rate limit" in error_str or
+                "429" in error_str or
+                "quota" in error_str or
+                "too many requests" in error_str or
+                "credit" in error_str
+            )
+            
+            if is_rate_limit:
+                wait_time = min(2 ** attempt, 60)
+                if status_callback:
+                    status_callback(f"⏳ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                await asyncio.sleep(wait_time)
+                continue
+            
+            is_retryable = (
+                "timeout" in error_str or
+                "connection" in error_str or
+                "503" in error_str or
+                "502" in error_str or
+                "500" in error_str
+            )
+            
+            if is_retryable and attempt < max_retries - 1:
+                wait_time = min(2 ** attempt, 30)
+                if status_callback:
+                    status_callback(f"⚠️ API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
+                await asyncio.sleep(wait_time)
+                continue
+            
+            if attempt == max_retries - 1:
+                if is_rate_limit:
+                    return f"❌ OpenRouter Rate Limit: Exceeded after {max_retries} retries."
+                return f"❌ OpenRouter API Error: {error_msg}"
+            
+            await asyncio.sleep(1 + attempt)
+    
+    return "❌ OpenRouter API failed after retries"
+
+
 async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
     """Generate company summary using OpenAI API with automatic rate limit handling."""
     if not OPENAI_AVAILABLE:
@@ -846,6 +954,8 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
         raw_output = await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback)
     elif provider.lower() == 'gemini':
         raw_output = await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback)
+    elif provider.lower() == 'openrouter':
+        raw_output = await generate_openrouter_summary(api_key, model, full_prompt, status_callback=status_callback)
     else:
         return f"❌ Unknown provider: {provider}"
     
@@ -3210,8 +3320,8 @@ if ai_enabled:
     st.markdown("#### Step 1: Choose AI Service")
     ai_provider = st.selectbox(
         "Which AI service?",
-        ["OpenAI", "Gemini"],
-        help="OpenAI (GPT models) or Google Gemini",
+        ["OpenAI", "Gemini", "OpenRouter"],
+        help="OpenAI (GPT), Google Gemini, or OpenRouter (access many models with one key)",
         key="ai_provider_select"
     )
     st.session_state['ai_provider'] = ai_provider
@@ -3223,8 +3333,10 @@ if ai_enabled:
     
     if ai_provider == "OpenAI":
         st.caption("Get your API key from: https://platform.openai.com/api-keys")
-    else:
+    elif ai_provider == "Gemini":
         st.caption("Get your API key from: https://makersuite.google.com/app/apikey")
+    else:
+        st.caption("Get your API key from: https://openrouter.ai/keys — one key for 600+ models (GPT, Claude, Gemini, etc.)")
     
     ai_api_key = st.text_input(
         f"{ai_provider} API Key",
@@ -3262,18 +3374,28 @@ if ai_enabled:
                     
                     if ai_provider == "OpenAI":
                         models = asyncio.run(fetch_openai_models(ai_api_key))
-                    else:
+                    elif ai_provider == "Gemini":
                         models = asyncio.run(fetch_gemini_models(ai_api_key))
+                    else:
+                        models = asyncio.run(fetch_openrouter_models(ai_api_key))
                     
                     if models:
                         st.session_state[models_cache_key] = models
                         cached_models = models
                     else:
-                        cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                        cached_models = (
+                            ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI"
+                            else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"] if ai_provider == "Gemini"
+                            else ["openai/gpt-4o-mini", "openai/gpt-4o", "google/gemini-2.0-flash-exp:free"]
+                        )
                         st.session_state[models_cache_key] = cached_models
                 except Exception as e:
                     st.warning("⚠️ Could not load models. Using defaults.")
-                    cached_models = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI" else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                    cached_models = (
+                        ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI"
+                        else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"] if ai_provider == "Gemini"
+                        else ["openai/gpt-4o-mini", "openai/gpt-4o", "google/gemini-2.0-flash-exp:free"]
+                    )
                     st.session_state[models_cache_key] = cached_models
         
         if cached_models:
@@ -3283,11 +3405,16 @@ if ai_enabled:
                     default_index = cached_models.index("gpt-4o-mini")
                 elif "gpt-4o" in cached_models:
                     default_index = cached_models.index("gpt-4o")
-            else:
+            elif ai_provider == "Gemini":
                 if "gemini-1.5-flash" in cached_models:
                     default_index = cached_models.index("gemini-1.5-flash")
                 elif "gemini-1.5-pro" in cached_models:
                     default_index = cached_models.index("gemini-1.5-pro")
+            else:
+                for preferred in ["openai/gpt-4o-mini", "openai/gpt-4o", "google/gemini-2.0-flash-exp:free"]:
+                    if preferred in cached_models:
+                        default_index = cached_models.index(preferred)
+                        break
             
             ai_model = st.selectbox(
                 "Select model",
