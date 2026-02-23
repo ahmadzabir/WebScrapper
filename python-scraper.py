@@ -3753,7 +3753,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
             with runtime_lock:
                 logs_text = "\n".join(runtime_logs)
-            logs_placeholder.text_area("Internal runtime logs", value=logs_text, height=220)
+            logs_placeholder.code(logs_text or "(no logs yet)", language=None)
             if ai_enabled and ai_status_text:
                 with ai_status_lock:
                     recent_ai = list(ai_status_messages.items())[-5:]
@@ -3764,7 +3764,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         thread.join()
         with runtime_lock:
             logs_text = "\n".join(runtime_logs)
-        logs_placeholder.text_area("Internal runtime logs", value=logs_text, height=220)
+        logs_placeholder.code(logs_text or "(no logs yet)", language=None)
         
         if scrape_error[0]:
             st.error(f"❌ Scraper error: {scrape_error[0]}")
