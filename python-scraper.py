@@ -1013,6 +1013,40 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
     return cleaned_output
 
 
+def build_email_copy_prompt(prompt_template: str, lead_data: dict, scraped_content: str) -> str:
+    """Build the complete prompt for email copy generation from template."""
+    url = lead_data.get("url", "")
+    company_name = lead_data.get("company_name", url.replace("https://", "").replace("http://", "").split("/")[0])
+    return prompt_template.replace("{url}", url).replace("{company_name}", company_name).replace("{scraped_content}", scraped_content)
+
+
+async def generate_email_copy(
+    api_key: str, provider: str, model: str, prompt_template: str,
+    lead_data: dict, scraped_content: str, status_callback=None
+) -> str:
+    """Generate email copy for a lead. Works independently of company summary."""
+    if not api_key or not api_key.strip():
+        return "❌ No API key provided"
+    if not scraped_content or scraped_content.startswith("❌"):
+        return "❌ No valid scraped content available"
+    if len(scraped_content.strip()) < 50:
+        return "❌ Insufficient content scraped. Content too short to generate email copy."
+    full_prompt = build_email_copy_prompt(prompt_template, lead_data, scraped_content)
+    raw_output = ""
+    if provider.lower() == "openai":
+        raw_output = await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback)
+    elif provider.lower() == "gemini":
+        raw_output = await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback)
+    elif provider.lower() == "openrouter":
+        raw_output = await generate_openrouter_summary(api_key, model, full_prompt, status_callback=status_callback)
+    else:
+        return f"❌ Unknown provider: {provider}"
+    # Light cleanup for email copy (preserve line breaks)
+    if raw_output and not raw_output.startswith("❌"):
+        raw_output = raw_output.strip()
+    return raw_output
+
+
 def cleanup_html(html: str) -> str:
     """Clean and organize HTML content into well-structured text."""
     # Remove unwanted elements first
@@ -1733,6 +1767,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue: asyncio.Queue,
                            depth, keywords, max_chars, retries, timeout,
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
+                           email_copy_enabled=False, email_copy_api_key=None, email_copy_provider=None,
+                           email_copy_model=None, email_copy_prompt=None,
                            lead_data_map=None, ai_status_callback=None, scrape_status_callback=None, fast_mode: bool = False):
     from urllib.parse import urlparse
     import random
@@ -1785,6 +1821,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             if not normalized_url or len(normalized_url.strip()) < 4:
                 scraped_text = "❌ Invalid URL: URL is empty or too short"
                 ai_summary = "❌ Invalid URL: URL is empty or too short"
+                email_copy = ""
                 _scrape_status("error", scraped_text)
             else:
                 # Global timeout per URL - shorter in fast mode
@@ -1855,7 +1892,6 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 # Generate AI summary if enabled
                 if ai_enabled and ai_api_key and ai_provider and ai_model:
                     _scrape_status("ai_summarizing", "Generating AI summary...")
-                    # Create URL-specific status callback
                     def url_status_callback(msg):
                         if scrape_status_callback:
                             try:
@@ -1864,21 +1900,44 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 pass
                         if ai_status_callback:
                             ai_status_callback(original_url, msg)
-                    
                     try:
                         ai_summary = await asyncio.wait_for(
                             generate_ai_summary(
                                 ai_api_key, ai_provider, ai_model, ai_prompt or "",
                                 lead_data, scraped_text, status_callback=url_status_callback
                             ),
-                            timeout=120  # 2 minute timeout for AI summary
+                            timeout=120
                         )
                     except asyncio.TimeoutError:
                         ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
                     except Exception as e:
                         ai_summary = f"❌ AI Summary error: {str(e)}"
                 else:
-                    ai_summary = ""  # Empty if AI not enabled
+                    ai_summary = ""
+                # Generate email copy if enabled (runs independently)
+                if email_copy_enabled and email_copy_api_key and email_copy_provider and email_copy_model:
+                    _scrape_status("email_copy", "Generating email copy...")
+                    def email_status_callback(msg):
+                        if scrape_status_callback:
+                            try:
+                                scrape_status_callback(original_url, "email_copy", msg)
+                            except Exception:
+                                pass
+                    try:
+                        email_copy = await asyncio.wait_for(
+                            generate_email_copy(
+                                email_copy_api_key, email_copy_provider, email_copy_model,
+                                email_copy_prompt or "", lead_data, scraped_text,
+                                status_callback=email_status_callback
+                            ),
+                            timeout=120
+                        )
+                    except asyncio.TimeoutError:
+                        email_copy = "❌ Email copy timeout: Generation exceeded 2 minutes"
+                    except Exception as e:
+                        email_copy = f"❌ Email copy error: {str(e)}"
+                else:
+                    email_copy = ""
             
             # PERFECT CSV CLEANING - Zero tolerance for formatting errors
             def clean_csv_field(field_value):
@@ -1926,10 +1985,12 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             cleaned_url = clean_csv_field(original_url)
             cleaned_scraped_text = clean_csv_field(scraped_text)
             cleaned_ai_summary = clean_csv_field(ai_summary)
-            
-            # Output format: (url, scraped_text, ai_summary)
-            # Use original_url to maintain consistency with input CSV
-            out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
+            cleaned_email_copy = clean_csv_field(email_copy) if email_copy_enabled else ""
+            # Output: 4 columns when email copy enabled, else 3
+            if email_copy_enabled:
+                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy)
+            else:
+                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
             await result_queue.put(out)
         except Exception as e:
             # If anything goes wrong, still output an error row
@@ -1957,12 +2018,18 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 cleaned_url = clean_csv_field(original_url_val)
                 cleaned_scraped_text = clean_csv_field(error_msg)
                 cleaned_ai_summary = clean_csv_field("")
-                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
+                cleaned_email_copy = clean_csv_field("")
+                if email_copy_enabled:
+                    out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy)
+                else:
+                    out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
                 await result_queue.put(out)
             except:
-                # Last resort: put minimal error info
                 try:
-                    await result_queue.put(("", f"❌ Critical worker error: {str(e)}", ""))
+                    if email_copy_enabled:
+                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", ""))
+                    else:
+                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", ""))
                 except:
                     pass  # If even this fails, just continue
         finally:
@@ -1974,7 +2041,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                            total_urls: int, progress_callback,
                            start_part: int = 0, checkpoint_data: dict | None = None,
                            checkpoint_path: str | None = None,
-                           log_callback=None):
+                           log_callback=None, include_email_copy: bool = False):
     """
     Write results to disk. If checkpoint_data and checkpoint_path are provided,
     saves progress after each file write for crash recovery and resume.
@@ -2050,22 +2117,17 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     # Skip writing if no valid rows
                     continue
                 
-                # Normalize all rows to have 3 columns for consistency
+                # Normalize rows: 4 columns when include_email_copy, else 3
+                n_cols = 4 if include_email_copy else 3
+                cols = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"] if include_email_copy else ["Website", "ScrapedText", "CompanySummary"]
                 normalized_rows = []
                 for row in filtered_rows:
-                    if len(row) == 2:
-                        normalized_rows.append((row[0], row[1], ""))
-                    elif len(row) == 3:
-                        normalized_rows.append(row)
-                    else:
-                        # Handle unexpected structure - take first 3 elements or pad
-                        normalized_row = list(row[:3])
-                        while len(normalized_row) < 3:
-                            normalized_row.append("")
-                        normalized_rows.append(tuple(normalized_row))
+                    normalized_row = list(row[:n_cols])
+                    while len(normalized_row) < n_cols:
+                        normalized_row.append("")
+                    normalized_rows.append(tuple(normalized_row[:n_cols]))
                 
-                # Always create DataFrame with 3 columns
-                df = pd.DataFrame(normalized_rows, columns=["Website", "ScrapedText", "CompanySummary"])
+                df = pd.DataFrame(normalized_rows, columns=cols)
                 
                 # PERFECT CSV CLEANING - Clean all DataFrame columns before writing
                 def clean_dataframe_for_csv(df):
@@ -2094,93 +2156,52 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 # Remove ONLY rows with empty URLs (keep error messages)
                 df = df[df["Website"].astype(str).str.strip() != ""]
                 
-                # Ensure CompanySummary column exists (for consistency)
-                if "CompanySummary" not in df.columns:
-                    df["CompanySummary"] = ""
-                
-                # CRITICAL: Always ensure CompanySummary exists and enforce 3-column structure
-                if "CompanySummary" not in df.columns:
-                    df["CompanySummary"] = ""
-                # Always enforce 3 columns in correct order
-                df = df[["Website", "ScrapedText", "CompanySummary"]]
+                # Enforce column structure
+                for c in cols:
+                    if c not in df.columns:
+                        df[c] = ""
+                df = df[cols]
                 
                 if len(df) == 0:
                     # Skip writing if DataFrame is empty after filtering
                     continue
                 
                 # CRITICAL: Write Excel file FIRST (more reliable than CSV)
-                # Excel files are always generated and are more accurate for Excel compatibility
                 excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
                 excel_written = False
                 try:
-                    # CRITICAL: Ensure DataFrame has exactly 3 columns with correct names before writing
-                    if "CompanySummary" not in df.columns:
-                        df["CompanySummary"] = ""
-                    df_excel = df[["Website", "ScrapedText", "CompanySummary"]].copy()
-                    
-                    # CRITICAL: Always use openpyxl directly to ensure values are treated as text (not formulas)
+                    df_excel = df[cols].copy()
                     from openpyxl import Workbook
                     wb = Workbook()
                     ws = wb.active
                     ws.title = "Scraped Data"
+                    ws.append(cols)
                     
-                    # Write headers explicitly - CRITICAL: Always 3 columns
-                    ws.append(["Website", "ScrapedText", "CompanySummary"])
-                    
-                    # Write data rows - CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                    # Write data rows
+                    def clean_excel_value(val):
+                        """Clean value to prevent Excel corruption - very strict"""
+                        if not val:
+                            return ""
+                        import re
+                        val = str(val).replace('\x00', '')
+                        val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
+                        val = ''.join(char for char in val if (
+                            (0x20 <= ord(char) <= 0x7E) or (0xA0 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
+                        ))
+                        val = re.sub(r'[^\x20-\x7E\xA0-\xD7FF\xE000-\xFFFD]', ' ', val)
+                        val = re.sub(r'\s+', ' ', val).strip()
+                        try:
+                            val = val.encode('utf-8', errors='ignore').decode('utf-8')
+                        except:
+                            val = ""
+                        return val[:32767] if isinstance(val, str) else str(val)[:32767]
                     for idx in range(len(df_excel)):
                         row = df_excel.iloc[idx]
-                        
-                        # Extract values by column name to ensure correct order
-                        website = str(row["Website"]) if pd.notna(row["Website"]) else ""
-                        text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
-                        summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
-                        
-                        # CRITICAL: Comprehensive cleaning for Excel compatibility
-                        def clean_excel_value(val):
-                            """Clean value to prevent Excel corruption - very strict"""
-                            if not val:
-                                return ""
-                            import re
-                            # Convert to string and ensure it's a plain string, not an object
-                            val = str(val)
-                            # Remove null bytes first
-                            val = val.replace('\x00', '')
-                            # Remove ALL control characters (including tab, newline, carriage return)
-                            val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
-                            # Remove invalid XML characters (Excel files are XML-based)
-                            # XML 1.0 allows: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD]
-                            # We'll be very strict and only allow printable ASCII + common Unicode
-                            val = ''.join(char for char in val if (
-                                (0x20 <= ord(char) <= 0x7E) or  # Printable ASCII
-                                (0xA0 <= ord(char) <= 0xD7FF) or  # Latin-1 Supplement and beyond
-                                (0xE000 <= ord(char) <= 0xFFFD)  # Private Use and Specials
-                            ))
-                            # Replace any remaining problematic characters with space
-                            val = re.sub(r'[^\x20-\x7E\xA0-\xD7FF\xE000-\xFFFD]', ' ', val)
-                            # Normalize whitespace - replace all whitespace with single space
-                            val = re.sub(r'\s+', ' ', val).strip()
-                            # Ensure it's a valid UTF-8 string
-                            try:
-                                val = val.encode('utf-8', errors='ignore').decode('utf-8')
-                            except:
-                                val = ""
-                            # Truncate to Excel cell limit
-                            val = val[:32767]
-                            # Final check - ensure it's a plain string
-                            if not isinstance(val, str):
-                                val = str(val)
-                            return val
-                        
-                        website = clean_excel_value(website)
-                        text = clean_excel_value(text)
-                        summary = clean_excel_value(summary)
-                        
-                        # CRITICAL: Prepend with single quote if value starts with =, +, -, @ to prevent Excel formula interpretation
                         row_data = []
-                        for val in [website, text, summary]:
-                            # If value starts with formula-like characters, prepend with single quote to force text mode
-                            if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
+                        for col_name in cols:
+                            raw_val = str(row[col_name]) if pd.notna(row[col_name]) else ""
+                            val = clean_excel_value(raw_val)
+                            if val and val[0] in ['=', '+', '-', '@']:
                                 val = "'" + val
                             row_data.append(val)
                         
@@ -2208,7 +2229,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         wb_recovery = Workbook()
                         ws_recovery = wb_recovery.active
                         ws_recovery.title = "Scraped Data"
-                        ws_recovery.append(["Website", "ScrapedText", "CompanySummary"])
+                        ws_recovery.append(cols)
                         wb_recovery.save(excel_path)
                         raise save_error
                     
@@ -2234,28 +2255,21 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 # - lineterminator='\n': Standard Unix line endings
                 # - doublequote=True: Escape quotes by doubling them (CSV standard)
                 try:
-                    # CRITICAL: Use manual CSV writer to ensure ALL fields are properly quoted
-                    # pandas to_csv sometimes doesn't quote correctly, causing data to split across columns
-                    # CRITICAL: Ensure column order is correct before writing
-                    if "CompanySummary" not in df.columns:
-                        df["CompanySummary"] = ""
-                    df = df[["Website", "ScrapedText", "CompanySummary"]]
-                    
+                    df = df[cols]
                     def _write_csv():
                         with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                             writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                            writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                            writer.writerow(cols)
                             for idx in range(len(df)):
                                 row = df.iloc[idx]
                                 def clean_val(v):
                                     if not v: return ""
-                                    v = str(v)
-                                    v = v.replace('\x00', '')
+                                    v = str(v).replace('\x00', '')
                                     v = re.sub(r'[\n\r\f\v\t]', ' ', v)
                                     v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
                                     return re.sub(r'\s+', ' ', v).strip()
-                                row_values = [clean_val(row["Website"]), clean_val(row["ScrapedText"]), clean_val(row["CompanySummary"])]
-                                row_values = (row_values + [""] * 3)[:3]
+                                row_values = [clean_val(row[c]) for c in cols]
+                                row_values = (row_values + [""] * len(cols))[:len(cols)]
                                 writer.writerow(row_values)
                     await loop.run_in_executor(None, _write_csv)
                     
@@ -2272,13 +2286,10 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         # Check row count matches
                         if len(test_df) != len(df):
                             raise ValueError(f"CSV validation failed: row count mismatch (expected {len(df)}, got {len(test_df)})")
-                        # CRITICAL: Check column count is exactly 3
-                        if len(test_df.columns) != 3:
-                            raise ValueError(f"CSV validation failed: column count is {len(test_df.columns)}, expected 3. Columns: {list(test_df.columns)}")
-                        # Check column names match expected
-                        expected_cols = ["Website", "ScrapedText", "CompanySummary"]
-                        if list(test_df.columns) != expected_cols:
-                            raise ValueError(f"CSV validation failed: column names don't match. Expected {expected_cols}, got {list(test_df.columns)}")
+                        if len(test_df.columns) != len(cols):
+                            raise ValueError(f"CSV validation failed: column count is {len(test_df.columns)}, expected {len(cols)}. Columns: {list(test_df.columns)}")
+                        if list(test_df.columns) != cols:
+                            raise ValueError(f"CSV validation failed: column names don't match. Expected {cols}, got {list(test_df.columns)}")
                     except Exception as e:
                         # If validation fails, log but don't rewrite (already used manual writer)
                         import logging
@@ -2295,25 +2306,16 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         except Exception as cp_err:
                             print(f"⚠️ Checkpoint update failed: {cp_err}")
                 except Exception as e:
-                    # Final fallback: manual CSV writing - CRITICAL: Always write 3 columns
                     import logging
                     logging.error(f"CSV write failed: {e}. Using manual writer...")
-                    # Ensure CompanySummary exists before fallback write
-                    if "CompanySummary" not in df.columns:
-                        df["CompanySummary"] = ""
-                    df = df[["Website", "ScrapedText", "CompanySummary"]]
+                    df = df[cols]
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                         writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
-                        # ALWAYS write 3-column header
-                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
-                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                        writer.writerow(cols)
                         for idx in range(len(df)):
                             row = df.iloc[idx]
-                            # Extract by column name to ensure correct order, always 3 values
-                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
-                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
-                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
-                            writer.writerow([website, scraped_text, company_summary])
+                            row_values = ["" if pd.isna(row[c]) else str(row[c]) for c in cols]
+                            writer.writerow(row_values)
                 
                 # Excel file already written above, skip duplicate writing
                 pass
@@ -2409,30 +2411,17 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 # Include rows with valid URL - keep error messages (they start with ❌)
                 # Only exclude rows where URL is empty
                 if url and url != "":
-                    # Ensure row has correct structure (pad with empty CompanySummary if needed)
-                    if len(row) == 2:
-                        row = (row[0], row[1], "")
-                    filtered_buffer.append(row)
+                    n_c = 4 if include_email_copy else 3
+                    norm = list(row[:n_c])
+                    while len(norm) < n_c:
+                        norm.append("")
+                    filtered_buffer.append(tuple(norm[:n_c]))
         
         if filtered_buffer:
             part += 1
+            cols_buf = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"] if include_email_copy else ["Website", "ScrapedText", "CompanySummary"]
             try:
-                # Normalize all rows to have 3 columns for consistency
-                normalized_buffer = []
-                for row in filtered_buffer:
-                    if len(row) == 2:
-                        normalized_buffer.append((row[0], row[1], ""))
-                    elif len(row) == 3:
-                        normalized_buffer.append(row)
-                    else:
-                        # Handle unexpected structure - take first 3 elements or pad
-                        normalized_row = list(row[:3])
-                        while len(normalized_row) < 3:
-                            normalized_row.append("")
-                        normalized_buffer.append(tuple(normalized_row))
-                
-                # Always create DataFrame with 3 columns
-                df = pd.DataFrame(normalized_buffer, columns=["Website", "ScrapedText", "CompanySummary"])
+                df = pd.DataFrame(filtered_buffer, columns=cols_buf)
                 
                 # Remove ONLY rows with empty URLs (keep error messages)
                 df = df[df["Website"].astype(str).str.strip() != ""]
@@ -2441,110 +2430,48 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     # Skip writing if DataFrame is empty after filtering
                     pass
                 else:
-                    # Save CSV with Excel/Google Sheets compatibility
                     csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
-                    
-                    # CRITICAL: Ensure column order is correct before writing
-                    if "CompanySummary" not in df.columns:
-                        df["CompanySummary"] = ""
-                    df = df[["Website", "ScrapedText", "CompanySummary"]]
-                    
-                    # Use manual CSV writer for perfect quoting
+                    df = df[cols_buf]
                     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
                         writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                        # Write header - ALWAYS 3 columns in exact order
-                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                        writer.writerow(cols_buf)
                         
-                        # Write rows - extract by column name to ensure correct order
-                        # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
                         for idx in range(len(df)):
                             row = df.iloc[idx]
-                            row_values = []
-                            
-                            # Extract values by column name (not position) to ensure correct order
-                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
-                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
-                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
-                            
-                            # Clean each value
                             def clean_val(v):
-                                if not v:
-                                    return ""
+                                if not v: return ""
                                 import re
-                                v = v.replace('\x00', '')
+                                v = str(v).replace('\x00', '')
                                 v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
                                 v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
-                                v = re.sub(r'\s+', ' ', v).strip()
-                                return v
-                            
-                            # Add values in correct order: Website, ScrapedText, CompanySummary
-                            row_values.append(clean_val(website))
-                            row_values.append(clean_val(scraped_text))
-                            row_values.append(clean_val(company_summary))
-                            
-                            # Verify exactly 3 values
-                            if len(row_values) != 3:
-                                while len(row_values) < 3:
-                                    row_values.append("")
-                                row_values = row_values[:3]
-                            
+                                return re.sub(r'\s+', ' ', v).strip()
+                            row_values = [clean_val(row[c]) for c in cols_buf]
+                            row_values = (row_values + [""] * len(cols_buf))[:len(cols_buf)]
                             writer.writerow(row_values)
                     
-                    # Save Excel file (optimized for large files)
                     excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
                     try:
-                        # CRITICAL: Ensure DataFrame has exactly 3 columns with correct names before writing
-                        if "CompanySummary" not in df.columns:
-                            df["CompanySummary"] = ""
-                        df = df[["Website", "ScrapedText", "CompanySummary"]]
-                        
-                        # CRITICAL: Always write Excel files (not just for large files)
-                        # Excel files are more reliable than CSV for Excel compatibility
+                        df_excel_buf = df[cols_buf].copy()
                         from openpyxl import Workbook
                         wb = Workbook()
                         ws = wb.active
                         ws.title = "Scraped Data"
-                        
-                        # Write headers explicitly - CRITICAL: Always 3 columns
-                        ws.append(["Website", "ScrapedText", "CompanySummary"])
-                        
-                        # Write data rows - CRITICAL: Use iloc instead of iterrows() to prevent misalignment
-                        for idx in range(len(df)):
-                            row = df.iloc[idx]
-                            
-                            # Extract values by column name to ensure correct order
-                            website = str(row["Website"]) if pd.notna(row["Website"]) else ""
-                            text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
-                            summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
-                            
-                            # CRITICAL: Comprehensive cleaning for Excel compatibility
+                        ws.append(cols_buf)
+                        for idx in range(len(df_excel_buf)):
+                            row = df_excel_buf.iloc[idx]
                             def clean_excel_value(val):
-                                """Clean value to prevent Excel corruption"""
-                                if not val:
-                                    return ""
+                                if not val: return ""
                                 import re
-                                val = str(val)
-                                val = val.replace('\x00', '')
+                                val = str(val).replace('\x00', '')
                                 val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
-                                # Remove invalid XML characters (Excel files are XML-based)
-                                val = ''.join(char for char in val if (
-                                    ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or
-                                    (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
-                                ))
-                                val = val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                                val = re.sub(r'\s+', ' ', val).strip()
-                                val = val[:32767]
+                                val = ''.join(char for char in val if (ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)))
+                                val = re.sub(r'\s+', ' ', val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')).strip()[:32767]
                                 return val
-                            
-                            website = clean_excel_value(website)
-                            text = clean_excel_value(text)
-                            summary = clean_excel_value(summary)
-                            
-                            # CRITICAL: Prepend with single quote if value starts with =, +, -, @ to prevent Excel formula interpretation
                             row_data = []
-                            for val in [website, text, summary]:
-                                # If value starts with formula-like characters, prepend with single quote to force text mode
-                                if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
+                            for col_name in cols_buf:
+                                raw = str(row[col_name]) if pd.notna(row[col_name]) else ""
+                                val = clean_excel_value(raw)
+                                if val and val[0] in ['=', '+', '-', '@']:
                                     val = "'" + val
                                 row_data.append(val)
                             
@@ -2568,7 +2495,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             wb_recovery = Workbook()
                             ws_recovery = wb_recovery.active
                             ws_recovery.title = "Scraped Data"
-                            ws_recovery.append(["Website", "ScrapedText", "CompanySummary"])
+                            ws_recovery.append(cols_buf)
                             wb_recovery.save(excel_path)
                             raise save_error
                         
@@ -2596,6 +2523,81 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         emit(f"📁 Writer: Files written: {', '.join([os.path.basename(f) for f in files_written])}")
 
 # -------------------------
+# Test preview (no file write)
+# -------------------------
+
+
+async def _collector_coroutine(result_queue: asyncio.Queue, results_list: list):
+    """Collect results into a list instead of writing to disk."""
+    while True:
+        item = await result_queue.get()
+        result_queue.task_done()
+        if item is None:
+            break
+        results_list.append(item)
+
+
+async def run_test_preview(urls: list, n: int, retries, timeout, depth, keywords, max_chars,
+                           user_agent: str, ai_enabled: bool, ai_api_key, ai_provider, ai_model, ai_prompt,
+                           email_copy_enabled: bool, email_copy_api_key, email_copy_provider,
+                           email_copy_model, email_copy_prompt,
+                           lead_data_map: dict, log_callback=None) -> list:
+    """Run scraping + AI on first n URLs, return results for in-browser preview. No file output."""
+    def emit(msg: str):
+        print(msg)
+        if log_callback:
+            try:
+                log_callback(msg)
+            except Exception:
+                pass
+
+    urls_subset = urls[:n]
+    remaining = [(u, idx) for idx, u in enumerate(urls_subset)]
+    results_list = []
+
+    url_queue = asyncio.Queue()
+    result_queue = asyncio.Queue(maxsize=n + 5)
+    for u, idx in remaining:
+        await url_queue.put((u, idx))
+
+    connector = aiohttp.TCPConnector(limit=10, limit_per_host=3, ssl=False)
+    session = aiohttp.ClientSession(
+        headers={"User-Agent": user_agent},
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=None),
+        trust_env=True,
+    )
+
+    collector_task = asyncio.create_task(_collector_coroutine(result_queue, results_list))
+    workers = [
+        asyncio.create_task(worker_coroutine(
+            f"test-worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars,
+            retries, timeout, ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt,
+            email_copy_enabled, email_copy_api_key, email_copy_provider, email_copy_model, email_copy_prompt,
+            lead_data_map, None, None, fast_mode=True))
+        for i in range(min(2, n))
+    ]
+
+    emit(f"🧪 Test run: scraping + AI on {n} URL(s)...")
+    try:
+        await url_queue.join()
+        for _ in workers:
+            try:
+                await url_queue.put(None)
+            except Exception:
+                pass
+        await asyncio.gather(*workers)
+        await result_queue.put(None)
+        await asyncio.gather(collector_task)
+    except Exception as e:
+        emit(f"⚠️ Test error: {e}")
+    finally:
+        await session.close()
+
+    return results_list
+
+
+# -------------------------
 # Runner
 # -------------------------
 
@@ -2603,6 +2605,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
 async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                       user_agent, rows_per_file, output_dir, progress_callback,
                       ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
+                      email_copy_enabled=False, email_copy_api_key=None, email_copy_provider=None,
+                      email_copy_model=None, email_copy_prompt=None,
                       lead_data_map=None, ai_status_callback=None, scrape_status_callback=None,
                       run_folder: str = "", fast_mode: bool = False,
                       low_resource: bool = False, log_callback=None):
@@ -2702,12 +2706,14 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 
     writer_task = asyncio.create_task(writer_coroutine(
         result_queue, rows_per_file, output_dir, total_this_run, adapted_progress,
-        start_part=start_part, checkpoint_data=checkpoint_data, checkpoint_path=checkpoint_path, log_callback=log_callback))
+        start_part=start_part, checkpoint_data=checkpoint_data, checkpoint_path=checkpoint_path,
+        log_callback=log_callback, include_email_copy=email_copy_enabled))
 
     workers = [asyncio.create_task(worker_coroutine(
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
-        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback,
-        scrape_status_callback, fast_mode)) for i in range(concurrency)]
+        ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt,
+        email_copy_enabled, email_copy_api_key, email_copy_provider, email_copy_model, email_copy_prompt,
+        lead_data_map, ai_status_callback, scrape_status_callback, fast_mode)) for i in range(concurrency)]
 
     # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
@@ -3376,51 +3382,49 @@ with col2:
             key="user_agent"
         )
 
-# Step 3: AI (Optional)
-st.markdown("### 🤖 Step 3: AI (Optional)")
+# Step 3: Company Summary Generator (optional)
+st.markdown("### 📋 Step 3: Company Summary Generator (optional)")
 st.markdown("""
 <div style="background-color: #faf5ff; border-left: 4px solid #a855f7; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    <strong>💡 Tip:</strong> Use AI to automatically create company summaries from scraped content. Requires an API key.
+    Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.
 </div>
 """, unsafe_allow_html=True)
 
 ai_enabled = st.checkbox(
-    "Generate AI summaries",
+    "Enable company summaries",
     value=st.session_state.get('ai_enabled', False),
-    help="Check this to enable AI-powered company summary generation",
+    help="Generate structured summaries for each scraped website using AI",
     key="ai_enabled_checkbox"
 )
 st.session_state['ai_enabled'] = ai_enabled
 
 if ai_enabled:
     st.markdown("---")
-    # Step 1: Choose AI service
-    st.markdown("#### Step 1: Choose AI Service")
+    st.markdown("#### Provider")
     ai_provider = st.selectbox(
-        "Which AI service?",
+        "AI provider",
         ["OpenAI", "Gemini", "OpenRouter"],
-        help="OpenAI (GPT), Google Gemini, or OpenRouter (access many models with one key)",
+        help="OpenAI (GPT models), Google Gemini, or OpenRouter (one key for 600+ models)",
         key="ai_provider_select"
     )
     st.session_state['ai_provider'] = ai_provider
     
-    # Step 2: Enter API key
-    st.markdown("#### Step 2: Enter API Key")
+    st.markdown("#### API key")
     api_key_key = f"{ai_provider.lower()}_api_key"
     stored_api_key = st.session_state.get(api_key_key, "")
     
     if ai_provider == "OpenAI":
-        st.caption("Get your API key from: https://platform.openai.com/api-keys")
+        st.caption("Create a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)")
     elif ai_provider == "Gemini":
-        st.caption("Get your API key from: https://makersuite.google.com/app/apikey")
+        st.caption("Create a key at [makersuite.google.com/app/apikey](https://makersuite.google.com/app/apikey)")
     else:
-        st.caption("Get your API key from: https://openrouter.ai/keys — one key for 600+ models (GPT, Claude, Gemini, etc.)")
+        st.caption("Create a key at [openrouter.ai/keys](https://openrouter.ai/keys) — one key for GPT, Claude, Gemini, and more")
     
     ai_api_key = st.text_input(
-        f"{ai_provider} API Key",
+        f"{ai_provider} API key",
         value=stored_api_key,
         type="password",
-        help=f"Paste your {ai_provider} API key here"
+        help="Paste your API key. It’s stored in your session and never saved to disk.",
     )
     
     # Save API key
@@ -3429,7 +3433,7 @@ if ai_enabled:
             st.session_state[api_key_key] = ai_api_key
             st.session_state['ai_api_key'] = ai_api_key
             st.session_state[f"{ai_provider.lower()}_models"] = None
-        st.success("✅ API key saved")
+        st.success("API key saved")
     elif stored_api_key and not ai_api_key:
         st.session_state[api_key_key] = ""
         st.session_state['ai_api_key'] = ""
@@ -3438,8 +3442,7 @@ if ai_enabled:
     # Always sync generic key
     st.session_state['ai_api_key'] = st.session_state.get(api_key_key, "")
     
-    # Step 3: Choose model
-    st.markdown("#### Step 3: Choose Model")
+    st.markdown("#### Model")
     models_cache_key = f"{ai_provider.lower()}_models"
     cached_models = st.session_state.get(models_cache_key)
     
@@ -3495,29 +3498,28 @@ if ai_enabled:
                         break
             
             ai_model = st.selectbox(
-                "Select model",
+                "Model",
                 options=cached_models,
                 index=default_index,
-                help="Choose which AI model to use. Defaults are usually best.",
+                help="Recommended: gpt-4o-mini (fast) or gpt-4o (best).",
                 key=f"{ai_provider}_model_select"
             )
             st.session_state['ai_model'] = ai_model
             st.session_state['ai_provider'] = ai_provider
             
-            st.caption(f"✅ {len(cached_models)} models available")
+            st.caption(f"{len(cached_models)} models available")
         else:
             ai_model = None
     else:
-        st.info("👆 Enter your API key above to see available models")
+        st.info("Enter your API key above to see available models.")
         ai_model = None
     
-    # Step 4: Prompt (simplified)
-    st.markdown("#### Step 4: Prompt (Optional)")
+    st.markdown("#### Prompt")
     prompt_mode = st.radio(
-        "Prompt options",
+        "Prompt",
         ["Use default prompt", "Customize prompt"],
         horizontal=True,
-        help="Default prompt works great for most cases"
+        help="The default prompt is tuned for company summaries, facts, and hypotheses."
     )
     
     default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
@@ -3624,7 +3626,7 @@ CRITICAL:
     
     st.session_state['ai_prompt'] = ai_prompt
     
-    with st.expander("👁️ Preview how prompt will look", expanded=False):
+    with st.expander("Preview prompt", expanded=False):
         sample_url = "https://example.com"
         sample_company = "Example Company"
         sample_content = "Sample website content..."
@@ -3636,6 +3638,165 @@ else:
     ai_provider = None
     ai_model = None
     ai_prompt = None
+
+# Step 4: Email Copy Writer (optional, works independently)
+st.markdown("---")
+st.markdown("### ✉️ Step 4: Email Copy Writer (optional)")
+st.markdown("""
+<div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+    Generate personalized email copy for each lead based on scraped content. Runs independently from company summaries. Same AI providers supported.
+</div>
+""", unsafe_allow_html=True)
+
+email_copy_enabled = st.checkbox(
+    "Enable email copy generation",
+    value=st.session_state.get('email_copy_enabled', False),
+    help="Generate email copy for each scraped lead using AI",
+    key="email_copy_enabled_checkbox"
+)
+st.session_state['email_copy_enabled'] = email_copy_enabled
+
+if email_copy_enabled:
+    st.markdown("---")
+    st.markdown("#### Provider")
+    email_copy_provider = st.selectbox(
+        "AI provider",
+        ["OpenAI", "Gemini", "OpenRouter"],
+        key="email_copy_provider_select"
+    )
+    st.session_state['email_copy_provider'] = email_copy_provider
+    st.markdown("#### API key")
+    ec_api_key_name = f"{email_copy_provider.lower()}_api_key"
+    email_copy_api_key = st.text_input(
+        "API key",
+        value=st.session_state.get(ec_api_key_name, ""),
+        type="password",
+        key="email_copy_api_key_input"
+    )
+    st.session_state[ec_api_key_name] = email_copy_api_key
+    st.markdown("#### Model")
+    if email_copy_provider == "OpenAI":
+        email_copy_model = st.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"], key="email_copy_model_select")
+    elif email_copy_provider == "Gemini":
+        email_copy_model = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"], key="email_copy_model_select")
+    else:
+        email_copy_model = st.text_input("OpenRouter model (e.g. openai/gpt-4o-mini)", value="openai/gpt-4o-mini", key="email_copy_model_input")
+    st.session_state['email_copy_model'] = email_copy_model
+    st.markdown("#### Prompt")
+    default_email_prompt = """You are an expert B2B sales copywriter.
+
+Write a personalized outreach email for this company based on their website content.
+
+LEAD INFO:
+- URL: {url}
+- Company: {company_name}
+
+WEBSITE CONTENT:
+{scraped_content}
+
+Requirements:
+- Keep the email under 150 words
+- Be specific to their business (reference facts from their site)
+- Professional, conversational tone
+- Clear call-to-action
+- No generic fluff"""
+    if 'email_copy_prompt' not in st.session_state:
+        st.session_state['email_copy_prompt'] = default_email_prompt
+    email_copy_prompt = st.text_area(
+        "Email copy prompt",
+        value=st.session_state.get('email_copy_prompt', default_email_prompt),
+        height=180,
+        help="Use {url}, {company_name}, {scraped_content} as placeholders",
+        key="email_copy_prompt_edit"
+    )
+    st.session_state['email_copy_prompt'] = email_copy_prompt
+else:
+    email_copy_api_key = None
+    email_copy_provider = None
+    email_copy_model = None
+    email_copy_prompt = None
+
+# Token usage estimator
+st.markdown("---")
+with st.expander("💰 Token usage estimator", expanded=False):
+    st.caption("Estimate token usage and cost based on your prompts and scraping settings. Uses averages.")
+    MODEL_PRICING = {
+        "gpt-4o-mini": (0.15, 0.60),
+        "gpt-4o": (2.50, 10.00),
+        "gpt-4-turbo": (10.00, 30.00),
+        "gpt-3.5-turbo": (0.50, 1.50),
+        "gemini-1.5-flash": (0.075, 0.30),
+        "gemini-1.5-pro": (1.25, 5.00),
+        "gemini-pro": (0.50, 1.50),
+    }
+    def get_model_pricing(model):
+        for k, v in MODEL_PRICING.items():
+            if k in (model or "").lower():
+                return v
+        return (1.0, 3.0)  # default $/1M tokens
+    def chars_to_tokens(chars):
+        return max(0, int(chars / 4))
+    est_urls = st.number_input("Number of URLs to estimate", min_value=1, max_value=100000, value=100, key="est_urls")
+    max_chars_est = st.session_state.get("max_chars", 50000)
+    depth_est = st.session_state.get("depth", 3)
+    avg_chars_per_site = min(max_chars_est, int(8000 * (1 + (depth_est - 1) * 0.5)))
+    ai_prompt_est = st.session_state.get("ai_prompt", "") or ""
+    email_prompt_est = st.session_state.get("email_copy_prompt", "") or ""
+    ai_enabled_est = st.session_state.get("ai_enabled_checkbox", False)
+    email_enabled_est = st.session_state.get("email_copy_enabled_checkbox", False)
+    ai_model_est = st.session_state.get("ai_model", "gpt-4o-mini")
+    email_model_est = st.session_state.get("email_copy_model", "gpt-4o-mini")
+    total_input = 0
+    total_output = 0
+    cost_summary = []
+    costs = []
+    if ai_enabled_est:
+        prompt_tokens = chars_to_tokens(len(ai_prompt_est) + 500)
+        content_tokens = chars_to_tokens(avg_chars_per_site)
+        input_per_url = prompt_tokens + content_tokens
+        output_per_url = 2500
+        ai_input = input_per_url * est_urls
+        ai_output = output_per_url * est_urls
+        total_input += ai_input
+        total_output += ai_output
+        in_p, out_p = get_model_pricing(ai_model_est)
+        cost = (ai_input / 1e6 * in_p) + (ai_output / 1e6 * out_p)
+        costs.append(cost)
+        cost_summary.append(f"Company summary ({ai_model_est}): ~${cost:.3f}")
+    if email_enabled_est:
+        prompt_tokens = chars_to_tokens(len(email_prompt_est) + 300)
+        content_tokens = chars_to_tokens(avg_chars_per_site)
+        input_per_url = prompt_tokens + content_tokens
+        output_per_url = 350
+        ec_input = input_per_url * est_urls
+        ec_output = output_per_url * est_urls
+        total_input += ec_input
+        total_output += ec_output
+        in_p, out_p = get_model_pricing(email_model_est)
+        cost = (ec_input / 1e6 * in_p) + (ec_output / 1e6 * out_p)
+        costs.append(cost)
+        cost_summary.append(f"Email copy ({email_model_est}): ~${cost:.3f}")
+    if total_input == 0 and total_output == 0:
+        st.info("Enable Step 3 (Company Summary) or Step 4 (Email Copy) to see estimates.")
+    else:
+        st.metric("Estimated input tokens", f"{total_input:,}")
+        st.metric("Estimated output tokens", f"{total_output:,}")
+        st.metric("Total tokens", f"{total_input + total_output:,}")
+        st.markdown("**Estimated cost (approximate):**")
+        for line in cost_summary:
+            st.markdown(f"- {line}")
+        if costs:
+            st.markdown(f"- **Total: ~${sum(costs):.3f}**")
+        st.caption("Prices in $ per 1M tokens (input/output). Actual usage may vary.")
+
+# Test run option
+st.markdown("---")
+test_col1, test_col2 = st.columns([1, 2])
+with test_col1:
+    test_rows = st.number_input("Test with X rows", min_value=1, max_value=20, value=5, help="Preview scraping + AI on first X URLs before full run", key="test_rows_input")
+with test_col2:
+    st.caption("Run a quick test to see scraped content and AI summary in the browser (no files created)")
+    test_clicked = st.button("🧪 Test run", key="test_run_btn", help=f"Test scraping + AI on first {test_rows} row(s)")
 
 # Main action button with better styling
 st.markdown("---")
@@ -3661,16 +3822,129 @@ user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; W
 run_name = st.session_state.get('run_name', "")
 fast_mode = st.session_state.get('fast_mode', False)
 low_resource = st.session_state.get('low_resource', _is_low_resource_default())
-ai_enabled = st.session_state.get('ai_enabled', False)
-ai_provider = st.session_state.get('ai_provider', None)
+# Use checkbox key as source of truth (widget state); fallback to our sync key
+ai_enabled = st.session_state.get("ai_enabled_checkbox", st.session_state.get('ai_enabled', False))
+if not ai_enabled:
+    st.session_state['ai_enabled'] = False  # Ensure sync when disabled
+ai_provider = st.session_state.get('ai_provider', None) if ai_enabled else None
 # Get API key - check provider-specific key first, then generic
-if ai_provider:
+if ai_enabled and ai_provider:
     api_key_key = f"{ai_provider.lower()}_api_key"
     ai_api_key = st.session_state.get(api_key_key) or st.session_state.get('ai_api_key', None)
 else:
-    ai_api_key = st.session_state.get('ai_api_key', None)
-ai_model = st.session_state.get('ai_model', None)
-ai_prompt = st.session_state.get('ai_prompt', None)
+    ai_api_key = None
+ai_model = st.session_state.get('ai_model', None) if ai_enabled else None
+ai_prompt = st.session_state.get('ai_prompt', None) if ai_enabled else None
+
+email_copy_enabled_ui = st.session_state.get("email_copy_enabled_checkbox", st.session_state.get('email_copy_enabled', False))
+if not email_copy_enabled_ui:
+    st.session_state['email_copy_enabled'] = False
+email_copy_provider_ui = st.session_state.get('email_copy_provider', None) if email_copy_enabled_ui else None
+if email_copy_enabled_ui and email_copy_provider_ui:
+    ec_key_name = f"{email_copy_provider_ui.lower()}_api_key"
+    email_copy_api_key = st.session_state.get(ec_key_name) or st.session_state.get('email_copy_api_key', None)
+else:
+    email_copy_api_key = None
+email_copy_model_ui = st.session_state.get('email_copy_model', None) if email_copy_enabled_ui else None
+email_copy_prompt_ui = st.session_state.get('email_copy_prompt', None) if email_copy_enabled_ui else None
+
+# -------- TEST RUN --------
+if uploaded_file and test_clicked:
+    csv_config = st.session_state.get('csv_config', {})
+    if not csv_config:
+        st.error("❌ Please configure your CSV above (select URL column) first.")
+    else:
+        uploaded_file.seek(0)
+        has_headers = csv_config.get('has_headers', True)
+        url_col = csv_config.get('url_column')
+        lead_cols = csv_config.get('lead_data_columns', {})
+        if has_headers:
+            df_in = pd.read_csv(uploaded_file)
+        else:
+            df_in = pd.read_csv(uploaded_file, header=None)
+        url_col_idx = list(df_in.columns).index(url_col) if has_headers else int(url_col.replace("Column ", "")) - 1
+        urls = df_in.iloc[:, url_col_idx].fillna("").astype(str).tolist()
+        urls = [u for u in urls if u.strip()]
+        lead_data_map = {}
+        for idx, url in enumerate(urls):
+            lead_data = {'url': url, 'company_name': url.replace('https://', '').replace('http://', '').split('/')[0]}
+            if 'company_name' in lead_cols:
+                cn = lead_cols['company_name']
+                ci = list(df_in.columns).index(cn) if has_headers else int(cn.replace("Column ", "")) - 1
+                lead_data['company_name'] = str(df_in.iloc[idx, ci]) if idx < len(df_in) and pd.notna(df_in.iloc[idx, ci]) else ""
+            if 'industry' in lead_cols:
+                cn = lead_cols['industry']
+                ci = list(df_in.columns).index(cn) if has_headers else int(cn.replace("Column ", "")) - 1
+                lead_data['industry'] = str(df_in.iloc[idx, ci]) if idx < len(df_in) and pd.notna(df_in.iloc[idx, ci]) else ""
+            if 'other' in lead_cols:
+                cn = lead_cols['other']
+                ci = list(df_in.columns).index(cn) if has_headers else int(cn.replace("Column ", "")) - 1
+                lead_data['other'] = str(df_in.iloc[idx, ci]) if idx < len(df_in) and pd.notna(df_in.iloc[idx, ci]) else ""
+            lead_data_map[idx] = lead_data
+
+        ai_enabled_test = st.session_state.get("ai_enabled_checkbox", False)
+        ai_provider_test = st.session_state.get('ai_provider', None) if ai_enabled_test else None
+        ai_api_key_test = None
+        if ai_enabled_test and ai_provider_test:
+            api_key_key = f"{ai_provider_test.lower()}_api_key"
+            ai_api_key_test = st.session_state.get(api_key_key) or st.session_state.get('ai_api_key')
+        ai_model_test = st.session_state.get('ai_model') if ai_enabled_test else None
+        ai_prompt_test = st.session_state.get('ai_prompt') or ""
+        email_copy_enabled_test = st.session_state.get("email_copy_enabled_checkbox", False)
+        email_copy_provider_test = st.session_state.get('email_copy_provider', None) if email_copy_enabled_test else None
+        email_copy_api_key_test = None
+        if email_copy_enabled_test and email_copy_provider_test:
+            ec_key = f"{email_copy_provider_test.lower()}_api_key"
+            email_copy_api_key_test = st.session_state.get(ec_key) or st.session_state.get('email_copy_api_key')
+        email_copy_model_test = st.session_state.get('email_copy_model') if email_copy_enabled_test else None
+        email_copy_prompt_test = st.session_state.get('email_copy_prompt') or ""
+
+        test_logs = []
+        def test_log(msg):
+            test_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+        with st.spinner("Running test..."):
+            try:
+                if os.name == "nt":
+                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                results = asyncio.run(run_test_preview(
+                    urls, test_rows, retries, timeout, depth, keywords, max_chars,
+                    user_agent, ai_enabled_test, ai_api_key_test, ai_provider_test, ai_model_test, ai_prompt_test,
+                    email_copy_enabled_test, email_copy_api_key_test, email_copy_provider_test,
+                    email_copy_model_test, email_copy_prompt_test,
+                    lead_data_map, log_callback=test_log))
+            except Exception as e:
+                st.error(f"❌ Test failed: {e}")
+                import traceback
+                st.code(traceback.format_exc(), language=None)
+                results = []
+
+        st.markdown("### 🧪 Test results")
+        if test_logs:
+            with st.expander("Logs", expanded=False):
+                st.code("\n".join(test_logs), language=None)
+        for i, row in enumerate(results):
+            url = row[0]
+            scraped_text = row[1] if len(row) >= 2 else ""
+            ai_summary = row[2] if len(row) >= 3 else ""
+            email_copy_val = row[3] if len(row) >= 4 else ""
+            with st.expander(f"**{i+1}. {url[:60]}{'…' if len(url) > 60 else ''}**", expanded=True):
+                st.markdown("#### Scraped content")
+                scraped_display = scraped_text[:8000] + ("…" if len(scraped_text) > 8000 else "") if scraped_text else "(empty)"
+                st.text_area("", value=scraped_display, height=200, key=f"test_scraped_{i}", disabled=True, label_visibility="collapsed")
+                if ai_summary:
+                    st.markdown("#### Company summary")
+                    formatted = ai_summary.replace("===SUMMARY===", "\n### Summary\n").replace("===FACTS===", "\n### Facts\n").replace("===HYPOTHESES===", "\n### Hypotheses\n")
+                    st.markdown(formatted)
+                else:
+                    st.caption("_No company summary (Step 3 disabled or error)_")
+                if email_copy_val:
+                    st.markdown("#### Email copy")
+                    st.markdown(email_copy_val)
+                elif email_copy_enabled_test:
+                    st.caption("_No email copy (error or insufficient content)_")
+        if not results:
+            st.info("No results. Check logs above.")
 
 # -------- SCRAPE BUTTON --------
 if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
@@ -3865,7 +4139,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
 
     def scrape_status_callback(url: str, status: str, message: str):
         with scrape_status_lock:
-            if status in ("scraping", "ai_summarizing"):
+            if status in ("scraping", "ai_summarizing", "email_copy"):
                 scrape_in_progress[url] = {"status": status, "message": message}
             else:
                 scrape_in_progress.pop(url, None)
@@ -3886,6 +4160,21 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         with runtime_lock:
             runtime_logs.append(line)
     
+    ai_enabled_for_run = st.session_state.get("ai_enabled_checkbox", False)
+    if not ai_enabled_for_run:
+        ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run = None, None, None, None
+    else:
+        ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run = ai_api_key, ai_provider, ai_model, ai_prompt
+
+    email_copy_enabled_for_run = st.session_state.get("email_copy_enabled_checkbox", False)
+    if not email_copy_enabled_for_run:
+        email_copy_api_key_run = email_copy_provider_run = email_copy_model_run = email_copy_prompt_run = None
+    else:
+        email_copy_api_key_run = email_copy_api_key
+        email_copy_provider_run = email_copy_provider_ui
+        email_copy_model_run = email_copy_model_ui
+        email_copy_prompt_run = email_copy_prompt_ui
+
     def run_async_scraper():
         try:
             if os.name == "nt":
@@ -3895,8 +4184,11 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             asyncio.run(
                 run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
-                            ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map,
-                            ai_status_callback if ai_enabled else None, scrape_status_callback,
+                            ai_enabled_for_run, ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run,
+                            email_copy_enabled_for_run, email_copy_api_key_run, email_copy_provider_run,
+                            email_copy_model_run, email_copy_prompt_run,
+                            lead_data_map,
+                            ai_status_callback if ai_enabled_for_run else None, scrape_status_callback,
                             run_folder=run_folder, fast_mode=fast_mode,
                             low_resource=low_resource, log_callback=log_cb))
             log_cb("✅ Run completed")
@@ -4003,7 +4295,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     else:
                         st.caption("_No issues_")
                 
-                if ai_enabled and ai_status_messages:
+                if ai_enabled_for_run and ai_status_messages:
                     st.markdown("---")
                     st.markdown("#### 🤖 AI summary status")
                     with ai_status_lock:
