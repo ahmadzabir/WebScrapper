@@ -3135,7 +3135,6 @@ with col1:
         help="Reduces delays for large runs. May increase 403s on strict sites. Best for 1000+ URLs.",
         key="fast_mode"
     )
-    st.session_state['fast_mode'] = fast_mode
     
     # Low resource mode - for slow/limited computers
     low_resource_default = _is_low_resource_default()
@@ -3145,7 +3144,6 @@ with col1:
         help="Uses fewer workers and less memory. Recommended if your computer is slow or has limited RAM.",
         key="low_resource"
     )
-    st.session_state['low_resource'] = low_resource
     
     # Speed - lower limits when low resource
     if low_resource:
