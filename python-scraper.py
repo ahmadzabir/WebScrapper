@@ -2456,11 +2456,11 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         else:
             completed_urls = set()
             start_part = 0
-            remaining_with_idx = list(enumerate(urls))
+            remaining_with_idx = [(u, idx) for idx, u in enumerate(urls)]
     else:
         completed_urls = set()
         start_part = 0
-        remaining_with_idx = list(enumerate(urls))
+        remaining_with_idx = [(u, idx) for idx, u in enumerate(urls)]
     
     total_overall = len(urls)
     total_this_run = len(remaining_with_idx)
