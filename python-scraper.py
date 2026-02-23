@@ -2527,14 +2527,17 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
         ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt, lead_data_map, ai_status_callback, fast_mode)) for i in range(concurrency)]
 
-    # Timeout: cap at 3 hours to prevent infinite hangs
+    # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
-    max_queue_time = min(base_time, 3 * 3600)
+    max_queue_time = min(base_time + 600, 3 * 3600 + 600)  # +10 min for pause-and-wait recovery
     emit(f"⚙️ Run config: total={total_overall}, remaining={total_this_run}, queue_max={queue_max}, max_queue_time={int(max_queue_time)}s, fast_mode={fast_mode}, low_resource={low_resource}")
     
+    recovery_wait_s = 300  # 5 minutes: wait for slow network/system before giving up
+    recovery_chunk_s = 30  # Check progress every 30s during recovery
+    
     async def force_completion_on_stall():
-        """Detect stall using progress_state and drain queue. Use put_nowait to avoid blocking."""
-        stall_threshold = 120 if low_resource else 90
+        """Detect stall and PAUSE for recovery (slow network/disconnect) before draining."""
+        stall_threshold = 240 if low_resource else 300  # 4–5 min before considering stall
         while True:
             await asyncio.sleep(15)
             elapsed = time.time() - progress_state["last_time"]
@@ -2543,28 +2546,41 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             if remaining <= 0:
                 break
             if elapsed > stall_threshold:
-                emit(f"⚠️ Stall detected: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Draining remaining URLs...")
-                drained = 0
-                while drained < remaining + 100:  # Safety cap
-                    try:
-                        item = url_queue.get_nowait()
-                    except asyncio.QueueEmpty:
+                emit(f"⏸️ Pausing: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Waiting up to {recovery_wait_s // 60} min for recovery (slow network/system)...")
+                waited = 0
+                recovered = False
+                while waited < recovery_wait_s:
+                    await asyncio.sleep(recovery_chunk_s)
+                    waited += recovery_chunk_s
+                    new_count = progress_state["last_count"]
+                    if new_count > last_count:
+                        recovered = True
+                        emit(f"✅ Recovery: progress resumed ({new_count - last_count} completed). Continuing.")
                         break
-                    if item is None or item == (None, None):
-                        url_queue.task_done()
-                        continue
-                    url, idx = (item[0], item[1]) if isinstance(item, tuple) else (item, None)
-                    err_result = (url, "❌ Stall detected: processing stopped (progress frozen)", "")
-                    for _ in range(20):  # Retry put if queue full
+                    emit(f"⏳ Still waiting... {waited}s / {recovery_wait_s}s (no progress yet)")
+                if not recovered:
+                    emit(f"⚠️ No recovery after {recovery_wait_s}s. Marking remaining URLs as stalled.")
+                    drained = 0
+                    while drained < remaining + 100:
                         try:
-                            result_queue.put_nowait(err_result)
+                            item = url_queue.get_nowait()
+                        except asyncio.QueueEmpty:
                             break
-                        except asyncio.QueueFull:
-                            await asyncio.sleep(0.3)
-                    else:
-                        emit("⚠️ Result queue full during stall drain")
-                    url_queue.task_done()
-                    drained += 1
+                        if item is None or item == (None, None):
+                            url_queue.task_done()
+                            continue
+                        url, idx = (item[0], item[1]) if isinstance(item, tuple) else (item, None)
+                        err_result = (url, "❌ Stall detected: processing stopped after recovery wait", "")
+                        for _ in range(20):
+                            try:
+                                result_queue.put_nowait(err_result)
+                                break
+                            except asyncio.QueueFull:
+                                await asyncio.sleep(0.3)
+                        else:
+                            emit("⚠️ Result queue full during stall drain")
+                        url_queue.task_done()
+                        drained += 1
                 break
     
     stall_monitor = asyncio.create_task(force_completion_on_stall())
@@ -2581,7 +2597,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         try:
             await asyncio.wait_for(url_queue.join(), timeout=max_queue_time)
         except asyncio.TimeoutError:
-            emit(f"⚠️ Queue join timed out after {max_queue_time}s. Draining remaining URLs...")
+            emit(f"⏸️ Queue join timed out. Pausing 3 minutes for possible recovery (slow network/system)...")
+            await asyncio.sleep(180)
+            emit(f"⚠️ Proceeding to drain remaining URLs...")
             drained = 0
             while drained < total_this_run:
                 try:
@@ -3716,7 +3734,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         finally:
             progress_state_ui["running"] = False
 
-    with st.spinner("Scraping — this runs in the page (do not close)..."):
+    with st.spinner("Scraping — runs in-page. Progress is saved; if you refresh or lose connection, re-upload the CSV and click Start to resume."):
         lead_data_map = st.session_state.get('lead_data_map', None)
         logs_placeholder = st.empty()
         
@@ -3748,7 +3766,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             else:
                 status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
             if idle_for >= 30:
-                eta_text.warning(f"No progress for {idle_for}s. Could be a slow site; app is still running and logging heartbeat.")
+                eta_text.warning(f"No progress for {idle_for}s. App will pause and wait for recovery (slow network/system); do not refresh.")
             else:
                 eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
             with runtime_lock:
