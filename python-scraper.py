@@ -33,12 +33,27 @@ except ImportError:
 # -------------------------
 
 def _is_low_resource_default() -> bool:
-    """Suggest low-resource mode for slower machines (few CPUs or limited RAM)."""
+    """Auto-detect: use low-resource mode for slower machines (few CPUs)."""
     try:
-        n = os.cpu_count()
-        return n is None or n <= 4
+        n = os.cpu_count() or 2
+        return n <= 4
     except Exception:
         return True
+
+
+def _get_concurrency_max() -> int:
+    """Auto-compute max parallel workers based on system (free Streamlit-friendly)."""
+    try:
+        n = os.cpu_count() or 2
+        # Conservative for free Streamlit: avoid OOM, stay responsive
+        return min(max(8, n * 3), 30)
+    except Exception:
+        return 12
+
+
+def _should_use_fast_mode(total_urls: int) -> bool:
+    """Auto-enable fast mode for large runs (500+ URLs)."""
+    return total_urls >= 500
 
 
 def normalize_url(url: str) -> str:
@@ -1388,6 +1403,38 @@ def get_realistic_headers(user_agent=None, target_url=None):
 _domain_request_times = {}  # Track last request time per domain
 _domain_lock = asyncio.Lock()  # Lock for thread-safe access to domain timing
 
+
+async def _fetch_from_cache_fallbacks(session: aiohttp.ClientSession, url: str, timeout: int) -> tuple | str:
+    """
+    When direct fetch fails, try Google cache or archive.org for meta/content.
+    Returns (page_url, html) on success, or error string on failure.
+    """
+    from urllib.parse import quote
+    cache_timeout = aiohttp.ClientTimeout(total=timeout + 15, connect=15, sock_read=60)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    # 1. Try Google cache
+    try:
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url, safe='')}"
+        async with session.get(cache_url, timeout=cache_timeout, headers=headers) as resp:
+            if resp.status < 400:
+                html = await resp.text(errors="replace")
+                if html and len(html.strip()) > 200 and ("<html" in html.lower() or "<!doctype" in html.lower() or "<meta" in html.lower()):
+                    return (url, html)
+    except Exception:
+        pass
+    # 2. Try archive.org snapshot (Wayback Machine)
+    try:
+        wayback_url = f"https://web.archive.org/web/{url}"
+        async with session.get(wayback_url, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
+            if resp.status < 400:
+                html = await resp.text(errors="replace")
+                if html and len(html.strip()) > 200:
+                    return (url, html)
+    except Exception:
+        pass
+    return ""
+
+
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int, fast_mode: bool = False):
     """Fetch URL with EPIC anti-bot detection avoidance. fast_mode reduces delays for 4k+ runs."""
     from urllib.parse import urlparse
@@ -1597,7 +1644,7 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
 
 async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int, fast_mode: bool = False):
     depth = max(1, int(depth) if depth is not None else 1)
-    max_chars = max(100, int(max_chars) if max_chars is not None else 50000)
+    max_chars = max(100, min(int(max_chars) if max_chars is not None else 10000, 50000))
     visited, results, errors = set(), [], []
     total_chars = 0
     separator = "\n\n" + "─" * 80 + "\n\n"  # Better visual separator between pages
@@ -1605,10 +1652,15 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 
     # Normalize URL before fetching
     normalized_url = normalize_url(url)
-    
+
     homepage = await fetch(session, normalized_url, timeout, retries, fast_mode)
     if isinstance(homepage, str):
-        return f"❌ {homepage}"
+        # Direct fetch failed: try cache fallbacks (Google cache, archive.org)
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout)
+        if isinstance(cache_result, tuple):
+            homepage = cache_result
+        else:
+            return f"❌ {homepage}"
 
     page_url, html = homepage
     
@@ -3403,7 +3455,7 @@ if uploaded_file is not None:
 st.markdown("### ⚙️ Step 2: Settings")
 st.markdown("""
 <div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    <strong>💡 Tip:</strong> Most settings have good defaults. You can leave them as-is or adjust if needed.
+    <strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts to your system and run size (fewer workers on slow PCs, homepage-only for 500+ URLs, cache fallback for unreachable sites).
 </div>
 """, unsafe_allow_html=True)
 
@@ -3427,46 +3479,22 @@ with col1:
     else:
         st.caption("💡 Leave empty to scrape homepage only")
     
-    # Fast mode - 4k in ~15 min
-    fast_mode = st.checkbox(
-        "⚡ Fast mode (4k leads in ~15 min)",
-        value=st.session_state.get('fast_mode', False),
-        help="Reduces delays for large runs. May increase 403s on strict sites. Best for 1000+ URLs.",
-        key="fast_mode"
-    )
-    
-    # Low resource mode - for slow/limited computers
-    low_resource_default = _is_low_resource_default()
-    low_resource = st.checkbox(
-        "🐢 Low resource mode (slower computers)",
-        value=st.session_state.get('low_resource', low_resource_default),
-        help="Uses fewer workers and less memory. Recommended if your computer is slow or has limited RAM.",
-        key="low_resource"
-    )
-    
-    # Speed - lower limits when low resource
-    if low_resource:
-        concurrency_max = 15
-        concurrency_default = min(st.session_state.get('concurrency', 8), 15)
-    elif fast_mode:
-        concurrency_max = 150
-        concurrency_default = min(st.session_state.get('concurrency', 100), 150)
-    else:
-        concurrency_max = 50
-        concurrency_default = min(st.session_state.get('concurrency', 20), 50)
+    # Auto-detect: fast mode for 500+ URLs, low resource for slow machines
+    # (These are applied at run time based on URL count and CPU - no checkboxes)
+    concurrency_max = _get_concurrency_max()
+    concurrency_default = min(st.session_state.get('concurrency', min(12, concurrency_max)), concurrency_max)
     concurrency = st.slider(
-        "Speed (parallel workers)", 
-        1, concurrency_max, min(concurrency_default, concurrency_max),
-        help="Low resource: 5-10. Normal: 20-30. Fast: 100-150.",
+        "Parallel workers",
+        1, concurrency_max, max(1, concurrency_default),
+        help=f"Number of sites scraped at once. Max {concurrency_max} (based on your system). Lower = gentler on slow PCs.",
         key="concurrency"
     )
     
-    # Pages to scrape - 0 in fast mode for speed
-    depth_default = 0 if fast_mode else st.session_state.get('depth', 3)
+    # Pages to scrape per site
     depth = st.slider(
-        "Pages to scrape per site", 
-        0, 5, depth_default,
-        help="Fast mode: use 0 (homepage only) for speed. Normal: 3 = homepage + 3 more pages",
+        "Pages to scrape per site",
+        0, 5, st.session_state.get('depth', 3),
+        help="0 = homepage only. 3 = homepage + 3 more pages. Auto-reduced for large runs.",
         key="depth"
     )
     
@@ -3481,32 +3509,25 @@ with col1:
 with col2:
     st.markdown("#### Advanced Settings")
     
-    # Timeout
-    slow_sites = st.checkbox(
-        "Slower/unreliable sites (use longer timeouts)",
-        value=st.session_state.get('slow_sites', False),
-        help="Enable for sites that often timeout. Doubles wait time and retries for better success.",
-        key="slow_sites"
-    )
-    timeout_default = 30 if slow_sites else 25
+    # Timeout - generous defaults for unreliable sites (auto-applied)
     timeout = st.number_input(
-        "Wait time per site (seconds)", 
-        5, 120, st.session_state.get('timeout', timeout_default),
-        help="How long to wait for each website before giving up. Use 30–60s for slow sites.",
+        "Wait time per site (seconds)",
+        5, 120, st.session_state.get('timeout', 30),
+        help="How long to wait per site. Unreachable sites fall back to Google cache / archive.org.",
         key="timeout"
     )
-    
-    # Max chars
+
+    # Max chars: default 10k, max 50k
     max_chars = st.number_input(
-        "Text limit per site", 
-        1000, 200000, st.session_state.get('max_chars', 50000),
-        step=5000,
-        help="Maximum characters to scrape from each website. Higher = more content but larger files.",
+        "Text limit per site",
+        1000, 50000, st.session_state.get('max_chars', 10000),
+        step=1000,
+        help="Characters per site (default 10,000, max 50,000).",
         key="max_chars"
     )
-    
-    # Rows per file
-    rows_per_file_default = 1000 if low_resource else st.session_state.get('rows_per_file', 2000)
+
+    # Rows per file - auto-tuned for system
+    rows_per_file_default = 1000 if _is_low_resource_default() else st.session_state.get('rows_per_file', 2000)
     rows_per_file = st.number_input(
         "Split files every X rows", 
         500, 50000, min(rows_per_file_default, 50000), step=500,
@@ -3877,10 +3898,10 @@ with st.expander("💰 Token usage estimator", expanded=False):
     default_urls = num_urls_csv if num_urls_csv > 0 else 100
     est_urls = st.number_input("Number of URLs", min_value=1, max_value=100000, value=default_urls, key="est_urls", help="Auto-filled from CSV if uploaded")
     # Scraper settings - derive avg scraped content per site
-    max_chars_est = st.session_state.get("max_chars", 50000)
+    max_chars_est = st.session_state.get("max_chars", 10000)
     depth_est = max(1, int(st.session_state.get("depth", 3) or 3))
     retries_est = max(0, int(st.session_state.get("retries", 2) or 2))
-    max_chars_est = max(100, int(max_chars_est or 50000))
+    max_chars_est = max(100, min(int(max_chars_est or 10000), 50000))
     base_chars = 4000 + (depth_est - 1) * 3500
     avg_chars_per_site = min(max_chars_est, max(100, int(base_chars)))
     # Error factor: ~5-12% scrape/AI failures (invalid URLs, timeouts, rate limits)
@@ -3975,13 +3996,13 @@ keywords = st.session_state.get('keywords', [])
 concurrency = st.session_state.get('concurrency', 20)
 retries = st.session_state.get('retries', 2)
 depth = st.session_state.get('depth', 3)
-timeout = st.session_state.get('timeout', 25)
-max_chars = st.session_state.get('max_chars', 50000)
+timeout = st.session_state.get('timeout', 30)
+max_chars = st.session_state.get('max_chars', 10000)
 rows_per_file = st.session_state.get('rows_per_file', 2000)
 user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 run_name = st.session_state.get('run_name', "")
-fast_mode = st.session_state.get('fast_mode', False)
-low_resource = st.session_state.get('low_resource', _is_low_resource_default())
+# Auto-detect: no user checkboxes - app adapts to system and run size
+low_resource = _is_low_resource_default()
 # Use checkbox key as source of truth (widget state); fallback to our sync key
 ai_enabled = st.session_state.get("ai_enabled_checkbox", st.session_state.get('ai_enabled', False))
 if not ai_enabled:
@@ -4100,8 +4121,8 @@ if uploaded_file and test_clicked:
                     def test_log(msg):
                         test_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-                    _test_timeout = timeout * 2 if st.session_state.get('slow_sites', False) else timeout
-                    _test_retries = min(retries + 2, 8) if st.session_state.get('slow_sites', False) else retries
+                    _test_timeout = timeout
+                    _test_retries = min(retries + 2, 8)
                     st.session_state["_test_params"] = {
                         "urls": urls, "test_rows": test_rows, "retries": _test_retries, "timeout": _test_timeout,
                         "depth": depth, "keywords": keywords, "max_chars": max_chars, "user_agent": user_agent,
@@ -4387,18 +4408,20 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         email_copy_model_run = email_copy_model_ui
         email_copy_prompt_run = email_copy_prompt_ui
 
-    # Apply slow_sites: longer timeout + extra retries for unreliable sites
-    effective_timeout = timeout * 2 if st.session_state.get('slow_sites', False) else timeout
-    effective_retries = min(retries + 2, 8) if st.session_state.get('slow_sites', False) else retries
+    # Auto-resilience: extra retries for unreliable sites (no checkbox)
+    effective_timeout = timeout
+    effective_retries = min(retries + 2, 8)
+    fast_mode = _should_use_fast_mode(total)
+    effective_depth = 0 if fast_mode and depth > 1 else depth  # Homepage-only for large runs
 
     def run_async_scraper():
         try:
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
-            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
+            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={effective_depth}, retries={effective_retries}, timeout={effective_timeout}s")
             asyncio.run(
-                run_scraper(urls, concurrency, effective_retries, effective_timeout, depth, keywords, max_chars,
+                run_scraper(urls, concurrency, effective_retries, effective_timeout, effective_depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
                             ai_enabled_for_run, ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run,
                             email_copy_enabled_for_run, email_copy_api_key_run, email_copy_provider_run,
@@ -5286,7 +5309,7 @@ if st.session_state.get('scraping_complete', False):
     csv_files = st.session_state.get('csv_files', [])
     excel_files = st.session_state.get('excel_files', [])
     total = st.session_state.get('total_processed', 0)
-    max_chars = st.session_state.get('max_chars_info', 50000)
+    max_chars = st.session_state.get('max_chars_info', 10000)
     
     st.success(f"✅ Scraping completed! Processed {total:,} website(s).")
     
