@@ -6,12 +6,13 @@ import os
 import time
 import csv
 import zipfile
-from html import unescape
+from html import unescape, escape
 import streamlit as st
 from datetime import datetime
 from io import BytesIO, StringIO, StringIO
 import json
 import random
+import threading
 from collections import deque
 
 # AI imports (optional - only if API keys provided)
@@ -168,13 +169,20 @@ def save_checkpoint(checkpoint_data: dict, checkpoint_path: str) -> None:
 
 def load_checkpoint(checkpoint_path: str) -> dict | None:
     """Load checkpoint from disk. Returns None if file doesn't exist or is invalid."""
-    if not os.path.exists(checkpoint_path):
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
         return None
     try:
         with open(checkpoint_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Convert list back to set
-        data["completed_urls"] = set(data.get("completed_urls", []))
+        if not isinstance(data, dict):
+            return None
+        completed = data.get("completed_urls", [])
+        if isinstance(completed, list):
+            data["completed_urls"] = set(completed)
+        elif isinstance(completed, set):
+            data["completed_urls"] = completed
+        else:
+            data["completed_urls"] = set()
         return data
     except Exception as e:
         print(f"⚠️ Checkpoint load failed: {e}")
@@ -190,6 +198,8 @@ def get_actual_completed_from_files(run_path: str) -> tuple[int, set]:
     """Count actual rows and extract URLs from output_part_*.csv files. Returns (row_count, set of urls)."""
     total_rows = 0
     urls = set()
+    if not run_path or not os.path.isdir(run_path):
+        return 0, urls
     try:
         for f in sorted(os.listdir(run_path)):
             if f.startswith("output_part_") and f.endswith(".csv") and "combined" not in f.lower():
@@ -238,7 +248,42 @@ def reconcile_checkpoint_with_files(output_dir: str) -> int:
 # AI Summary Generation
 # -------------------------
 
-def build_company_summary_prompt(base_prompt: str, lead_data: dict, scraped_content: str) -> str:
+def _normalize_scrape_error_for_display(msg: str) -> str:
+    """Convert emoji-prefixed scrape errors so narrow columns show 'Scrape timeout' not 'Timec'."""
+    if not msg or not isinstance(msg, str):
+        return ""
+    s = str(msg).strip()
+    if not s.startswith("❌"):
+        return s
+    rest = s[1:].lstrip()
+    if "Timeout" in rest or "timeout" in rest:
+        import re
+        m = re.search(r'\((\d+)s?\)', rest)
+        secs = m.group(1) if m else "?"
+        return f"Scrape timeout ({secs}s exceeded)"
+    if ":" in rest:
+        _, detail = rest.split(":", 1)
+        return f"Scrape error: {detail.strip()}"
+    return f"Scrape error: {rest}"
+
+
+def _normalize_ai_error_for_display(msg: str, prefix: str = "Summary") -> str:
+    """Convert emoji-prefixed errors to clearer format for CSV/Excel.
+    Uses 'Summary failed:' prefix so narrow columns never truncate to 'AI Sum'."""
+    if not msg or not isinstance(msg, str):
+        return ""
+    s = str(msg).strip()
+    if not s.startswith("❌"):
+        return s
+    rest = s[1:].lstrip()
+    if ":" in rest:
+        _, detail = rest.split(":", 1)
+        detail = detail.strip()
+        return f"{prefix} failed: {detail}" if detail else f"{prefix} failed"
+    return f"{prefix} failed: {rest}" if rest else f"{prefix} failed"
+
+
+def build_company_summary_prompt(base_prompt: str, lead_data: dict | None, scraped_content: str | None) -> str:
     """
     Build the complete prompt for AI company summary generation.
     
@@ -340,16 +385,27 @@ CRITICAL:
     # Use user prompt if provided, otherwise use default
     prompt_template = base_prompt if base_prompt.strip() else default_base
     
+    lead_data = lead_data or {}
+    # Sanitize values (guard against NaN, None, non-strings)
+    def _safe_val(v):
+        if v is None: return ''
+        try:
+            import math
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return ''
+        except (TypeError, ValueError):
+            pass
+        s = str(v).strip()
+        return '' if s.lower() in ('nan', 'none', '') else s
     # Replace placeholders
-    company_name = lead_data.get('company_name', '')
+    company_name = _safe_val(lead_data.get('company_name', '')) or ''
     if not company_name or company_name == 'Unknown':
         # Extract from URL if not provided
         url_str = lead_data.get('url', '')
         company_name = url_str.replace('https://', '').replace('http://', '').split('/')[0] if url_str else 'Unknown'
     
-    url = lead_data.get('url', 'N/A')
-    industry = lead_data.get('industry', '')
-    other_data = lead_data.get('other', '')
+    url = _safe_val(lead_data.get('url', '')) or 'N/A'
+    industry = _safe_val(lead_data.get('industry', ''))
+    other_data = _safe_val(lead_data.get('other', ''))
     
     # Build lead information section dynamically
     lead_info_parts = [f"- Website URL: {url}", f"- Company Name: {company_name}"]
@@ -362,9 +418,10 @@ CRITICAL:
     lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts)
     
     # Replace placeholders in prompt
-    prompt = prompt_template.replace('{url}', url)
-    prompt = prompt.replace('{company_name}', company_name)
-    prompt = prompt.replace('{scraped_content}', scraped_content[:15000])  # Limit content to avoid token limits
+    scraped_safe = (scraped_content or "")[:15000]  # Limit content, guard None
+    prompt = prompt_template.replace('{url}', str(url or ''))
+    prompt = prompt.replace('{company_name}', str(company_name or ''))
+    prompt = prompt.replace('{scraped_content}', scraped_safe)
     
     # Replace LEAD INFORMATION section if it exists, otherwise add it
     import re
@@ -575,7 +632,7 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
     if not OPENAI_AVAILABLE:
         return "❌ OpenAI library not installed. Install with: pip install openai"
     
-    client = AsyncOpenAI(api_key=api_key)
+    client = AsyncOpenAI(api_key=api_key, timeout=120.0)
     
     for attempt in range(max_retries):
         try:
@@ -1013,11 +1070,15 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
     return cleaned_output
 
 
-def build_email_copy_prompt(prompt_template: str, lead_data: dict, scraped_content: str) -> str:
+def build_email_copy_prompt(prompt_template: str, lead_data: dict | None, scraped_content: str | None) -> str:
     """Build the complete prompt for email copy generation from template."""
-    url = lead_data.get("url", "")
-    company_name = lead_data.get("company_name", url.replace("https://", "").replace("http://", "").split("/")[0])
-    return prompt_template.replace("{url}", url).replace("{company_name}", company_name).replace("{scraped_content}", scraped_content)
+    lead_data = lead_data or {}
+    url = str(lead_data.get("url", "") or "")
+    company_name = str(lead_data.get("company_name", "") or "")
+    if not company_name and url:
+        company_name = url.replace("https://", "").replace("http://", "").split("/")[0]
+    scraped_safe = str(scraped_content or "")
+    return prompt_template.replace("{url}", url).replace("{company_name}", company_name).replace("{scraped_content}", scraped_safe)
 
 
 async def generate_email_copy(
@@ -1397,9 +1458,10 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 headers = get_realistic_headers(session.headers.get("User-Agent"), target_url=url_to_try)
             
             for attempt in range(retries + 1):
-                # Increase timeout for retries (some sites are slow)
-                retry_timeout = timeout + (attempt * 5)
-                req_timeout = aiohttp.ClientTimeout(total=retry_timeout, connect=10, sock_read=min(retry_timeout, 45))
+                # Increase timeout for retries (some sites are slow) - more generous on later attempts
+                retry_timeout = timeout + (attempt * 10)
+                sock_read_cap = min(retry_timeout, 90)  # Allow up to 90s for slow sites to send data
+                req_timeout = aiohttp.ClientTimeout(total=retry_timeout, connect=15, sock_read=sock_read_cap)
                 
                 try:
                     if attempt > 0:
@@ -1534,6 +1596,8 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
 
 
 async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int, fast_mode: bool = False):
+    depth = max(1, int(depth) if depth is not None else 1)
+    max_chars = max(100, int(max_chars) if max_chars is not None else 50000)
     visited, results, errors = set(), [], []
     total_chars = 0
     separator = "\n\n" + "─" * 80 + "\n\n"  # Better visual separator between pages
@@ -1799,7 +1863,11 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             # Get lead data from map if available
             lead_data = None
             if lead_data_map and url_index is not None and url_index in lead_data_map:
-                lead_data = lead_data_map[url_index].copy()
+                try:
+                    ld = lead_data_map[url_index]
+                    lead_data = dict(ld) if ld is not None and hasattr(ld, 'keys') else {}
+                except (TypeError, AttributeError, ValueError):
+                    lead_data = {}
                 lead_data['url'] = original_url  # Ensure URL is set
             else:
                 # Fallback: extract company name from URL
@@ -1824,8 +1892,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 email_copy = ""
                 _scrape_status("error", scraped_text)
             else:
-                # Global timeout per URL - shorter in fast mode
-                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), 90 if fast_mode else 180)
+                # Global timeout per URL - shorter in fast mode, generous for slow sites
+                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), 90 if fast_mode else 300)
                 
                 try:
                     # Wrap scraping in a timeout to prevent infinite hangs
@@ -1910,8 +1978,14 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         )
                     except asyncio.TimeoutError:
                         ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
+                        _scrape_status("error", "Company summary: timeout (2 min)")
                     except Exception as e:
                         ai_summary = f"❌ AI Summary error: {str(e)}"
+                        err_short = str(e)[:80] if e else "unknown"
+                        _scrape_status("error", f"Company summary failed: {err_short}")
+                    else:
+                        if ai_summary and ai_summary.startswith("❌"):
+                            _scrape_status("error", "Company summary failed")
                 else:
                     ai_summary = ""
                 # Generate email copy if enabled (runs independently)
@@ -1934,8 +2008,14 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         )
                     except asyncio.TimeoutError:
                         email_copy = "❌ Email copy timeout: Generation exceeded 2 minutes"
+                        _scrape_status("error", "Email copy: timeout (2 min)")
                     except Exception as e:
                         email_copy = f"❌ Email copy error: {str(e)}"
+                        err_short = str(e)[:80] if e else "unknown"
+                        _scrape_status("error", f"Email copy failed: {err_short}")
+                    else:
+                        if email_copy and email_copy.startswith("❌"):
+                            _scrape_status("error", "Email copy failed")
                 else:
                     email_copy = ""
             
@@ -1981,11 +2061,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 
                 return field_str
             
-            # Clean all fields perfectly
+            # Clean all fields perfectly; normalize AI/email errors for clearer CSV display
+            ai_for_csv = _normalize_ai_error_for_display(ai_summary, "Summary")
+            email_for_csv = _normalize_ai_error_for_display(email_copy, "Email") if email_copy else ""
             cleaned_url = clean_csv_field(original_url)
             cleaned_scraped_text = clean_csv_field(scraped_text)
-            cleaned_ai_summary = clean_csv_field(ai_summary)
-            cleaned_email_copy = clean_csv_field(email_copy) if email_copy_enabled else ""
+            cleaned_ai_summary = clean_csv_field(ai_for_csv)
+            cleaned_email_copy = clean_csv_field(email_for_csv) if email_copy_enabled else ""
             # Output: 4 columns when email copy enabled, else 3
             if email_copy_enabled:
                 out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy)
@@ -2128,6 +2210,20 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     normalized_rows.append(tuple(normalized_row[:n_cols]))
                 
                 df = pd.DataFrame(normalized_rows, columns=cols)
+                
+                # Normalize scrape/AI/email error strings so narrow columns show clear messages
+                if "ScrapedText" in df.columns:
+                    df["ScrapedText"] = df["ScrapedText"].apply(
+                        lambda x: _normalize_scrape_error_for_display(str(x) if pd.notna(x) else "")
+                    )
+                if "CompanySummary" in df.columns:
+                    df["CompanySummary"] = df["CompanySummary"].apply(
+                        lambda x: _normalize_ai_error_for_display(str(x) if pd.notna(x) else "", "Summary")
+                    )
+                if include_email_copy and "EmailCopy" in df.columns:
+                    df["EmailCopy"] = df["EmailCopy"].apply(
+                        lambda x: _normalize_ai_error_for_display(str(x) if pd.notna(x) else "", "Email")
+                    )
                 
                 # PERFECT CSV CLEANING - Clean all DataFrame columns before writing
                 def clean_dataframe_for_csv(df):
@@ -2623,6 +2719,10 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             except Exception:
                 pass
 
+    if not urls:
+        emit("❌ No URLs to process. Exiting.")
+        return
+
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_path = get_checkpoint_path(output_dir)
     checkpoint_data = load_checkpoint(checkpoint_path)
@@ -2722,7 +2822,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     
     recovery_wait_s = 300  # 5 minutes: wait for slow network/system before giving up
     recovery_chunk_s = 30  # Check progress every 30s during recovery
-    
+    stall_complete_event = asyncio.Event()  # Set when stall confirmed and we should force shutdown
+    near_completion_recovery = 90  # When 99%+ done and stuck, use shorter recovery
+
     async def force_completion_on_stall():
         """Detect stall and PAUSE for recovery (slow network/disconnect) before draining."""
         stall_threshold = 240 if low_resource else 300  # 4–5 min before considering stall
@@ -2733,11 +2835,19 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             remaining = total_overall - last_count
             if remaining <= 0:
                 break
-            if elapsed > stall_threshold:
-                emit(f"⏸️ Pausing: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Waiting up to {recovery_wait_s // 60} min for recovery (slow network/system)...")
+            # Near completion (1–5 URLs left): use shorter threshold so we don't wait hours for 1 stuck worker
+            pct_done = last_count / max(total_overall, 1)
+            use_shorter = remaining <= 5 and pct_done >= 0.99
+            effective_threshold = min(stall_threshold, near_completion_recovery) if use_shorter else stall_threshold
+            if use_shorter:
+                effective_recovery = 60  # 1 min for near-completion stall
+            else:
+                effective_recovery = recovery_wait_s
+            if elapsed > effective_threshold:
+                emit(f"⏸️ Pausing: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Waiting up to {effective_recovery // 60} min for recovery...")
                 waited = 0
                 recovered = False
-                while waited < recovery_wait_s:
+                while waited < effective_recovery:
                     await asyncio.sleep(recovery_chunk_s)
                     waited += recovery_chunk_s
                     new_count = progress_state["last_count"]
@@ -2745,9 +2855,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                         recovered = True
                         emit(f"✅ Recovery: progress resumed ({new_count - last_count} completed). Continuing.")
                         break
-                    emit(f"⏳ Still waiting... {waited}s / {recovery_wait_s}s (no progress yet)")
+                    emit(f"⏳ Still waiting... {waited}s / {effective_recovery}s (no progress yet)")
                 if not recovered:
-                    emit(f"⚠️ No recovery after {recovery_wait_s}s. Marking remaining URLs as stalled.")
+                    emit(f"⚠️ No recovery. Stopping stuck workers (1 URL may be missing; will retry on resume).")
                     drained = 0
                     while drained < remaining + 100:
                         try:
@@ -2758,7 +2868,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                             url_queue.task_done()
                             continue
                         url, idx = (item[0], item[1]) if isinstance(item, tuple) else (item, None)
-                        err_result = (url, "❌ Stall detected: processing stopped after recovery wait", "")
+                        err_result = (url, "❌ Stall: worker stopped after recovery wait", "", "") if email_copy_enabled else (url, "❌ Stall: worker stopped after recovery wait", "")
                         for _ in range(20):
                             try:
                                 result_queue.put_nowait(err_result)
@@ -2769,6 +2879,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                             emit("⚠️ Result queue full during stall drain")
                         url_queue.task_done()
                         drained += 1
+                    stall_complete_event.set()
                 break
     
     stall_monitor = asyncio.create_task(force_completion_on_stall())
@@ -2782,14 +2893,32 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     heartbeat_task = asyncio.create_task(heartbeat())
     
     try:
+        join_task = asyncio.create_task(url_queue.join())
+        stall_wait_task = asyncio.create_task(stall_complete_event.wait())
+        done, pending = await asyncio.wait(
+            [join_task, stall_wait_task],
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=max_queue_time
+        )
+        stall_wait_task.cancel()
         try:
-            await asyncio.wait_for(url_queue.join(), timeout=max_queue_time)
-        except asyncio.TimeoutError:
-            emit(f"⏸️ Queue join timed out. Pausing 3 minutes for possible recovery (slow network/system)...")
-            await asyncio.sleep(180)
-            emit(f"⚠️ Proceeding to drain remaining URLs...")
+            await stall_wait_task
+        except asyncio.CancelledError:
+            pass
+        join_completed = join_task.done() and not join_task.cancelled() and join_task.exception() is None
+        stall_triggered = stall_complete_event.is_set()
+        if not join_completed:
+            join_task.cancel()
+            try:
+                await join_task
+            except asyncio.CancelledError:
+                pass
+            if not stall_triggered:
+                emit(f"⏸️ Queue join timed out. Pausing 3 min for recovery...")
+                await asyncio.sleep(180)
+                emit(f"⚠️ Draining remaining URLs...")
             drained = 0
-            while drained < total_this_run:
+            while drained < total_this_run + 50:
                 try:
                     item = url_queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -2798,15 +2927,16 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                     url_queue.task_done()
                     continue
                 url = item[0] if isinstance(item, tuple) else item
-                err_result = (url, f"❌ Timeout: exceeded {max_queue_time}s limit", "")
+                err_msg = "❌ Stall: worker stopped" if stall_triggered else f"❌ Timeout: exceeded {max_queue_time}s"
+                err_result = (url, err_msg, "", "") if email_copy_enabled else (url, err_msg, "")
                 for _ in range(30):
                     try:
                         result_queue.put_nowait(err_result)
                         break
                     except asyncio.QueueFull:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.3)
                 else:
-                    emit("⚠️ Result queue full during timeout drain")
+                    emit("⚠️ Result queue full during drain")
                 url_queue.task_done()
                 drained += 1
 
@@ -3253,13 +3383,17 @@ if uploaded_file is not None:
             if other_col != "None":
                 lead_data_columns['other'] = other_col
         
-        # Store in session state for use during scraping
+        # Store in session state for use during scraping and token estimator
+        url_col_idx = list(df_preview.columns).index(url_column) if csv_has_headers == "Yes" else int(url_column.replace("Column ", "")) - 1
+        url_count = sum(1 for u in df_preview.iloc[:, url_col_idx].fillna("").astype(str) if str(u).strip())
         st.session_state['csv_config'] = {
             'has_headers': csv_has_headers == "Yes",
             'url_column': url_column,
             'lead_data_columns': lead_data_columns,
-            'df_preview': df_preview
+            'df_preview': df_preview,
+            'url_count': url_count
         }
+        st.session_state['_csv_url_count'] = url_count
         
     except Exception as e:
         st.error(f"❌ Error reading CSV: {str(e)}")
@@ -3348,10 +3482,17 @@ with col2:
     st.markdown("#### Advanced Settings")
     
     # Timeout
+    slow_sites = st.checkbox(
+        "Slower/unreliable sites (use longer timeouts)",
+        value=st.session_state.get('slow_sites', False),
+        help="Enable for sites that often timeout. Doubles wait time and retries for better success.",
+        key="slow_sites"
+    )
+    timeout_default = 30 if slow_sites else 25
     timeout = st.number_input(
         "Wait time per site (seconds)", 
-        2, 60, st.session_state.get('timeout', 15),
-        help="How long to wait for each website before giving up. 15 seconds is usually fine.",
+        5, 120, st.session_state.get('timeout', timeout_default),
+        help="How long to wait for each website before giving up. Use 30–60s for slow sites.",
         key="timeout"
     )
     
@@ -3716,30 +3857,37 @@ else:
     email_copy_model = None
     email_copy_prompt = None
 
-# Token usage estimator
+# Token usage estimator (self-calculating from scraper settings + prompts)
 st.markdown("---")
 with st.expander("💰 Token usage estimator", expanded=False):
-    st.caption("Estimate token usage and cost based on your prompts and scraping settings. Uses averages.")
     MODEL_PRICING = {
-        "gpt-4o-mini": (0.15, 0.60),
-        "gpt-4o": (2.50, 10.00),
-        "gpt-4-turbo": (10.00, 30.00),
-        "gpt-3.5-turbo": (0.50, 1.50),
-        "gemini-1.5-flash": (0.075, 0.30),
-        "gemini-1.5-pro": (1.25, 5.00),
-        "gemini-pro": (0.50, 1.50),
+        "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00), "gpt-4-turbo": (10.00, 30.00),
+        "gpt-3.5-turbo": (0.50, 1.50), "gemini-1.5-flash": (0.075, 0.30),
+        "gemini-1.5-pro": (1.25, 5.00), "gemini-pro": (0.50, 1.50),
     }
     def get_model_pricing(model):
         for k, v in MODEL_PRICING.items():
             if k in (model or "").lower():
                 return v
-        return (1.0, 3.0)  # default $/1M tokens
+        return (1.0, 3.0)
     def chars_to_tokens(chars):
         return max(0, int(chars / 4))
-    est_urls = st.number_input("Number of URLs to estimate", min_value=1, max_value=100000, value=100, key="est_urls")
+    # URLs: use CSV count if available, else number input
+    num_urls_csv = st.session_state.get("_csv_url_count") or st.session_state.get("csv_config", {}).get("url_count", 0) or 0
+    default_urls = num_urls_csv if num_urls_csv > 0 else 100
+    est_urls = st.number_input("Number of URLs", min_value=1, max_value=100000, value=default_urls, key="est_urls", help="Auto-filled from CSV if uploaded")
+    # Scraper settings - derive avg scraped content per site
     max_chars_est = st.session_state.get("max_chars", 50000)
-    depth_est = st.session_state.get("depth", 3)
-    avg_chars_per_site = min(max_chars_est, int(8000 * (1 + (depth_est - 1) * 0.5)))
+    depth_est = max(1, int(st.session_state.get("depth", 3) or 3))
+    retries_est = max(0, int(st.session_state.get("retries", 2) or 2))
+    max_chars_est = max(100, int(max_chars_est or 50000))
+    base_chars = 4000 + (depth_est - 1) * 3500
+    avg_chars_per_site = min(max_chars_est, max(100, int(base_chars)))
+    # Error factor: ~5-12% scrape/AI failures (invalid URLs, timeouts, rate limits)
+    success_rate = 0.90 - (retries_est * 0.01)
+    effective_leads = max(1, int(est_urls * success_rate))
+    # Per-call overhead: system msg + template structure
+    base_overhead = 150
     ai_prompt_est = st.session_state.get("ai_prompt", "") or ""
     email_prompt_est = st.session_state.get("email_copy_prompt", "") or ""
     ai_enabled_est = st.session_state.get("ai_enabled_checkbox", False)
@@ -3748,46 +3896,58 @@ with st.expander("💰 Token usage estimator", expanded=False):
     email_model_est = st.session_state.get("email_copy_model", "gpt-4o-mini")
     total_input = 0
     total_output = 0
-    cost_summary = []
     costs = []
+    per_lead_input = 0
+    per_lead_output = 0
     if ai_enabled_est:
-        prompt_tokens = chars_to_tokens(len(ai_prompt_est) + 500)
+        prompt_len = len(ai_prompt_est) + 400  # template + url/company placeholders
+        prompt_tokens = chars_to_tokens(prompt_len) + base_overhead
         content_tokens = chars_to_tokens(avg_chars_per_site)
-        input_per_url = prompt_tokens + content_tokens
-        output_per_url = 2500
-        ai_input = input_per_url * est_urls
-        ai_output = output_per_url * est_urls
-        total_input += ai_input
-        total_output += ai_output
+        inp_per = prompt_tokens + content_tokens
+        out_per = chars_to_tokens(3500)  # ~SUMMARY + ~15 facts + ~8 hypotheses
+        total_input += inp_per * effective_leads
+        total_output += out_per * effective_leads
+        per_lead_input += inp_per
+        per_lead_output += out_per
         in_p, out_p = get_model_pricing(ai_model_est)
-        cost = (ai_input / 1e6 * in_p) + (ai_output / 1e6 * out_p)
-        costs.append(cost)
-        cost_summary.append(f"Company summary ({ai_model_est}): ~${cost:.3f}")
+        cost = (inp_per * effective_leads / 1e6 * in_p) + (out_per * effective_leads / 1e6 * out_p)
+        costs.append(("Company summary", ai_model_est, cost))
     if email_enabled_est:
-        prompt_tokens = chars_to_tokens(len(email_prompt_est) + 300)
+        prompt_len = len(email_prompt_est) + 250
+        prompt_tokens = chars_to_tokens(prompt_len) + base_overhead
         content_tokens = chars_to_tokens(avg_chars_per_site)
-        input_per_url = prompt_tokens + content_tokens
-        output_per_url = 350
-        ec_input = input_per_url * est_urls
-        ec_output = output_per_url * est_urls
-        total_input += ec_input
-        total_output += ec_output
+        inp_per = prompt_tokens + content_tokens
+        out_per = chars_to_tokens(450)  # ~150 words
+        total_input += inp_per * effective_leads
+        total_output += out_per * effective_leads
+        per_lead_input += inp_per
+        per_lead_output += out_per
         in_p, out_p = get_model_pricing(email_model_est)
-        cost = (ec_input / 1e6 * in_p) + (ec_output / 1e6 * out_p)
-        costs.append(cost)
-        cost_summary.append(f"Email copy ({email_model_est}): ~${cost:.3f}")
+        cost = (inp_per * effective_leads / 1e6 * in_p) + (out_per * effective_leads / 1e6 * out_p)
+        costs.append(("Email copy", email_model_est, cost))
     if total_input == 0 and total_output == 0:
         st.info("Enable Step 3 (Company Summary) or Step 4 (Email Copy) to see estimates.")
     else:
-        st.metric("Estimated input tokens", f"{total_input:,}")
-        st.metric("Estimated output tokens", f"{total_output:,}")
-        st.metric("Total tokens", f"{total_input + total_output:,}")
-        st.markdown("**Estimated cost (approximate):**")
-        for line in cost_summary:
-            st.markdown(f"- {line}")
+        st.markdown("**Totals**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Input tokens (total)", f"{total_input:,}")
+        with c2:
+            st.metric("Output tokens (total)", f"{total_output:,}")
+        with c3:
+            st.metric("Total tokens", f"{total_input + total_output:,}")
+        st.markdown(f"**Per lead** (effective leads: ~{effective_leads:,}, ~{success_rate * 100:.0f}% success rate)")
+        c4, c5 = st.columns(2)
+        with c4:
+            st.metric("Input tokens per lead", f"{per_lead_input:,}")
+        with c5:
+            st.metric("Output tokens per lead", f"{per_lead_output:,}")
+        st.markdown("**Estimated cost**")
+        for name, model, c in costs:
+            st.markdown(f"- {name} ({model}): ~${c:.3f}")
         if costs:
-            st.markdown(f"- **Total: ~${sum(costs):.3f}**")
-        st.caption("Prices in $ per 1M tokens (input/output). Actual usage may vary.")
+            st.markdown(f"- **Total: ~${sum(x[2] for x in costs):.3f}**")
+        st.caption("Based on max_chars={:,}, depth={}, retries={}. ~{:.0f}% of URLs assumed to succeed.".format(max_chars_est, depth_est, retries_est, success_rate * 100))
 
 # Test run option
 st.markdown("---")
@@ -3815,7 +3975,7 @@ keywords = st.session_state.get('keywords', [])
 concurrency = st.session_state.get('concurrency', 20)
 retries = st.session_state.get('retries', 2)
 depth = st.session_state.get('depth', 3)
-timeout = st.session_state.get('timeout', 15)
+timeout = st.session_state.get('timeout', 25)
 max_chars = st.session_state.get('max_chars', 50000)
 rows_per_file = st.session_state.get('rows_per_file', 2000)
 user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
@@ -3849,102 +4009,160 @@ email_copy_model_ui = st.session_state.get('email_copy_model', None) if email_co
 email_copy_prompt_ui = st.session_state.get('email_copy_prompt', None) if email_copy_enabled_ui else None
 
 # -------- TEST RUN --------
+def _run_test_in_thread():
+    """Run test in a background thread to avoid blocking the UI."""
+    import traceback
+    params = st.session_state.get("_test_params", {})
+    try:
+        if os.name == "nt":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        results = asyncio.run(run_test_preview(
+            params["urls"], params["test_rows"], params["retries"], params["timeout"],
+            params["depth"], params["keywords"], params["max_chars"], params["user_agent"],
+            params["ai_enabled"], params["ai_api_key"], params["ai_provider"],
+            params["ai_model"], params["ai_prompt"],
+            params["email_copy_enabled"], params["email_copy_api_key"], params["email_copy_provider"],
+            params["email_copy_model"], params["email_copy_prompt"],
+            params["lead_data_map"], log_callback=params.get("log_callback")))
+        st.session_state["_test_results"] = results
+        st.session_state["_test_logs"] = params.get("_logs", [])
+    except Exception as e:
+        st.session_state["_test_results"] = []
+        st.session_state["_test_error"] = str(e)
+        st.session_state["_test_tb"] = traceback.format_exc()
+        st.session_state["_test_logs"] = params.get("_logs", []) if params else []
+    finally:
+        st.session_state["_test_running"] = False
+
 if uploaded_file and test_clicked:
-    csv_config = st.session_state.get('csv_config', {})
+    csv_config = st.session_state.get('csv_config', {}) or {}
     if not csv_config:
         st.error("❌ Please configure your CSV above (select URL column) first.")
     else:
         uploaded_file.seek(0)
         has_headers = csv_config.get('has_headers', True)
         url_col = csv_config.get('url_column')
-        lead_cols = csv_config.get('lead_data_columns', {})
-        if has_headers:
-            df_in = pd.read_csv(uploaded_file)
+        lead_cols = csv_config.get('lead_data_columns', {}) or {}
+        if not url_col:
+            st.error("❌ URL column not configured. Select URL column in Step 1.")
         else:
-            df_in = pd.read_csv(uploaded_file, header=None)
-        url_col_idx = list(df_in.columns).index(url_col) if has_headers else int(url_col.replace("Column ", "")) - 1
-        urls = df_in.iloc[:, url_col_idx].fillna("").astype(str).tolist()
-        urls = [u for u in urls if u.strip()]
-        lead_data_map = {}
-        for idx, url in enumerate(urls):
-            lead_data = {'url': url, 'company_name': url.replace('https://', '').replace('http://', '').split('/')[0]}
-            if 'company_name' in lead_cols:
-                cn = lead_cols['company_name']
-                ci = list(df_in.columns).index(cn) if has_headers else int(cn.replace("Column ", "")) - 1
-                lead_data['company_name'] = str(df_in.iloc[idx, ci]) if idx < len(df_in) and pd.notna(df_in.iloc[idx, ci]) else ""
-            if 'industry' in lead_cols:
-                cn = lead_cols['industry']
-                ci = list(df_in.columns).index(cn) if has_headers else int(cn.replace("Column ", "")) - 1
-                lead_data['industry'] = str(df_in.iloc[idx, ci]) if idx < len(df_in) and pd.notna(df_in.iloc[idx, ci]) else ""
-            if 'other' in lead_cols:
-                cn = lead_cols['other']
-                ci = list(df_in.columns).index(cn) if has_headers else int(cn.replace("Column ", "")) - 1
-                lead_data['other'] = str(df_in.iloc[idx, ci]) if idx < len(df_in) and pd.notna(df_in.iloc[idx, ci]) else ""
-            lead_data_map[idx] = lead_data
-
-        ai_enabled_test = st.session_state.get("ai_enabled_checkbox", False)
-        ai_provider_test = st.session_state.get('ai_provider', None) if ai_enabled_test else None
-        ai_api_key_test = None
-        if ai_enabled_test and ai_provider_test:
-            api_key_key = f"{ai_provider_test.lower()}_api_key"
-            ai_api_key_test = st.session_state.get(api_key_key) or st.session_state.get('ai_api_key')
-        ai_model_test = st.session_state.get('ai_model') if ai_enabled_test else None
-        ai_prompt_test = st.session_state.get('ai_prompt') or ""
-        email_copy_enabled_test = st.session_state.get("email_copy_enabled_checkbox", False)
-        email_copy_provider_test = st.session_state.get('email_copy_provider', None) if email_copy_enabled_test else None
-        email_copy_api_key_test = None
-        if email_copy_enabled_test and email_copy_provider_test:
-            ec_key = f"{email_copy_provider_test.lower()}_api_key"
-            email_copy_api_key_test = st.session_state.get(ec_key) or st.session_state.get('email_copy_api_key')
-        email_copy_model_test = st.session_state.get('email_copy_model') if email_copy_enabled_test else None
-        email_copy_prompt_test = st.session_state.get('email_copy_prompt') or ""
-
-        test_logs = []
-        def test_log(msg):
-            test_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-
-        with st.spinner("Running test..."):
             try:
-                if os.name == "nt":
-                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-                results = asyncio.run(run_test_preview(
-                    urls, test_rows, retries, timeout, depth, keywords, max_chars,
-                    user_agent, ai_enabled_test, ai_api_key_test, ai_provider_test, ai_model_test, ai_prompt_test,
-                    email_copy_enabled_test, email_copy_api_key_test, email_copy_provider_test,
-                    email_copy_model_test, email_copy_prompt_test,
-                    lead_data_map, log_callback=test_log))
-            except Exception as e:
-                st.error(f"❌ Test failed: {e}")
-                import traceback
-                st.code(traceback.format_exc(), language=None)
-                results = []
-
-        st.markdown("### 🧪 Test results")
-        if test_logs:
-            with st.expander("Logs", expanded=False):
-                st.code("\n".join(test_logs), language=None)
-        for i, row in enumerate(results):
-            url = row[0]
-            scraped_text = row[1] if len(row) >= 2 else ""
-            ai_summary = row[2] if len(row) >= 3 else ""
-            email_copy_val = row[3] if len(row) >= 4 else ""
-            with st.expander(f"**{i+1}. {url[:60]}{'…' if len(url) > 60 else ''}**", expanded=True):
-                st.markdown("#### Scraped content")
-                scraped_display = scraped_text[:8000] + ("…" if len(scraped_text) > 8000 else "") if scraped_text else "(empty)"
-                st.text_area("", value=scraped_display, height=200, key=f"test_scraped_{i}", disabled=True, label_visibility="collapsed")
-                if ai_summary:
-                    st.markdown("#### Company summary")
-                    formatted = ai_summary.replace("===SUMMARY===", "\n### Summary\n").replace("===FACTS===", "\n### Facts\n").replace("===HYPOTHESES===", "\n### Hypotheses\n")
-                    st.markdown(formatted)
+                if has_headers:
+                    df_in = pd.read_csv(uploaded_file)
                 else:
-                    st.caption("_No company summary (Step 3 disabled or error)_")
-                if email_copy_val:
-                    st.markdown("#### Email copy")
-                    st.markdown(email_copy_val)
-                elif email_copy_enabled_test:
-                    st.caption("_No email copy (error or insufficient content)_")
-        if not results:
-            st.info("No results. Check logs above.")
+                    df_in = pd.read_csv(uploaded_file, header=None)
+            except Exception as e:
+                st.error(f"❌ Failed to read CSV: {e}")
+                df_in = pd.DataFrame()
+            if df_in.empty:
+                st.error("❌ CSV is empty or unreadable.")
+            else:
+                try:
+                    url_col_idx = list(df_in.columns).index(url_col) if has_headers else int(str(url_col).replace("Column ", "")) - 1
+                except (ValueError, TypeError):
+                    st.error("❌ Invalid URL column. Reconfigure CSV in Step 1.")
+                    url_col_idx = 0
+                url_series = df_in.iloc[:, url_col_idx].fillna("").astype(str)
+                url_list_with_idx = [(u.strip(), i) for i, u in enumerate(url_series) if u and str(u).strip()]
+                urls = [u for u, _ in url_list_with_idx]
+                lead_data_map = {}
+                for idx, (url, orig_row) in enumerate(url_list_with_idx):
+                    lead_data = {'url': url, 'company_name': url.replace('https://', '').replace('http://', '').split('/')[0]}
+                    if 'company_name' in lead_cols:
+                        cn = lead_cols['company_name']
+                        ci = list(df_in.columns).index(cn) if has_headers else int(str(cn).replace("Column ", "")) - 1
+                        lead_data['company_name'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else lead_data['company_name']
+                    if 'industry' in lead_cols:
+                        cn = lead_cols['industry']
+                        ci = list(df_in.columns).index(cn) if has_headers else int(str(cn).replace("Column ", "")) - 1
+                        lead_data['industry'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
+                    if 'other' in lead_cols:
+                        cn = lead_cols['other']
+                        ci = list(df_in.columns).index(cn) if has_headers else int(str(cn).replace("Column ", "")) - 1
+                        lead_data['other'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
+                    lead_data_map[idx] = lead_data
+
+                if not urls:
+                    st.error("❌ No valid URLs found in CSV. Check your URL column.")
+                else:
+                    ai_enabled_test = st.session_state.get("ai_enabled_checkbox", False)
+                    ai_provider_test = st.session_state.get('ai_provider', None) if ai_enabled_test else None
+                    ai_api_key_test = st.session_state.get(f"{ai_provider_test.lower()}_api_key") or st.session_state.get('ai_api_key') if (ai_enabled_test and ai_provider_test) else None
+                    ai_model_test = st.session_state.get('ai_model') if ai_enabled_test else None
+                    ai_prompt_test = st.session_state.get('ai_prompt') or ""
+                    email_copy_enabled_test = st.session_state.get("email_copy_enabled_checkbox", False)
+                    email_copy_provider_test = st.session_state.get('email_copy_provider', None) if email_copy_enabled_test else None
+                    email_copy_api_key_test = st.session_state.get(f"{email_copy_provider_test.lower()}_api_key") or st.session_state.get('email_copy_api_key') if (email_copy_enabled_test and email_copy_provider_test) else None
+                    email_copy_model_test = st.session_state.get('email_copy_model') if email_copy_enabled_test else None
+                    email_copy_prompt_test = st.session_state.get('email_copy_prompt') or ""
+
+                    test_logs = []
+                    def test_log(msg):
+                        test_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+                    _test_timeout = timeout * 2 if st.session_state.get('slow_sites', False) else timeout
+                    _test_retries = min(retries + 2, 8) if st.session_state.get('slow_sites', False) else retries
+                    st.session_state["_test_params"] = {
+                        "urls": urls, "test_rows": test_rows, "retries": _test_retries, "timeout": _test_timeout,
+                        "depth": depth, "keywords": keywords, "max_chars": max_chars, "user_agent": user_agent,
+                        "ai_enabled": ai_enabled_test, "ai_api_key": ai_api_key_test, "ai_provider": ai_provider_test,
+                        "ai_model": ai_model_test, "ai_prompt": ai_prompt_test,
+                        "email_copy_enabled": email_copy_enabled_test, "email_copy_api_key": email_copy_api_key_test,
+                        "email_copy_provider": email_copy_provider_test, "email_copy_model": email_copy_model_test,
+                        "email_copy_prompt": email_copy_prompt_test,
+                        "lead_data_map": lead_data_map, "log_callback": test_log, "_logs": test_logs
+                    }
+                    st.session_state["_test_running"] = True
+                    st.session_state["_test_error"] = None
+                    st.session_state["_test_results"] = None  # Clear previous
+                    t = threading.Thread(target=_run_test_in_thread, daemon=True)
+                    t.start()
+                    st.rerun()
+
+if st.session_state.get("_test_running"):
+    with st.spinner("Running test... (scraping + AI may take 1–3 min, please wait)"):
+        time.sleep(1)
+        st.rerun()
+
+if st.session_state.get("_test_results") is not None and not st.session_state.get("_test_running"):
+    results = st.session_state["_test_results"]
+    test_logs = st.session_state.get("_test_logs", [])
+    test_error = st.session_state.pop("_test_error", None)
+    test_tb = st.session_state.pop("_test_tb", None)
+    if test_error:
+        st.error(f"❌ Test failed: {test_error}")
+        if test_tb:
+            st.code(test_tb, language=None)
+    st.session_state["_test_results"] = None
+
+    st.markdown("### 🧪 Test results")
+    if test_logs:
+        with st.expander("Logs", expanded=False):
+            st.code("\n".join(test_logs), language=None)
+    email_copy_enabled_test = st.session_state.get("email_copy_enabled_checkbox", False)
+    for i, row in enumerate(results):
+        url = row[0]
+        scraped_text = row[1] if len(row) >= 2 else ""
+        ai_summary = row[2] if len(row) >= 3 else ""
+        email_copy_val = row[3] if len(row) >= 4 else ""
+        with st.expander(f"**{i+1}. {url[:60]}{'…' if len(url) > 60 else ''}**", expanded=True):
+            st.markdown("#### Scraped content")
+            scraped_display = scraped_text[:8000] + ("…" if len(scraped_text) > 8000 else "") if scraped_text else "(empty)"
+            st.text_area("", value=scraped_display, height=200, key=f"test_scraped_{i}", disabled=True, label_visibility="collapsed")
+            if ai_summary:
+                st.markdown("#### Company summary")
+                formatted = ai_summary.replace("===SUMMARY===", "\n### Summary\n").replace("===FACTS===", "\n### Facts\n").replace("===HYPOTHESES===", "\n### Hypotheses\n")
+                st.markdown(formatted)
+            else:
+                st.caption("_No company summary (Step 3 disabled or error)_")
+            if email_copy_val:
+                st.markdown("#### Email copy")
+                st.markdown(email_copy_val)
+            elif email_copy_enabled_test:
+                st.caption("_No email copy (error or insufficient content)_")
+    if not results:
+        st.info("No results. Check logs above.")
+    # Clear results when user starts a new test (handled by test_clicked block)
 
 # -------- SCRAPE BUTTON --------
 if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
@@ -3958,69 +4176,63 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     # Read CSV based on configuration
     has_headers = csv_config.get('has_headers', True)
     url_col = csv_config.get('url_column')
-    lead_cols = csv_config.get('lead_data_columns', {})
-    
+    lead_cols = csv_config.get('lead_data_columns', {}) or {}
+    if url_col is None or (isinstance(url_col, str) and not url_col.strip()):
+        st.error("❌ URL column not configured. Please select a URL column in Step 1.")
+        st.stop()
     # Reset file pointer
     uploaded_file.seek(0)
-    
-    if has_headers:
-        df_in = pd.read_csv(uploaded_file)
-    else:
-        df_in = pd.read_csv(uploaded_file, header=None)
-    
+    try:
+        if has_headers:
+            df_in = pd.read_csv(uploaded_file)
+        else:
+            df_in = pd.read_csv(uploaded_file, header=None)
+    except Exception as e:
+        st.error(f"❌ Failed to read CSV: {e}")
+        st.stop()
+    if df_in.empty or len(df_in) == 0:
+        st.error("❌ CSV file is empty.")
+        st.stop()
     # Get URL column index
-    if has_headers:
-        url_col_idx = list(df_in.columns).index(url_col)
-    else:
-        url_col_idx = int(url_col.replace("Column ", "")) - 1
+    try:
+        if has_headers:
+            if url_col not in df_in.columns:
+                st.error(f"❌ URL column '{url_col}' not found in CSV. Columns: {list(df_in.columns)}")
+                st.stop()
+            url_col_idx = list(df_in.columns).index(url_col)
+        else:
+            url_col_idx = int(str(url_col).replace("Column ", "").strip()) - 1
+            if url_col_idx < 0 or url_col_idx >= len(df_in.columns):
+                st.error(f"❌ Invalid column index. Select Column 1 to {len(df_in.columns)}.")
+                st.stop()
+    except (ValueError, TypeError) as e:
+        st.error(f"❌ Invalid URL column selection: {e}")
+        st.stop()
     
-    # Extract URLs
-    urls = df_in.iloc[:, url_col_idx].fillna("").astype(str).tolist()
-    # Filter out empty URLs
-    urls = [url for url in urls if url.strip()]
+    # Extract URLs with original row indices (for lead columns)
+    url_series = df_in.iloc[:, url_col_idx].fillna("").astype(str)
+    url_list_with_idx = [(u.strip(), i) for i, u in enumerate(url_series) if u and str(u).strip()]
+    urls = [u for u, _ in url_list_with_idx]
     total = len(urls)
-    
-    # Prepare lead data mapping (row index -> lead data dict)
+    if total == 0:
+        st.error("❌ No valid URLs found in the selected column. Check your CSV and URL column.")
+        st.stop()
+    # Prepare lead data mapping (filtered index -> lead data dict)
     lead_data_map = {}
-    for idx, url in enumerate(urls):
+    for idx, (url, orig_row) in enumerate(url_list_with_idx):
         lead_data = {'url': url}
-        
-        # Add company name if column selected
         if 'company_name' in lead_cols:
             col_name = lead_cols['company_name']
-            if has_headers:
-                col_idx = list(df_in.columns).index(col_name)
-            else:
-                col_idx = int(col_name.replace("Column ", "")) - 1
-            if idx < len(df_in):
-                lead_data['company_name'] = str(df_in.iloc[idx, col_idx]) if pd.notna(df_in.iloc[idx, col_idx]) else ""
-            else:
-                lead_data['company_name'] = ""
-        
-        # Add industry if column selected
+            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
+            lead_data['company_name'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
         if 'industry' in lead_cols:
             col_name = lead_cols['industry']
-            if has_headers:
-                col_idx = list(df_in.columns).index(col_name)
-            else:
-                col_idx = int(col_name.replace("Column ", "")) - 1
-            if idx < len(df_in):
-                lead_data['industry'] = str(df_in.iloc[idx, col_idx]) if pd.notna(df_in.iloc[idx, col_idx]) else ""
-            else:
-                lead_data['industry'] = ""
-        
-        # Add other data if column selected
+            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
+            lead_data['industry'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
         if 'other' in lead_cols:
             col_name = lead_cols['other']
-            if has_headers:
-                col_idx = list(df_in.columns).index(col_name)
-            else:
-                col_idx = int(col_name.replace("Column ", "")) - 1
-            if idx < len(df_in):
-                lead_data['other'] = str(df_in.iloc[idx, col_idx]) if pd.notna(df_in.iloc[idx, col_idx]) else ""
-            else:
-                lead_data['other'] = ""
-        
+            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
+            lead_data['other'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
         lead_data_map[idx] = lead_data
     
     # Store lead data map in session state
@@ -4175,14 +4387,18 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         email_copy_model_run = email_copy_model_ui
         email_copy_prompt_run = email_copy_prompt_ui
 
+    # Apply slow_sites: longer timeout + extra retries for unreliable sites
+    effective_timeout = timeout * 2 if st.session_state.get('slow_sites', False) else timeout
+    effective_retries = min(retries + 2, 8) if st.session_state.get('slow_sites', False) else retries
+
     def run_async_scraper():
         try:
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
-            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={retries}, timeout={timeout}s")
+            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
             asyncio.run(
-                run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_chars,
+                run_scraper(urls, concurrency, effective_retries, effective_timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
                             ai_enabled_for_run, ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run,
                             email_copy_enabled_for_run, email_copy_api_key_run, email_copy_provider_run,
@@ -4255,55 +4471,69 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 logs_text = "\n".join(runtime_logs)
             logs_placeholder.code(logs_text or "(no logs yet)", language=None)
             
-            # Real-time activity dashboard
+            # Real-time activity dashboard (enhanced data & visuals)
             with dashboard_placeholder.container():
-                st.markdown("### 📊 Live activity")
                 with scrape_status_lock:
-                    in_progress = list(scrape_in_progress.items())[-12:]
-                    recent = list(scrape_recent)[-15:]
-                    errors = list(scrape_errors)[-10:]
-                
+                    in_progress = list(scrape_in_progress.items())
+                    recent = list(scrape_recent)
+                    errors = list(scrape_errors)
+                n_scraping = sum(1 for _, d in in_progress if d["status"] == "scraping")
+                n_ai = sum(1 for _, d in in_progress if d["status"] == "ai_summarizing")
+                n_email = sum(1 for _, d in in_progress if d["status"] == "email_copy")
+                rate_per_min = rate * 60 if rate > 0 else 0
+                pct_done = (d / max(t, 1)) * 100
+                st.markdown("### 📊 Live activity")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                with m1:
+                    st.metric("Progress", f"{d:,} / {t:,}", f"{pct_done:.1f}%")
+                with m2:
+                    st.metric("Rate", f"{rate_per_min:.1f}/min", "URLs" if rate_per_min else "—")
+                with m3:
+                    st.metric("Elapsed", f"{int(elapsed // 60)}m {int(elapsed % 60)}s", "")
+                with m4:
+                    st.metric("Errors", len(errors), f"of {d}" if d else "—")
+                with m5:
+                    phase_str = f"🔍 {n_scraping}  🤖 {n_ai}  ✉️ {n_email}" if in_progress else "Idle"
+                    st.metric("Active", phase_str, "scrape | AI | email")
+                st.markdown("---")
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.markdown("#### ⏳ In progress")
                     if in_progress:
-                        for url, d in in_progress:
-                            short_url = (url[:45] + "…") if len(url) > 45 else url
-                            icon = "🤖" if d["status"] == "ai_summarizing" else "🔍"
-                            st.caption(f"{icon} {short_url}")
-                            st.caption(f"   _{d['message']}_")
+                        for url, data in in_progress[-10:]:
+                            short_url = escape((url[:42] + "…") if len(url) > 42 else url)
+                            status = data.get("status", "scraping")
+                            msg = escape(str(data.get("message", ""))[:80])
+                            icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
+                            badge = "scraping" if status == "scraping" else ("AI" if status == "ai_summarizing" else "email")
+                            color = "#3b82f6" if status == "scraping" else ("#8b5cf6" if status == "ai_summarizing" else "#22c55e")
+                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.3rem; background:#f8fafc; border-radius:6px; border-left:3px solid {color};"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#64748b; font-size:0.8rem;">{msg}</span> <code style="background:#e2e8f0; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_Waiting for workers..._")
                 with col2:
                     st.markdown("#### ✅ Recently completed")
                     if recent:
                         for e in reversed(recent[-8:]):
-                            short_url = (e["url"][:40] + "…") if len(e["url"]) > 40 else e["url"]
-                            if e["status"] == "scraped":
-                                st.caption(f"✓ {short_url} — {e['message']}")
+                            u = e.get("url", "")
+                            short_url = escape((u[:38] + "…") if len(u) > 38 else u)
+                            if e.get("status") == "scraped":
+                                msg = escape(str(e.get("message", ""))[:50])
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#16a34a;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#64748b; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
                             else:
-                                st.caption(f"✗ {short_url}")
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#dc2626;'>✗ {short_url}</div>", unsafe_allow_html=True)
                     else:
                         st.caption("_None yet_")
                 with col3:
                     st.markdown("#### ⚠️ Issues")
                     if errors:
                         for e in errors[-6:]:
-                            short_url = (e["url"][:35] + "…") if len(e["url"]) > 35 else e["url"]
-                            st.caption(f"**{short_url}**")
-                            st.caption(f"   {e['message'][:60]}…" if len(e['message']) > 60 else f"   {e['message']}")
+                            u = e.get("url", "")
+                            m = e.get("message", "")
+                            short_url = escape((u[:35] + "…") if len(u) > 35 else u)
+                            msg = escape((m[:70] + "…") if len(m) > 70 else m)
+                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.3rem; background:#fef2f2; border-radius:6px; border-left:3px solid #dc2626;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#64748b;">{msg}</span></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_No issues_")
-                
-                if ai_enabled_for_run and ai_status_messages:
-                    st.markdown("---")
-                    st.markdown("#### 🤖 AI summary status")
-                    with ai_status_lock:
-                        recent_ai = list(ai_status_messages.items())[-5:]
-                    if recent_ai:
-                        for u, m in recent_ai:
-                            short_u = (u[:50] + "…") if len(u) > 50 else u
-                            st.caption(f"**{short_u}** — {m}")
             
             time.sleep(0.8)
         thread.join()
