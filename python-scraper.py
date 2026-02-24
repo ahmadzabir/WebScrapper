@@ -42,13 +42,12 @@ def _is_low_resource_default() -> bool:
 
 
 def _get_concurrency_max() -> int:
-    """Auto-compute max parallel workers based on system (free Streamlit-friendly)."""
+    """Max parallel workers based on CPU. Higher-end machines can run 100–150."""
     try:
         n = os.cpu_count() or 2
-        # Conservative for free Streamlit: avoid OOM, stay responsive
-        return min(max(8, n * 3), 30)
+        return min(max(8, n * 6), 150)
     except Exception:
-        return 12
+        return 50
 
 
 def _should_use_fast_mode(total_urls: int) -> bool:
@@ -262,6 +261,47 @@ def reconcile_checkpoint_with_files(output_dir: str) -> int:
 # -------------------------
 # AI Summary Generation
 # -------------------------
+
+# Standard output column names (3 or 4 when email copy enabled)
+EXCEL_COLS_3 = ["Website", "ScrapedText", "CompanySummary"]
+EXCEL_COLS_4 = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"]
+
+
+def _clean_excel_value(val) -> str:
+    """Single source of truth: clean any value for Excel (prevents corruption, formula injection)."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    val = str(val).strip()
+    if not val:
+        return ""
+    val = val.replace('\x00', '')
+    val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
+    val = ''.join(c for c in val if (ord(c) == 0x9 or ord(c) == 0xA or ord(c) == 0xD or
+                                      0x20 <= ord(c) <= 0xD7FF or 0xE000 <= ord(c) <= 0xFFFD))
+    val = re.sub(r'\s+', ' ', val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')).strip()
+    val = val[:32767]
+    if val and val[0] in ('=', '+', '-', '@'):
+        val = "'" + val
+    return val
+
+
+def _write_excel_sheet(ws, cols: list, df: "pd.DataFrame", sheet_title: str = "Scraped Data") -> None:
+    """Write DataFrame to Excel sheet with proper formatting, column widths, frozen header."""
+    ws.title = sheet_title
+    ws.append(cols)
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        row_data = [_clean_excel_value(row[c] if c in df.columns else "") for c in cols]
+        row_num = idx + 2
+        for col_idx, val in enumerate(row_data, start=1):
+            ws.cell(row=row_num, column=col_idx, value=str(val) if val is not None else "")
+    # Column widths (Website: 45, others: 80)
+    widths = [45, 80, 80, 80][:len(cols)]
+    for i, w in enumerate(widths, start=1):
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(i)].width = min(w, 100)
+    ws.freeze_panes = "A2"
+
 
 def _normalize_scrape_error_for_display(msg: str) -> str:
     """Convert emoji-prefixed scrape errors so narrow columns show 'Scrape timeout' not 'Timec'."""
@@ -2322,48 +2362,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     from openpyxl import Workbook
                     wb = Workbook()
                     ws = wb.active
-                    ws.title = "Scraped Data"
-                    ws.append(cols)
-                    
-                    # Write data rows
-                    def clean_excel_value(val):
-                        """Clean value to prevent Excel corruption - very strict"""
-                        if not val:
-                            return ""
-                        import re
-                        val = str(val).replace('\x00', '')
-                        val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
-                        val = ''.join(char for char in val if (
-                            (0x20 <= ord(char) <= 0x7E) or (0xA0 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
-                        ))
-                        val = re.sub(r'[^\x20-\x7E\xA0-\xD7FF\xE000-\xFFFD]', ' ', val)
-                        val = re.sub(r'\s+', ' ', val).strip()
-                        try:
-                            val = val.encode('utf-8', errors='ignore').decode('utf-8')
-                        except:
-                            val = ""
-                        return val[:32767] if isinstance(val, str) else str(val)[:32767]
-                    for idx in range(len(df_excel)):
-                        row = df_excel.iloc[idx]
-                        row_data = []
-                        for col_name in cols:
-                            raw_val = str(row[col_name]) if pd.notna(row[col_name]) else ""
-                            val = clean_excel_value(raw_val)
-                            if val and val[0] in ['=', '+', '-', '@']:
-                                val = "'" + val
-                            row_data.append(val)
-                        
-                        # CRITICAL: Write cells directly instead of append to ensure proper string handling
-                        row_num = ws.max_row + 1
-                        for col_idx, val in enumerate(row_data, start=1):
-                            cell = ws.cell(row=row_num, column=col_idx)
-                            # Ensure value is a plain string
-                            if val is None:
-                                val = ""
-                            val = str(val)
-                            # Set value and force string type - this prevents string property issues
-                            cell.value = val
-                            cell.data_type = 's'  # Force string type
+                    _write_excel_sheet(ws, cols, df_excel)
                     
                     # Run heavy I/O in executor to avoid blocking event loop (fixes progress freeze)
                     def _save_excel():
@@ -2603,37 +2602,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         from openpyxl import Workbook
                         wb = Workbook()
                         ws = wb.active
-                        ws.title = "Scraped Data"
-                        ws.append(cols_buf)
-                        for idx in range(len(df_excel_buf)):
-                            row = df_excel_buf.iloc[idx]
-                            def clean_excel_value(val):
-                                if not val: return ""
-                                import re
-                                val = str(val).replace('\x00', '')
-                                val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
-                                val = ''.join(char for char in val if (ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)))
-                                val = re.sub(r'\s+', ' ', val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')).strip()[:32767]
-                                return val
-                            row_data = []
-                            for col_name in cols_buf:
-                                raw = str(row[col_name]) if pd.notna(row[col_name]) else ""
-                                val = clean_excel_value(raw)
-                                if val and val[0] in ['=', '+', '-', '@']:
-                                    val = "'" + val
-                                row_data.append(val)
-                            
-                            # CRITICAL: Write cells directly instead of append to ensure proper string handling
-                            row_num = ws.max_row + 1
-                            for col_idx, val in enumerate(row_data, start=1):
-                                cell = ws.cell(row=row_num, column=col_idx)
-                                # Ensure value is a plain string
-                                if val is None:
-                                    val = ""
-                                val = str(val)
-                                # Set value and force string type - this prevents string property issues
-                                cell.value = val
-                                cell.data_type = 's'  # Force string type
+                        _write_excel_sheet(ws, cols_buf, df_excel_buf)
                         
                         # CRITICAL: Save with explicit error handling
                         try:
@@ -3455,7 +3424,7 @@ if uploaded_file is not None:
 st.markdown("### ⚙️ Step 2: Settings")
 st.markdown("""
 <div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    <strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts to your system and run size (fewer workers on slow PCs, homepage-only for 500+ URLs, cache fallback for unreachable sites).
+    <strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).
 </div>
 """, unsafe_allow_html=True)
 
@@ -3494,7 +3463,7 @@ with col1:
     depth = st.slider(
         "Pages to scrape per site",
         0, 5, st.session_state.get('depth', 3),
-        help="0 = homepage only. 3 = homepage + 3 more pages. Auto-reduced for large runs.",
+        help="0 = homepage only. 3 = homepage + 3 more pages.",
         key="depth"
     )
     
@@ -4412,16 +4381,15 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     effective_timeout = timeout
     effective_retries = min(retries + 2, 8)
     fast_mode = _should_use_fast_mode(total)
-    effective_depth = 0 if fast_mode and depth > 1 else depth  # Homepage-only for large runs
 
     def run_async_scraper():
         try:
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
-            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={effective_depth}, retries={effective_retries}, timeout={effective_timeout}s")
+            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
             asyncio.run(
-                run_scraper(urls, concurrency, effective_retries, effective_timeout, effective_depth, keywords, max_chars,
+                run_scraper(urls, concurrency, effective_retries, effective_timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
                             ai_enabled_for_run, ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run,
                             email_copy_enabled_for_run, email_copy_api_key_run, email_copy_provider_run,
@@ -4725,7 +4693,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                     # Normalize header
                                     header_normalized = [str(h).strip().strip('"').strip("'") for h in header]
                                     
-                                    # Map header to column indices - be strict
+                                    # Map header to column indices - support 3 or 4 cols (EmailCopy)
                                     col_indices = {}
                                     for idx, h in enumerate(header_normalized):
                                         h_lower = h.lower().strip()
@@ -4735,18 +4703,20 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                             col_indices['ScrapedText'] = idx
                                         elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
                                             col_indices['CompanySummary'] = idx
+                                        elif 'email' in h_lower and 'copy' in h_lower:
+                                            col_indices['EmailCopy'] = idx
                                     
-                                    # Fallback to position if mapping failed
                                     if 'Website' not in col_indices and len(header_normalized) >= 1:
                                         col_indices['Website'] = 0
                                     if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
                                         col_indices['ScrapedText'] = 1
                                     if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
                                         col_indices['CompanySummary'] = 2
+                                    if 'EmailCopy' not in col_indices and len(header_normalized) >= 4:
+                                        col_indices['EmailCopy'] = 3
                                     
-                                    # Verify we have all 3 columns
-                                    if len(col_indices) != 3:
-                                        st.warning(f"⚠️ CSV file {csv_file} doesn't have 3 columns. Found: {header_normalized}")
+                                    if len(col_indices) < 3:
+                                        st.warning(f"⚠️ CSV file {csv_file} missing columns. Found: {header_normalized}")
                                         continue
                                     
                                     # Read rows - CRITICAL: csv.reader already handles unquoting
@@ -4762,31 +4732,27 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                         if len(row) > 3:
                                             row = row[:3]
                                         
-                                        # Extract by column index - csv.reader already unquoted values
                                         website_idx = col_indices.get('Website', 0)
                                         scraped_idx = col_indices.get('ScrapedText', 1)
                                         summary_idx = col_indices.get('CompanySummary', 2)
+                                        email_idx = col_indices.get('EmailCopy')
                                         
-                                        # CRITICAL: Ensure indices are valid
                                         if website_idx >= len(row) or scraped_idx >= len(row) or summary_idx >= len(row):
-                                            # Skip malformed rows
                                             continue
                                         
-                                        # Extract values - csv.reader already unquoted them
                                         website = str(row[website_idx]).strip()
                                         scraped_text = str(row[scraped_idx]).strip()
                                         company_summary = str(row[summary_idx]).strip()
+                                        email_copy = str(row[email_idx]).strip() if email_idx is not None and email_idx < len(row) else ""
                                         
-                                        # CRITICAL: Add ALL rows, even if website is empty (might be error rows)
-                                        # Don't filter here - we want all data
-                                        rows_data.append({
-                                            'Website': website,
-                                            'ScrapedText': scraped_text,
-                                            'CompanySummary': company_summary
-                                        })
+                                        row_dict = {'Website': website, 'ScrapedText': scraped_text, 'CompanySummary': company_summary}
+                                        if email_idx is not None:
+                                            row_dict['EmailCopy'] = email_copy
+                                        rows_data.append(row_dict)
                                 
                                 if rows_data:
-                                    df_csv = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
+                                    use_cols = EXCEL_COLS_4 if 'EmailCopy' in rows_data[0] else EXCEL_COLS_3
+                                    df_csv = pd.DataFrame(rows_data, columns=use_cols)
                                     csv_all_data.append(df_csv)
                         except Exception as e:
                             st.warning(f"⚠️ Error reading CSV {csv_file} for Excel: {e}")
