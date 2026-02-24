@@ -42,12 +42,12 @@ def _is_low_resource_default() -> bool:
 
 
 def _get_concurrency_max() -> int:
-    """Max parallel workers based on CPU. Higher-end machines can run 100–150."""
+    """Max parallel workers: liberal formula for I/O-bound scraping. 8 cores → 96, 16 cores → 192."""
     try:
         n = os.cpu_count() or 2
-        return min(max(8, n * 6), 150)
+        return min(max(20, n * 12), 250)
     except Exception:
-        return 50
+        return 80
 
 
 def _should_use_fast_mode(total_urls: int) -> bool:
@@ -3448,16 +3448,22 @@ with col1:
     else:
         st.caption("💡 Leave empty to scrape homepage only")
     
-    # Auto-detect: fast mode for 500+ URLs, low resource for slow machines
-    # (These are applied at run time based on URL count and CPU - no checkboxes)
     concurrency_max = _get_concurrency_max()
-    concurrency_default = min(st.session_state.get('concurrency', min(12, concurrency_max)), concurrency_max)
+    concurrency_default = min(st.session_state.get('concurrency', min(20, concurrency_max)), concurrency_max)
     concurrency = st.slider(
         "Parallel workers",
         1, concurrency_max, max(1, concurrency_default),
-        help=f"Number of sites scraped at once. Max {concurrency_max} (based on your system). Lower = gentler on slow PCs.",
+        help=f"Sites scraped at once. Max {concurrency_max} (CPU-based). Lower = gentler on slow PCs.",
         key="concurrency"
     )
+    force_max_workers = st.checkbox(
+        "Force maximum workers",
+        value=st.session_state.get('force_max_workers', False),
+        help=f"Override to {concurrency_max} workers for testing. Use with caution on weaker machines.",
+        key="force_max_workers"
+    )
+    if force_max_workers:
+        concurrency = concurrency_max
     
     # Pages to scrape per site
     depth = st.slider(
@@ -3963,6 +3969,8 @@ st.markdown("""
 # Get variables from tabs - Use session_state (proper Streamlit way)
 keywords = st.session_state.get('keywords', [])
 concurrency = st.session_state.get('concurrency', 20)
+if st.session_state.get('force_max_workers', False):
+    concurrency = _get_concurrency_max()
 retries = st.session_state.get('retries', 2)
 depth = st.session_state.get('depth', 3)
 timeout = st.session_state.get('timeout', 30)
@@ -4800,6 +4808,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                     column_mapping[col] = 'CompanySummary'
                                 elif 'summary' in col_lower and 'company' not in col_lower:
                                     column_mapping[col] = 'CompanySummary'
+                                elif 'email' in col_lower and 'copy' in col_lower:
+                                    column_mapping[col] = 'EmailCopy'
                             
                             # Rename columns
                             df_part = df_part.rename(columns=column_mapping)
@@ -4828,9 +4838,10 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             
                             if "CompanySummary" not in df_part.columns:
                                 df_part["CompanySummary"] = ""
-                            
-                            # Ensure correct column order and only keep the 3 standard columns
-                            df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                            if "EmailCopy" not in df_part.columns:
+                                df_part["EmailCopy"] = ""
+                            standard_cols = [c for c in EXCEL_COLS_4 if c in df_part.columns] or EXCEL_COLS_3
+                            df_part = df_part[standard_cols]
                             
                             # Convert all columns to string and clean
                             for col in df_part.columns:
@@ -4847,21 +4858,27 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             st.error(f"Traceback: {traceback.format_exc()}")
                             continue
                 
-                # CRITICAL: Use CSV data (read with csv.reader) - this is the source of truth
-                # CSV files contain the actual scraped text and AI summaries
                 if csv_all_data:
                     combined_df = pd.concat(csv_all_data, ignore_index=True)
-                    # Ensure structure
-                    if "CompanySummary" not in combined_df.columns:
-                        combined_df["CompanySummary"] = ""
-                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    for c in EXCEL_COLS_3:
+                        if c not in combined_df.columns:
+                            combined_df[c] = ""
+                    if "EmailCopy" in combined_df.columns:
+                        combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("")
+                    else:
+                        combined_df["EmailCopy"] = ""
+                    combined_cols = EXCEL_COLS_4 if "EmailCopy" in combined_df.columns else EXCEL_COLS_3
+                    combined_df = combined_df[combined_cols]
                 elif all_data:
-                    # Fallback to Excel data ONLY if CSV reading completely failed
                     st.warning("⚠️ CSV reading failed, using Excel files (may have incomplete data)")
                     combined_df = pd.concat(all_data, ignore_index=True)
-                    if "CompanySummary" not in combined_df.columns:
-                        combined_df["CompanySummary"] = ""
-                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    for c in EXCEL_COLS_3:
+                        if c not in combined_df.columns:
+                            combined_df[c] = ""
+                    if "EmailCopy" not in combined_df.columns:
+                        combined_df["EmailCopy"] = ""
+                    combined_cols = EXCEL_COLS_4 if "EmailCopy" in combined_df.columns else EXCEL_COLS_3
+                    combined_df = combined_df[combined_cols]
                 else:
                     st.error("❌ No data available to combine")
                     raise ValueError("No data available to combine for Excel file")
@@ -4878,79 +4895,12 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     return df
                 combined_df = clean_dataframe_for_excel(combined_df.copy())
                 
-                # CRITICAL: Use openpyxl directly to write with explicit headers to avoid corruption
                 from openpyxl import Workbook
                 excel_buffer = BytesIO()
                 wb = Workbook()
                 ws = wb.active
-                ws.title = "Scraped Data"
-                
-                # Write headers explicitly - CRITICAL: Always 3 columns
-                ws.append(["Website", "ScrapedText", "CompanySummary"])
-                
-                # Write data rows - CRITICAL: Use iloc to prevent iterrows() misalignment issues
-                for idx in range(len(combined_df)):
-                    row = combined_df.iloc[idx]
-                    
-                    # CRITICAL: Extract values by column name (not position) to ensure correct order
-                    website = ""
-                    text = ""
-                    summary = ""
-                    
-                    if "Website" in combined_df.columns:
-                        val = row["Website"]
-                        website = str(val) if pd.notna(val) else ""
-                    
-                    if "ScrapedText" in combined_df.columns:
-                        val = row["ScrapedText"]
-                        text = str(val) if pd.notna(val) else ""
-                    
-                    if "CompanySummary" in combined_df.columns:
-                        val = row["CompanySummary"]
-                        summary = str(val) if pd.notna(val) else ""
-                    
-                    # CRITICAL: Comprehensive cleaning for Excel compatibility
-                    def clean_excel_value(val):
-                        """Clean value to prevent Excel corruption"""
-                        if not val:
-                            return ""
-                        import re
-                        val = str(val)
-                        val = val.replace('\x00', '')
-                        val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
-                        # Remove invalid XML characters (Excel files are XML-based)
-                        val = ''.join(char for char in val if (
-                            ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or
-                            (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
-                        ))
-                        val = val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                        val = re.sub(r'\s+', ' ', val).strip()
-                        val = val[:32767]
-                        return val
-                    
-                    website = clean_excel_value(website)
-                    text = clean_excel_value(text)
-                    summary = clean_excel_value(summary)
-                    
-                    # CRITICAL: Prepend with single quote if value starts with =, +, -, @ to prevent Excel formula interpretation
-                    row_data = []
-                    for val in [website, text, summary]:
-                        # If value starts with formula-like characters, prepend with single quote to force text mode
-                        if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
-                            val = "'" + val
-                        row_data.append(val)
-                    
-                    # CRITICAL: Write cells directly instead of append to ensure proper string handling
-                    row_num = ws.max_row + 1
-                    for col_idx, val in enumerate(row_data, start=1):
-                        cell = ws.cell(row=row_num, column=col_idx)
-                        # Ensure value is a plain string
-                        if val is None:
-                            val = ""
-                        val = str(val)
-                        # Set value and force string type - this prevents string property issues
-                        cell.value = val
-                        cell.data_type = 's'  # Force string type
+                combined_cols = [c for c in EXCEL_COLS_4 if c in combined_df.columns] or EXCEL_COLS_3
+                _write_excel_sheet(ws, combined_cols, combined_df)
                 
                 # CRITICAL: Save with explicit error handling
                 try:
@@ -5144,8 +5094,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         quotechar='"'  # Use double quotes
                     )
                     
-                    # Write header - ALWAYS 3 columns in exact order
-                    csv_writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                    csv_cols = [c for c in EXCEL_COLS_4 if c in combined_df.columns] or EXCEL_COLS_3
+                    csv_writer.writerow(csv_cols)
                     
                     # Clean function for CSV values - ensures Excel compatibility
                     def clean_csv_value_for_excel(val_str):
@@ -5176,36 +5126,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     for idx in range(len(combined_df)):
                         row = combined_df.iloc[idx]
                         
-                        # CRITICAL: Extract values by column name, not position, to ensure correct order
-                        # Always extract exactly 3 values in correct order: Website, ScrapedText, CompanySummary
-                        website = ""
-                        scraped_text = ""
-                        company_summary = ""
-                        
-                        # Extract Website
-                        if "Website" in combined_df.columns:
-                            val = row["Website"]
-                            website = "" if pd.isna(val) else str(val)
-                        
-                        # Extract ScrapedText
-                        if "ScrapedText" in combined_df.columns:
-                            val = row["ScrapedText"]
-                            scraped_text = "" if pd.isna(val) else str(val)
-                        
-                        # Extract CompanySummary
-                        if "CompanySummary" in combined_df.columns:
-                            val = row["CompanySummary"]
-                            company_summary = "" if pd.isna(val) else str(val)
-                        
-                        # Clean values for Excel compatibility
-                        website_clean = clean_csv_value_for_excel(website)
-                        scraped_text_clean = clean_csv_value_for_excel(scraped_text)
-                        company_summary_clean = clean_csv_value_for_excel(company_summary)
-                        
-                        # CRITICAL: Always write exactly 3 values in correct order
-                        # csv.writer with QUOTE_ALL will automatically quote each field
-                        # and escape internal quotes by doubling them (Excel standard)
-                        csv_writer.writerow([website_clean, scraped_text_clean, company_summary_clean])
+                        row_vals = [clean_csv_value_for_excel("" if pd.isna(row.get(c, "")) else str(row[c])) for c in csv_cols]
+                        csv_writer.writerow(row_vals)
                     
                     csv_buffer.seek(0)
                     
@@ -5218,13 +5140,12 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                         test_reader = csv.reader(csv_buffer, quoting=csv.QUOTE_ALL)
                         test_rows = list(test_reader)
                         if len(test_rows) > 0:
-                            # Check header
-                            if test_rows[0] != ["Website", "ScrapedText", "CompanySummary"]:
-                                st.warning(f"⚠️ CSV header validation failed. Expected 3 columns, got: {test_rows[0]}")
-                            # Check all rows have 3 columns
+                            expected_cols = len(csv_cols)
+                            if list(test_rows[0]) != csv_cols:
+                                st.warning(f"⚠️ CSV header validation failed. Expected {csv_cols}, got: {test_rows[0]}")
                             for i, test_row in enumerate(test_rows[1:], start=2):
-                                if len(test_row) != 3:
-                                    st.warning(f"⚠️ CSV row {i} has {len(test_row)} columns instead of 3")
+                                if len(test_row) != expected_cols:
+                                    st.warning(f"⚠️ CSV row {i} has {len(test_row)} columns instead of {expected_cols}")
                     except Exception as e:
                         st.warning(f"⚠️ CSV validation error: {e}")
                     
@@ -5453,7 +5374,10 @@ if st.session_state.get('scraping_complete', False):
                                             df_part['ScrapedText'] = ""
                                     if "CompanySummary" not in df_part.columns:
                                         df_part["CompanySummary"] = ""
-                                    df_part = df_part[["Website", "ScrapedText", "CompanySummary"]]
+                                    if "EmailCopy" not in df_part.columns:
+                                        df_part["EmailCopy"] = ""
+                                    std_cols = [c for c in EXCEL_COLS_4 if c in df_part.columns] or EXCEL_COLS_3
+                                    df_part = df_part[std_cols]
                                     for col in df_part.columns:
                                         df_part[col] = df_part[col].astype(str).replace('nan', '').replace('None', '')
                                     if len(df_part) > 0:
@@ -5463,9 +5387,13 @@ if st.session_state.get('scraping_complete', False):
                                 continue
                         if all_data:
                             combined_df = pd.concat(all_data, ignore_index=True)
-                            if "CompanySummary" not in combined_df.columns:
-                                combined_df["CompanySummary"] = ""
-                            combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                            for c in EXCEL_COLS_3:
+                                if c not in combined_df.columns:
+                                    combined_df[c] = ""
+                            if "EmailCopy" not in combined_df.columns:
+                                combined_df["EmailCopy"] = ""
+                            combined_cols = EXCEL_COLS_4 if "EmailCopy" in combined_df.columns else EXCEL_COLS_3
+                            combined_df = combined_df[combined_cols]
                         else:
                             st.error("❌ No data available to combine")
                             combined_df = None
@@ -5491,53 +5419,8 @@ if st.session_state.get('scraping_complete', False):
                         excel_buffer = BytesIO()
                         wb = Workbook()
                         ws = wb.active
-                        ws.title = "Scraped Data"
-                        ws.append(["Website", "ScrapedText", "CompanySummary"])
-                        
-                        for idx in range(len(combined_df)):
-                            row = combined_df.iloc[idx]
-                            website = str(row["Website"]) if pd.notna(row["Website"]) else ""
-                            text = str(row["ScrapedText"]) if pd.notna(row["ScrapedText"]) else ""
-                            summary = str(row["CompanySummary"]) if pd.notna(row["CompanySummary"]) else ""
-                            
-                            # CRITICAL: Comprehensive cleaning for Excel compatibility
-                            def clean_excel_value(val):
-                                """Clean value to prevent Excel corruption"""
-                                if not val:
-                                    return ""
-                                import re
-                                val = str(val)
-                                val = val.replace('\x00', '')
-                                val = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', val)
-                                # Remove invalid XML characters (Excel files are XML-based)
-                                val = ''.join(char for char in val if (
-                                    ord(char) == 0x9 or ord(char) == 0xA or ord(char) == 0xD or
-                                    (0x20 <= ord(char) <= 0xD7FF) or (0xE000 <= ord(char) <= 0xFFFD)
-                                ))
-                                val = val.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                                val = re.sub(r'\s+', ' ', val).strip()
-                                val = val[:32767]
-                                return val
-                            
-                            website = clean_excel_value(website)
-                            text = clean_excel_value(text)
-                            summary = clean_excel_value(summary)
-                            row_data = []
-                            for val in [website, text, summary]:
-                                if val and len(val) > 0 and val[0] in ['=', '+', '-', '@']:
-                                    val = "'" + val
-                                row_data.append(val)
-                            # CRITICAL: Write cells directly instead of append to ensure proper string handling
-                            row_num = ws.max_row + 1
-                            for col_idx, val in enumerate(row_data, start=1):
-                                cell = ws.cell(row=row_num, column=col_idx)
-                                # Ensure value is a plain string
-                                if val is None:
-                                    val = ""
-                                val = str(val)
-                                # Set value and force string type - this prevents string property issues
-                                cell.value = val
-                                cell.data_type = 's'  # Force string type
+                        cols_out = [c for c in EXCEL_COLS_4 if c in combined_df.columns] or EXCEL_COLS_3
+                        _write_excel_sheet(ws, cols_out, combined_df)
                         
                         # CRITICAL: Save with explicit error handling
                         try:
