@@ -271,35 +271,107 @@ def _col_to_placeholder(col_name: str) -> str:
     return key or "col"
 
 
-def _get_available_placeholders() -> list[str]:
-    """Return list of placeholder keys available for prompts: url, company_name, scraped_content + lead columns."""
-    base = ["url", "company_name", "scraped_content"]
+def _format_var_value(v) -> str:
+    """Format any value for safe insertion into prompts. Handles None, NaN, control chars. Preserves content."""
+    if v is None:
+        return ""
+    try:
+        import math
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "n/a"):
+        return ""
+    s = s.replace("\x00", "")
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _replace_prompt_variables(template: str, data: dict) -> str:
+    """
+    Replace {key} and {{key}} placeholders with values. Robust formatting.
+    scraped_content: raw content (no newline collapse). Others: _format_var_value.
+    """
+    if not template:
+        return template
+    keys_sorted = sorted(data.keys(), key=len, reverse=True)
+    out = template
+    for k in keys_sorted:
+        if k == "scraped_content":
+            sval = str(data.get(k, ""))[:15000].replace("\x00", "")
+        else:
+            sval = _format_var_value(data.get(k, "")) or ""
+        out = out.replace("{{" + k + "}}", sval)
+        out = out.replace("{" + k + "}", sval)
+    return out
+
+
+def _get_variable_definitions() -> list[tuple[str, str, str]]:
+    """
+    Return list of (display_label, placeholder, key) for prompt variables.
+    - display_label: shown on button (e.g. "Company Name" or "URL")
+    - placeholder: what gets inserted (e.g. "{company_name}")
+    - key: for substitution lookup
+    """
+    result = [
+        ("URL", "{url}", "url"),
+        ("Company name", "{company_name}", "company_name"),
+        ("Scraped content", "{scraped_content}", "scraped_content"),
+    ]
     csv_cfg = st.session_state.get("csv_config") or {}
     lead_cols = csv_cfg.get("lead_data_columns") or {}
-    extras = [k for k in lead_cols.keys() if k not in base]
-    return base + sorted(extras)
+    seen = {"url", "company_name", "scraped_content"}
+    for key, col_name in sorted(lead_cols.items(), key=lambda x: x[1].lower()):
+        if key not in seen:
+            seen.add(key)
+            result.append((col_name, f"{{{key}}}", key))
+    return result
+
+
+def _get_available_placeholders() -> list[str]:
+    """Return list of placeholder keys available for prompts."""
+    return [r[2] for r in _get_variable_definitions()]
 
 
 def _get_sample_lead_data_for_preview() -> dict:
-    """Get sample values from first CSV row for prompt preview. Returns dict of placeholder_key -> value."""
+    """Get sample values from first CSV row for prompt preview. Returns dict of key -> value."""
     out = {"url": "https://example.com", "company_name": "Example Company", "scraped_content": "Sample website content..."}
     csv_cfg = st.session_state.get("csv_config") or {}
-    lead_cols = csv_cfg.get("lead_data_columns") or {}
     df = csv_cfg.get("df_preview")
-    if df is not None and not df.empty and lead_cols:
-        has_headers = csv_cfg.get("has_headers", True)
-        row = df.iloc[0]
-        for key, col_name in lead_cols.items():
-            try:
-                if has_headers and col_name in df.columns:
-                    val = row[col_name]
-                else:
-                    ci = int(str(col_name).replace("Column ", "")) - 1
-                    val = row.iloc[ci]
-                v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
-                out[key] = v or out.get(key, "")
-            except Exception:
-                out[key] = out.get(key, "")
+    if df is None or df.empty:
+        return out
+    has_headers = csv_cfg.get("has_headers", True)
+    row = df.iloc[0]
+    url_col = csv_cfg.get("url_column")
+    if url_col:
+        try:
+            if has_headers and url_col in df.columns:
+                v = row[url_col]
+            else:
+                ci = int(str(url_col).replace("Column ", "")) - 1
+                v = row.iloc[ci]
+            u = "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip()
+            if u:
+                out["url"] = u
+                out["company_name"] = u.replace("https://", "").replace("http://", "").split("/")[0]
+        except Exception:
+            pass
+    lead_cols = csv_cfg.get("lead_data_columns") or {}
+    for key, col_name in lead_cols.items():
+        try:
+            if has_headers and col_name in df.columns:
+                val = row[col_name]
+            else:
+                ci = int(str(col_name).replace("Column ", "")) - 1
+                val = row.iloc[ci]
+            v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
+            if v:
+                out[key] = v
+        except Exception:
+            pass
     return out
 
 
@@ -483,40 +555,24 @@ CRITICAL:
     # Use user prompt if provided, otherwise use default
     prompt_template = base_prompt if base_prompt.strip() else default_base
     
-    lead_data = lead_data or {}
-    # Sanitize values (guard against NaN, None, non-strings)
-    def _safe_val(v):
-        if v is None: return ''
-        try:
-            import math
-            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return ''
-        except (TypeError, ValueError):
-            pass
-        s = str(v).strip()
-        return '' if s.lower() in ('nan', 'none', '') else s
-
+    lead_data = dict(lead_data or {})
     # Ensure company_name (default from URL if missing)
-    company_name = _safe_val(lead_data.get('company_name', '')) or ''
+    company_name = _format_var_value(lead_data.get('company_name')) or ''
     if not company_name or company_name == 'Unknown':
         url_str = lead_data.get('url', '')
         company_name = url_str.replace('https://', '').replace('http://', '').split('/')[0] if url_str else 'Unknown'
-    lead_data = dict(lead_data)
     lead_data['company_name'] = company_name
-    lead_data['url'] = _safe_val(lead_data.get('url', '')) or 'N/A'
+    lead_data['url'] = _format_var_value(lead_data.get('url')) or 'N/A'
+    lead_data['scraped_content'] = (scraped_content or "")[:15000]
 
     def _humanize_key(k):
         return k.replace('_', ' ').title()
 
     # Build lead information section from all lead_data
-    lead_info_parts = [f"- {_humanize_key(k)}: {_safe_val(v)}" for k, v in sorted(lead_data.items()) if _safe_val(v)]
+    lead_info_parts = [f"- {_humanize_key(k)}: {_format_var_value(v)}" for k, v in sorted(lead_data.items()) if k != 'scraped_content' and _format_var_value(v)]
     lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts) if lead_info_parts else "LEAD INFORMATION:\n(no additional lead data)"
 
-    scraped_safe = (scraped_content or "")[:15000]
-    prompt = prompt_template
-    # Replace all {key} placeholders from lead_data
-    for k, v in lead_data.items():
-        prompt = prompt.replace('{' + k + '}', str(_safe_val(v) or ''))
-    prompt = prompt.replace('{scraped_content}', scraped_safe)
+    prompt = _replace_prompt_variables(prompt_template, lead_data)
 
     if 'LEAD INFORMATION:' in prompt:
         prompt = re.sub(
@@ -1162,19 +1218,16 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
 
 
 def build_email_copy_prompt(prompt_template: str, lead_data: dict | None, scraped_content: str | None) -> str:
-    """Build the complete prompt for email copy generation. Replaces all {key} from lead_data + {scraped_content}."""
+    """Build the complete prompt for email copy. Replaces {key} and {{key}} with formatted values."""
     lead_data = dict(lead_data or {})
-    url = str(lead_data.get("url", "") or "")
-    company_name = str(lead_data.get("company_name", "") or "")
+    url = _format_var_value(lead_data.get("url")) or ""
+    company_name = _format_var_value(lead_data.get("company_name")) or ""
     if not company_name and url:
         company_name = url.replace("https://", "").replace("http://", "").split("/")[0]
     lead_data["url"] = url
     lead_data["company_name"] = company_name
-    scraped_safe = str(scraped_content or "")
-    prompt = prompt_template
-    for k, v in lead_data.items():
-        prompt = prompt.replace("{" + k + "}", str(v or ""))
-    return prompt.replace("{scraped_content}", scraped_safe)
+    lead_data["scraped_content"] = str(scraped_content or "")
+    return _replace_prompt_variables(prompt_template, lead_data)
 
 
 async def generate_email_copy(
@@ -3786,17 +3839,16 @@ CRITICAL:
         st.session_state['master_prompt'] = default_prompt_template
     
     if prompt_mode == "Customize prompt":
-        placeholders = _get_available_placeholders()
-        var_options = [f"{{{p}}}" for p in placeholders]
-        ins_col1, ins_col2 = st.columns([3, 1])
-        with ins_col1:
-            st.caption("💡 Insert variables: " + ", ".join(var_options[:8]) + (" …" if len(var_options) > 8 else ""))
-        with ins_col2:
-            sel_var = st.selectbox("Insert variable", options=var_options, key="ai_prompt_var_select", label_visibility="collapsed")
-            if st.button("Insert at end", key="ai_prompt_insert_btn"):
-                cur = st.session_state.get('master_prompt', default_prompt_template)
-                st.session_state['master_prompt'] = cur + sel_var
-                st.rerun()
+        vars_def = _get_variable_definitions()
+        st.caption("Click a variable to insert into your prompt (supports {var} and {{var}}):")
+        ncols = min(6, len(vars_def))
+        cols = st.columns(ncols)
+        for i, (label, placeholder, _) in enumerate(vars_def):
+            with cols[i % ncols]:
+                if st.button(f"{label} → {placeholder}", key=f"ai_ins_{i}"):
+                    cur = st.session_state.get('master_prompt', default_prompt_template)
+                    st.session_state['master_prompt'] = cur + placeholder
+                    st.rerun()
         ai_prompt = st.text_area(
             "Custom prompt",
             value=st.session_state.get('master_prompt', default_prompt_template),
