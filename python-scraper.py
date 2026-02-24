@@ -262,6 +262,47 @@ def reconcile_checkpoint_with_files(output_dir: str) -> int:
 # AI Summary Generation
 # -------------------------
 
+def _col_to_placeholder(col_name: str) -> str:
+    """Convert column name to placeholder key: 'Company Name' -> 'company_name'."""
+    if not col_name:
+        return ""
+    key = re.sub(r'[^\w\s]', '', str(col_name).strip())
+    key = re.sub(r'\s+', '_', key).lower()
+    return key or "col"
+
+
+def _get_available_placeholders() -> list[str]:
+    """Return list of placeholder keys available for prompts: url, company_name, scraped_content + lead columns."""
+    base = ["url", "company_name", "scraped_content"]
+    csv_cfg = st.session_state.get("csv_config") or {}
+    lead_cols = csv_cfg.get("lead_data_columns") or {}
+    extras = [k for k in lead_cols.keys() if k not in base]
+    return base + sorted(extras)
+
+
+def _get_sample_lead_data_for_preview() -> dict:
+    """Get sample values from first CSV row for prompt preview. Returns dict of placeholder_key -> value."""
+    out = {"url": "https://example.com", "company_name": "Example Company", "scraped_content": "Sample website content..."}
+    csv_cfg = st.session_state.get("csv_config") or {}
+    lead_cols = csv_cfg.get("lead_data_columns") or {}
+    df = csv_cfg.get("df_preview")
+    if df is not None and not df.empty and lead_cols:
+        has_headers = csv_cfg.get("has_headers", True)
+        row = df.iloc[0]
+        for key, col_name in lead_cols.items():
+            try:
+                if has_headers and col_name in df.columns:
+                    val = row[col_name]
+                else:
+                    ci = int(str(col_name).replace("Column ", "")) - 1
+                    val = row.iloc[ci]
+                v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
+                out[key] = v or out.get(key, "")
+            except Exception:
+                out[key] = out.get(key, "")
+    return out
+
+
 # Standard output column names (3 or 4 when email copy enabled)
 EXCEL_COLS_3 = ["Website", "ScrapedText", "CompanySummary"]
 EXCEL_COLS_4 = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"]
@@ -332,8 +373,10 @@ def _normalize_ai_error_for_display(msg: str, prefix: str = "Summary") -> str:
         return s
     rest = s[1:].lstrip()
     if ":" in rest:
-        _, detail = rest.split(":", 1)
+        lead, detail = rest.split(":", 1)
         detail = detail.strip()
+        if "skipped" in lead.lower():
+            return f"{prefix} skipped: {detail}" if detail else f"{prefix} skipped"
         return f"{prefix} failed: {detail}" if detail else f"{prefix} failed"
     return f"{prefix} failed: {rest}" if rest else f"{prefix} failed"
 
@@ -451,37 +494,31 @@ CRITICAL:
             pass
         s = str(v).strip()
         return '' if s.lower() in ('nan', 'none', '') else s
-    # Replace placeholders
+
+    # Ensure company_name (default from URL if missing)
     company_name = _safe_val(lead_data.get('company_name', '')) or ''
     if not company_name or company_name == 'Unknown':
-        # Extract from URL if not provided
         url_str = lead_data.get('url', '')
         company_name = url_str.replace('https://', '').replace('http://', '').split('/')[0] if url_str else 'Unknown'
-    
-    url = _safe_val(lead_data.get('url', '')) or 'N/A'
-    industry = _safe_val(lead_data.get('industry', ''))
-    other_data = _safe_val(lead_data.get('other', ''))
-    
-    # Build lead information section dynamically
-    lead_info_parts = [f"- Website URL: {url}", f"- Company Name: {company_name}"]
-    
-    if industry and industry.strip() and industry.lower() != 'not specified':
-        lead_info_parts.append(f"- Industry: {industry}")
-    if other_data and other_data.strip() and other_data.lower() != 'not specified':
-        lead_info_parts.append(f"- Additional Info: {other_data}")
-    
-    lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts)
-    
-    # Replace placeholders in prompt
-    scraped_safe = (scraped_content or "")[:15000]  # Limit content, guard None
-    prompt = prompt_template.replace('{url}', str(url or ''))
-    prompt = prompt.replace('{company_name}', str(company_name or ''))
+    lead_data = dict(lead_data)
+    lead_data['company_name'] = company_name
+    lead_data['url'] = _safe_val(lead_data.get('url', '')) or 'N/A'
+
+    def _humanize_key(k):
+        return k.replace('_', ' ').title()
+
+    # Build lead information section from all lead_data
+    lead_info_parts = [f"- {_humanize_key(k)}: {_safe_val(v)}" for k, v in sorted(lead_data.items()) if _safe_val(v)]
+    lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts) if lead_info_parts else "LEAD INFORMATION:\n(no additional lead data)"
+
+    scraped_safe = (scraped_content or "")[:15000]
+    prompt = prompt_template
+    # Replace all {key} placeholders from lead_data
+    for k, v in lead_data.items():
+        prompt = prompt.replace('{' + k + '}', str(_safe_val(v) or ''))
     prompt = prompt.replace('{scraped_content}', scraped_safe)
-    
-    # Replace LEAD INFORMATION section if it exists, otherwise add it
-    import re
+
     if 'LEAD INFORMATION:' in prompt:
-        # Replace existing lead info section
         prompt = re.sub(
             r'LEAD INFORMATION:.*?(?=WEBSITE CONTENT:|$)',
             lead_info_section + '\n\n',
@@ -489,12 +526,11 @@ CRITICAL:
             flags=re.DOTALL
         )
     else:
-        # Add lead info before WEBSITE CONTENT or at the beginning
         if 'WEBSITE CONTENT:' in prompt:
             prompt = prompt.replace('WEBSITE CONTENT:', lead_info_section + '\n\nWEBSITE CONTENT:')
         else:
             prompt = lead_info_section + '\n\n' + prompt
-    
+
     return prompt
 
 
@@ -1126,14 +1162,19 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
 
 
 def build_email_copy_prompt(prompt_template: str, lead_data: dict | None, scraped_content: str | None) -> str:
-    """Build the complete prompt for email copy generation from template."""
-    lead_data = lead_data or {}
+    """Build the complete prompt for email copy generation. Replaces all {key} from lead_data + {scraped_content}."""
+    lead_data = dict(lead_data or {})
     url = str(lead_data.get("url", "") or "")
     company_name = str(lead_data.get("company_name", "") or "")
     if not company_name and url:
         company_name = url.replace("https://", "").replace("http://", "").split("/")[0]
+    lead_data["url"] = url
+    lead_data["company_name"] = company_name
     scraped_safe = str(scraped_content or "")
-    return prompt_template.replace("{url}", url).replace("{company_name}", company_name).replace("{scraped_content}", scraped_safe)
+    prompt = prompt_template
+    for k, v in lead_data.items():
+        prompt = prompt.replace("{" + k + "}", str(v or ""))
+    return prompt.replace("{scraped_content}", scraped_safe)
 
 
 async def generate_email_copy(
@@ -1473,6 +1514,18 @@ async def _fetch_from_cache_fallbacks(session: aiohttp.ClientSession, url: str, 
     except Exception:
         pass
     return ""
+
+
+def _process_cached_html_to_text(url: str, html: str, max_chars: int = 50000) -> str:
+    """Convert cached HTML to scraped-text format (same as scrape_site output)."""
+    if not html or len(html.strip()) < 50:
+        return ""
+    cleaned = cleanup_html(html)
+    if not cleaned or len(cleaned.strip()) < 10:
+        return ""
+    page_header = f"\n{'='*80}\nPAGE: {url}\n{'='*80}\n\n"
+    content = page_header + cleaned[:max_chars]
+    return content
 
 
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int, fast_mode: bool = False):
@@ -1994,10 +2047,20 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         timeout=max_total_time
                     )
                 except asyncio.TimeoutError:
-                    # Global timeout exceeded - this URL is taking too long
-                    scraped_text = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
-                    _scrape_status("error", scraped_text)
-                    # Log but don't fail completely - some sites are just slow
+                    err_msg = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
+                    _scrape_status("error", "Timeout, trying cache fallback...")
+                    cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout)
+                    if isinstance(cache_result, tuple):
+                        page_url, html = cache_result
+                        scraped_text = _process_cached_html_to_text(page_url, html, max_chars)
+                        if scraped_text:
+                            _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
+                        else:
+                            scraped_text = err_msg
+                            _scrape_status("error", scraped_text[:120])
+                    else:
+                        scraped_text = err_msg
+                        _scrape_status("error", scraped_text[:120])
                 except Exception as e:
                     # If scraping fails with an exception, try once more with a more lenient approach
                     try:
@@ -2011,12 +2074,21 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 )
                             except asyncio.TimeoutError:
                                 scraped_text = f"❌ Timeout: Scraping {fallback_url} exceeded maximum time limit ({max_total_time}s)"
-                                _scrape_status("error", scraped_text[:120])
                         else:
                             scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
                     except Exception as e2:
                         scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
-                    _scrape_status("error", scraped_text[:120])
+                    if scraped_text and scraped_text.startswith("❌"):
+                        _scrape_status("error", "Scrape failed, trying cache fallback...")
+                        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout)
+                        if isinstance(cache_result, tuple):
+                            page_url, html = cache_result
+                            cached_text = _process_cached_html_to_text(page_url, html, max_chars)
+                            if cached_text:
+                                scraped_text = cached_text
+                                _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
+                    if scraped_text and scraped_text.startswith("❌"):
+                        _scrape_status("error", scraped_text[:120])
                 
                 # RELAXED VALIDATION: Only flag obvious mismatches
                 # Many sites legitimately redirect to different domains (same organization)
@@ -2049,65 +2121,71 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 if scraped_text and not scraped_text.startswith("❌"):
                     _scrape_status("scraped", f"{len(scraped_text):,} chars scraped")
                 
-                # Generate AI summary if enabled
+                # Generate AI summary if enabled (skip when scraping already failed)
                 if ai_enabled and ai_api_key and ai_provider and ai_model:
-                    _scrape_status("ai_summarizing", "Generating AI summary...")
-                    def url_status_callback(msg):
-                        if scrape_status_callback:
-                            try:
-                                scrape_status_callback(original_url, "ai_summarizing", msg)
-                            except Exception:
-                                pass
-                        if ai_status_callback:
-                            ai_status_callback(original_url, msg)
-                    try:
-                        ai_summary = await asyncio.wait_for(
-                            generate_ai_summary(
-                                ai_api_key, ai_provider, ai_model, ai_prompt or "",
-                                lead_data, scraped_text, status_callback=url_status_callback
-                            ),
-                            timeout=120
-                        )
-                    except asyncio.TimeoutError:
-                        ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
-                        _scrape_status("error", "Company summary: timeout (2 min)")
-                    except Exception as e:
-                        ai_summary = f"❌ AI Summary error: {str(e)}"
-                        err_short = str(e)[:80] if e else "unknown"
-                        _scrape_status("error", f"Company summary failed: {err_short}")
+                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < 50:
+                        ai_summary = "❌ Summary skipped: site unreachable or insufficient content"
                     else:
-                        if ai_summary and ai_summary.startswith("❌"):
-                            _scrape_status("error", "Company summary failed")
+                        _scrape_status("ai_summarizing", "Generating AI summary...")
+                        def url_status_callback(msg):
+                            if scrape_status_callback:
+                                try:
+                                    scrape_status_callback(original_url, "ai_summarizing", msg)
+                                except Exception:
+                                    pass
+                            if ai_status_callback:
+                                ai_status_callback(original_url, msg)
+                        try:
+                            ai_summary = await asyncio.wait_for(
+                                generate_ai_summary(
+                                    ai_api_key, ai_provider, ai_model, ai_prompt or "",
+                                    lead_data, scraped_text, status_callback=url_status_callback
+                                ),
+                                timeout=120
+                            )
+                        except asyncio.TimeoutError:
+                            ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
+                            _scrape_status("error", "Company summary: timeout (2 min)")
+                        except Exception as e:
+                            ai_summary = f"❌ AI Summary error: {str(e)}"
+                            err_short = str(e)[:80] if e else "unknown"
+                            _scrape_status("error", f"Company summary failed: {err_short}")
+                        else:
+                            if ai_summary and ai_summary.startswith("❌"):
+                                _scrape_status("error", "Company summary failed")
                 else:
                     ai_summary = ""
-                # Generate email copy if enabled (runs independently)
+                # Generate email copy if enabled (skip when scraping already failed)
                 if email_copy_enabled and email_copy_api_key and email_copy_provider and email_copy_model:
-                    _scrape_status("email_copy", "Generating email copy...")
-                    def email_status_callback(msg):
-                        if scrape_status_callback:
-                            try:
-                                scrape_status_callback(original_url, "email_copy", msg)
-                            except Exception:
-                                pass
-                    try:
-                        email_copy = await asyncio.wait_for(
-                            generate_email_copy(
-                                email_copy_api_key, email_copy_provider, email_copy_model,
-                                email_copy_prompt or "", lead_data, scraped_text,
-                                status_callback=email_status_callback
-                            ),
-                            timeout=120
-                        )
-                    except asyncio.TimeoutError:
-                        email_copy = "❌ Email copy timeout: Generation exceeded 2 minutes"
-                        _scrape_status("error", "Email copy: timeout (2 min)")
-                    except Exception as e:
-                        email_copy = f"❌ Email copy error: {str(e)}"
-                        err_short = str(e)[:80] if e else "unknown"
-                        _scrape_status("error", f"Email copy failed: {err_short}")
+                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < 50:
+                        email_copy = "❌ Email skipped: site unreachable or insufficient content"
                     else:
-                        if email_copy and email_copy.startswith("❌"):
-                            _scrape_status("error", "Email copy failed")
+                        _scrape_status("email_copy", "Generating email copy...")
+                        def email_status_callback(msg):
+                            if scrape_status_callback:
+                                try:
+                                    scrape_status_callback(original_url, "email_copy", msg)
+                                except Exception:
+                                    pass
+                        try:
+                            email_copy = await asyncio.wait_for(
+                                generate_email_copy(
+                                    email_copy_api_key, email_copy_provider, email_copy_model,
+                                    email_copy_prompt or "", lead_data, scraped_text,
+                                    status_callback=email_status_callback
+                                ),
+                                timeout=120
+                            )
+                        except asyncio.TimeoutError:
+                            email_copy = "❌ Email copy timeout: Generation exceeded 2 minutes"
+                            _scrape_status("error", "Email copy: timeout (2 min)")
+                        except Exception as e:
+                            email_copy = f"❌ Email copy error: {str(e)}"
+                            err_short = str(e)[:80] if e else "unknown"
+                            _scrape_status("error", f"Email copy failed: {err_short}")
+                        else:
+                            if email_copy and email_copy.startswith("❌"):
+                                _scrape_status("error", "Email copy failed")
                 else:
                     email_copy = ""
             
@@ -3346,63 +3424,22 @@ if uploaded_file is not None:
         with col_sel2:
             st.caption("📌 **Required** - Must select this")
         
-        # Additional lead data columns (optional)
+        # Additional lead data columns (optional) - multi-select for AI prompts
         st.markdown("---")
-        with st.expander("📊 Extra Info for AI (Optional)", expanded=False):
-            st.caption("Only needed if you're using AI summaries. Select columns with company names, industry, etc.")
-        
-        col_lead1, col_lead2, col_lead3 = st.columns(3)
-        
-        with col_lead1:
-            if csv_has_headers == "Yes":
-                company_name_col = st.selectbox(
-                    "Company Name Column (optional)",
-                    options=["None"] + list(df_preview.columns),
-                    index=0,
-                    help="Column with company names"
-                )
-            else:
-                company_name_col = st.selectbox(
-                    "Company Name Column (optional)",
-                    options=["None"] + [f"Column {i+1}" for i in range(len(df_preview.columns))],
-                    index=0
-                )
-            if company_name_col != "None":
-                lead_data_columns['company_name'] = company_name_col
-        
-        with col_lead2:
-            if csv_has_headers == "Yes":
-                industry_col = st.selectbox(
-                    "Industry Column (optional)",
-                    options=["None"] + list(df_preview.columns),
-                    index=0,
-                    help="Column with industry information"
-                )
-            else:
-                industry_col = st.selectbox(
-                    "Industry Column (optional)",
-                    options=["None"] + [f"Column {i+1}" for i in range(len(df_preview.columns))],
-                    index=0
-                )
-            if industry_col != "None":
-                lead_data_columns['industry'] = industry_col
-        
-        with col_lead3:
-            if csv_has_headers == "Yes":
-                other_col = st.selectbox(
-                    "Other Column (optional)",
-                    options=["None"] + list(df_preview.columns),
-                    index=0,
-                    help="Any other relevant column"
-                )
-            else:
-                other_col = st.selectbox(
-                    "Other Column (optional)",
-                    options=["None"] + [f"Column {i+1}" for i in range(len(df_preview.columns))],
-                    index=0
-                )
-            if other_col != "None":
-                lead_data_columns['other'] = other_col
+        with st.expander("📊 Columns for AI prompts (Optional)", expanded=False):
+            st.caption("Select columns to pass as variables to AI (Step 3 & 4). Use {company_name}, {revenue_m}, etc. in your prompts.")
+            col_options = list(df_preview.columns) if csv_has_headers == "Yes" else [f"Column {i+1}" for i in range(len(df_preview.columns))]
+            selected_lead_cols = st.multiselect(
+                "Columns to include as lead data",
+                options=col_options,
+                default=[],
+                help="Adds these as {placeholder} variables. E.g. 'Company Name' → {company_name}, 'Revenue ($M)' → {revenue_m}"
+            )
+            lead_data_columns = {}
+            for col in selected_lead_cols:
+                key = _col_to_placeholder(col)
+                if key:
+                    lead_data_columns[key] = col
         
         # Store in session state for use during scraping and token estimator
         url_col_idx = list(df_preview.columns).index(url_column) if csv_has_headers == "Yes" else int(url_column.replace("Column ", "")) - 1
@@ -3749,12 +3786,22 @@ CRITICAL:
         st.session_state['master_prompt'] = default_prompt_template
     
     if prompt_mode == "Customize prompt":
-        st.caption("💡 Use {url}, {company_name}, and {scraped_content} as placeholders")
+        placeholders = _get_available_placeholders()
+        var_options = [f"{{{p}}}" for p in placeholders]
+        ins_col1, ins_col2 = st.columns([3, 1])
+        with ins_col1:
+            st.caption("💡 Insert variables: " + ", ".join(var_options[:8]) + (" …" if len(var_options) > 8 else ""))
+        with ins_col2:
+            sel_var = st.selectbox("Insert variable", options=var_options, key="ai_prompt_var_select", label_visibility="collapsed")
+            if st.button("Insert at end", key="ai_prompt_insert_btn"):
+                cur = st.session_state.get('master_prompt', default_prompt_template)
+                st.session_state['master_prompt'] = cur + sel_var
+                st.rerun()
         ai_prompt = st.text_area(
             "Custom prompt",
             value=st.session_state.get('master_prompt', default_prompt_template),
             height=300,
-            help="Edit the prompt that will be sent to AI",
+            help="Use {url}, {company_name}, {scraped_content} and any columns you selected in Step 1",
             key="ai_prompt_edit"
         )
         st.session_state['master_prompt'] = ai_prompt
@@ -3764,10 +3811,10 @@ CRITICAL:
     st.session_state['ai_prompt'] = ai_prompt
     
     with st.expander("Preview prompt", expanded=False):
-        sample_url = "https://example.com"
-        sample_company = "Example Company"
-        sample_content = "Sample website content..."
-        preview = ai_prompt.replace('{url}', sample_url).replace('{company_name}', sample_company).replace('{scraped_content}', sample_content[:200])
+        sample = _get_sample_lead_data_for_preview()
+        preview = ai_prompt
+        for k, v in sample.items():
+            preview = preview.replace('{' + k + '}', str(v)[:300])
         st.code(preview, language=None)
 
 else:
@@ -3795,30 +3842,47 @@ st.session_state['email_copy_enabled'] = email_copy_enabled
 
 if email_copy_enabled:
     st.markdown("---")
-    st.markdown("#### Provider")
-    email_copy_provider = st.selectbox(
-        "AI provider",
-        ["OpenAI", "Gemini", "OpenRouter"],
-        key="email_copy_provider_select"
+    use_step3_credentials = st.checkbox(
+        "Use same API key and model as Step 3",
+        value=st.session_state.get('email_copy_use_step3', False),
+        help="Reuse the provider, API key, and model from Company Summary (Step 3). Requires Step 3 to be enabled.",
+        key="email_copy_use_step3_checkbox"
     )
-    st.session_state['email_copy_provider'] = email_copy_provider
-    st.markdown("#### API key")
-    ec_api_key_name = f"{email_copy_provider.lower()}_api_key"
-    email_copy_api_key = st.text_input(
-        "API key",
-        value=st.session_state.get(ec_api_key_name, ""),
-        type="password",
-        key="email_copy_api_key_input"
-    )
-    st.session_state[ec_api_key_name] = email_copy_api_key
-    st.markdown("#### Model")
-    if email_copy_provider == "OpenAI":
-        email_copy_model = st.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"], key="email_copy_model_select")
-    elif email_copy_provider == "Gemini":
-        email_copy_model = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"], key="email_copy_model_select")
+    st.session_state['email_copy_use_step3'] = use_step3_credentials
+    if use_step3_credentials and ai_enabled:
+        email_copy_provider = ai_provider
+        email_copy_api_key = ai_api_key
+        email_copy_model = ai_model
+        st.session_state['email_copy_provider'] = email_copy_provider
+        st.session_state['email_copy_model'] = email_copy_model
+        st.caption(f"Using Step 3: {ai_provider} / {ai_model}")
     else:
-        email_copy_model = st.text_input("OpenRouter model (e.g. openai/gpt-4o-mini)", value="openai/gpt-4o-mini", key="email_copy_model_input")
-    st.session_state['email_copy_model'] = email_copy_model
+        if use_step3_credentials and not ai_enabled:
+            st.warning("Enable Step 3 (Company Summary) to use its API key and model.")
+        st.markdown("#### Provider")
+        email_copy_provider = st.selectbox(
+            "AI provider",
+            ["OpenAI", "Gemini", "OpenRouter"],
+            key="email_copy_provider_select"
+        )
+        st.session_state['email_copy_provider'] = email_copy_provider
+        st.markdown("#### API key")
+        ec_api_key_name = f"{email_copy_provider.lower()}_api_key"
+        email_copy_api_key = st.text_input(
+            "API key",
+            value=st.session_state.get(ec_api_key_name, ""),
+            type="password",
+            key="email_copy_api_key_input"
+        )
+        st.session_state[ec_api_key_name] = email_copy_api_key
+        st.markdown("#### Model")
+        if email_copy_provider == "OpenAI":
+            email_copy_model = st.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"], key="email_copy_model_select")
+        elif email_copy_provider == "Gemini":
+            email_copy_model = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"], key="email_copy_model_select")
+        else:
+            email_copy_model = st.text_input("OpenRouter model (e.g. openai/gpt-4o-mini)", value="openai/gpt-4o-mini", key="email_copy_model_input")
+        st.session_state['email_copy_model'] = email_copy_model
     st.markdown("#### Prompt")
     default_email_prompt = """You are an expert B2B sales copywriter.
 
@@ -3839,11 +3903,22 @@ Requirements:
 - No generic fluff"""
     if 'email_copy_prompt' not in st.session_state:
         st.session_state['email_copy_prompt'] = default_email_prompt
+    placeholders_ec = _get_available_placeholders()
+    var_options_ec = [f"{{{p}}}" for p in placeholders_ec]
+    ec_col1, ec_col2 = st.columns([3, 1])
+    with ec_col1:
+        st.caption("💡 Variables: " + ", ".join(var_options_ec[:8]) + (" …" if len(var_options_ec) > 8 else ""))
+    with ec_col2:
+        sel_var_ec = st.selectbox("Insert variable", options=var_options_ec, key="email_copy_var_select", label_visibility="collapsed")
+        if st.button("Insert at end", key="email_copy_insert_btn"):
+            cur = st.session_state.get('email_copy_prompt', default_email_prompt)
+            st.session_state['email_copy_prompt'] = cur + sel_var_ec
+            st.rerun()
     email_copy_prompt = st.text_area(
         "Email copy prompt",
         value=st.session_state.get('email_copy_prompt', default_email_prompt),
         height=180,
-        help="Use {url}, {company_name}, {scraped_content} as placeholders",
+        help="Use {url}, {company_name}, {scraped_content} and columns from Step 1",
         key="email_copy_prompt_edit"
     )
     st.session_state['email_copy_prompt'] = email_copy_prompt
@@ -4065,19 +4140,18 @@ if uploaded_file and test_clicked:
                 urls = [u for u, _ in url_list_with_idx]
                 lead_data_map = {}
                 for idx, (url, orig_row) in enumerate(url_list_with_idx):
-                    lead_data = {'url': url, 'company_name': url.replace('https://', '').replace('http://', '').split('/')[0]}
-                    if 'company_name' in lead_cols:
-                        cn = lead_cols['company_name']
-                        ci = list(df_in.columns).index(cn) if has_headers else int(str(cn).replace("Column ", "")) - 1
-                        lead_data['company_name'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else lead_data['company_name']
-                    if 'industry' in lead_cols:
-                        cn = lead_cols['industry']
-                        ci = list(df_in.columns).index(cn) if has_headers else int(str(cn).replace("Column ", "")) - 1
-                        lead_data['industry'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
-                    if 'other' in lead_cols:
-                        cn = lead_cols['other']
-                        ci = list(df_in.columns).index(cn) if has_headers else int(str(cn).replace("Column ", "")) - 1
-                        lead_data['other'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
+                    lead_data = {'url': url}
+                    default_company = url.replace('https://', '').replace('http://', '').split('/')[0] if url else ''
+                    for key, col_name in (lead_cols or {}).items():
+                        try:
+                            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
+                            val = df_in.iloc[orig_row, ci] if orig_row < len(df_in) else None
+                            v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
+                            lead_data[key] = v
+                        except (ValueError, TypeError, IndexError):
+                            lead_data[key] = ""
+                    if not lead_data.get('company_name'):
+                        lead_data['company_name'] = default_company
                     lead_data_map[idx] = lead_data
 
                 if not urls:
@@ -4219,18 +4293,17 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     lead_data_map = {}
     for idx, (url, orig_row) in enumerate(url_list_with_idx):
         lead_data = {'url': url}
-        if 'company_name' in lead_cols:
-            col_name = lead_cols['company_name']
-            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
-            lead_data['company_name'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
-        if 'industry' in lead_cols:
-            col_name = lead_cols['industry']
-            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
-            lead_data['industry'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
-        if 'other' in lead_cols:
-            col_name = lead_cols['other']
-            ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
-            lead_data['other'] = str(df_in.iloc[orig_row, ci]) if orig_row < len(df_in) and pd.notna(df_in.iloc[orig_row, ci]) else ""
+        default_company = url.replace('https://', '').replace('http://', '').split('/')[0] if url else ''
+        for key, col_name in (lead_cols or {}).items():
+            try:
+                ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
+                val = df_in.iloc[orig_row, ci] if orig_row < len(df_in) else None
+                v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
+                lead_data[key] = v
+            except (ValueError, TypeError, IndexError):
+                lead_data[key] = ""
+        if not lead_data.get('company_name'):
+            lead_data['company_name'] = default_company
         lead_data_map[idx] = lead_data
     
     # Store lead data map in session state
