@@ -272,7 +272,7 @@ def _col_to_placeholder(col_name: str) -> str:
 
 
 def _format_var_value(v) -> str:
-    """Format any value for safe insertion into prompts. Handles None, NaN, control chars. Preserves content."""
+    """Format any value for safe insertion into prompts. Handles None, NaN, control chars. Preserves newlines/formatting."""
     if v is None:
         return ""
     try:
@@ -286,14 +286,13 @@ def _format_var_value(v) -> str:
         return ""
     s = s.replace("\x00", "")
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", s)
-    s = re.sub(r"\s+", " ", s)
     return s.strip()
 
 
 def _replace_prompt_variables(template: str, data: dict) -> str:
     """
-    Replace {key} and {{key}} placeholders with values. Robust formatting.
-    scraped_content: raw content (no newline collapse). Others: _format_var_value.
+    Replace {key} and {{key}} placeholders with actual values. Both brace styles get the full value.
+    Longest keys first so e.g. {company_name} is not broken by {company}. Formatting preserved.
     """
     if not template:
         return template
@@ -312,22 +311,25 @@ def _replace_prompt_variables(template: str, data: dict) -> str:
 def _get_variable_definitions() -> list[tuple[str, str, str]]:
     """
     Return list of (display_label, placeholder, key) for prompt variables.
-    - display_label: shown on button (e.g. "Company Name" or "URL")
-    - placeholder: what gets inserted (e.g. "{company_name}")
-    - key: for substitution lookup
+    Driven 100% by the uploaded sheet: URL column + all other columns + company_name + scraped_content.
     """
-    result = [
-        ("URL", "{url}", "url"),
-        ("Company name", "{company_name}", "company_name"),
-        ("Scraped content", "{scraped_content}", "scraped_content"),
-    ]
+    result = []
     csv_cfg = st.session_state.get("csv_config") or {}
-    lead_cols = csv_cfg.get("lead_data_columns") or {}
-    seen = {"url", "company_name", "scraped_content"}
-    for key, col_name in sorted(lead_cols.items(), key=lambda x: x[1].lower()):
-        if key not in seen:
-            seen.add(key)
-            result.append((col_name, f"{{{key}}}", key))
+    url_col = csv_cfg.get("url_column")
+    df = csv_cfg.get("df_preview")
+    has_headers = csv_cfg.get("has_headers", True)
+    col_list = list(df.columns) if df is not None and has_headers else ([f"Column {i+1}" for i in range(len(df.columns))] if df is not None else [])
+
+    result.append(("URL", "{url}", "url"))
+    result.append(("Company name", "{company_name}", "company_name"))
+    for col in col_list:
+        if col == url_col:
+            continue
+        key = _col_to_placeholder(col)
+        if not key:
+            continue
+        result.append((str(col), "{" + key + "}", key))
+    result.append(("Scraped content", "{scraped_content}", "scraped_content"))
     return result
 
 
@@ -336,15 +338,36 @@ def _get_available_placeholders() -> list[str]:
     return [r[2] for r in _get_variable_definitions()]
 
 
+@st.dialog("Sample prompt — filled with one lead's data")
+def _sample_prompt_dialog(prompt_key: str, sample_row_index: int | None = None):
+    """Show the prompt with variables replaced by one lead's data (first row or random)."""
+    prompt_text = st.session_state.get(prompt_key, "")
+    sample = _get_lead_sample_from_row(sample_row_index)
+    filled = _replace_prompt_variables(prompt_text, sample)
+    st.caption("Use this to verify structure. Variables are filled from one row of your uploaded sheet.")
+    st.text_area("Filled prompt", value=filled, height=400, disabled=True, key="sample_dialog_ta", label_visibility="collapsed")
+    if st.button("Close"):
+        st.close_dialog()
+
+
 def _get_sample_lead_data_for_preview() -> dict:
     """Get sample values from first CSV row for prompt preview. Returns dict of key -> value."""
-    out = {"url": "https://example.com", "company_name": "Example Company", "scraped_content": "Sample website content..."}
+    return _get_lead_sample_from_row(0)
+
+
+def _get_lead_sample_from_row(row_index: int | None = None) -> dict:
+    """Get sample values from one CSV row. If row_index is None, picks a random row. For scraped_content we use placeholder text."""
+    out = {"url": "https://example.com", "company_name": "Example Company", "scraped_content": "[Scraped content would appear here for this lead]"}
     csv_cfg = st.session_state.get("csv_config") or {}
     df = csv_cfg.get("df_preview")
     if df is None or df.empty:
         return out
     has_headers = csv_cfg.get("has_headers", True)
-    row = df.iloc[0]
+    n = len(df)
+    if n == 0:
+        return out
+    idx = row_index if row_index is not None and 0 <= row_index < n else random.randint(0, n - 1)
+    row = df.iloc[idx]
     url_col = csv_cfg.get("url_column")
     if url_col:
         try:
@@ -3477,22 +3500,20 @@ if uploaded_file is not None:
         with col_sel2:
             st.caption("📌 **Required** - Must select this")
         
-        # Additional lead data columns (optional) - multi-select for AI prompts
+        # All non-URL columns become variables for AI prompts (Step 3 & 4)
         st.markdown("---")
-        with st.expander("📊 Columns for AI prompts (Optional)", expanded=False):
-            st.caption("Select columns to pass as variables to AI (Step 3 & 4). Use {company_name}, {revenue_m}, etc. in your prompts.")
-            col_options = list(df_preview.columns) if csv_has_headers == "Yes" else [f"Column {i+1}" for i in range(len(df_preview.columns))]
-            selected_lead_cols = st.multiselect(
-                "Columns to include as lead data",
-                options=col_options,
-                default=[],
-                help="Adds these as {placeholder} variables. E.g. 'Company Name' → {company_name}, 'Revenue ($M)' → {revenue_m}"
-            )
-            lead_data_columns = {}
-            for col in selected_lead_cols:
-                key = _col_to_placeholder(col)
-                if key:
-                    lead_data_columns[key] = col
+        col_options = list(df_preview.columns) if csv_has_headers == "Yes" else [f"Column {i+1}" for i in range(len(df_preview.columns))]
+        lead_data_columns = {}
+        for col in col_options:
+            if col == url_column:
+                continue
+            key = _col_to_placeholder(col)
+            if key:
+                lead_data_columns[key] = col
+        with st.expander("📊 Variables from your sheet", expanded=True):
+            st.caption("Every column (except the URL column) is available as a variable in Steps 3 & 4. E.g. column \"Website Name\" → {website_name} in your prompt.")
+            if lead_data_columns:
+                st.code(" • ".join(f"{{{k}}}" for k in sorted(lead_data_columns.keys())[:20]) + (" …" if len(lead_data_columns) > 20 else ""), language=None)
         
         # Store in session state for use during scraping and token estimator
         url_col_idx = list(df_preview.columns).index(url_column) if csv_has_headers == "Yes" else int(url_column.replace("Column ", "")) - 1
@@ -3839,35 +3860,41 @@ CRITICAL:
         st.session_state['master_prompt'] = default_prompt_template
     
     if prompt_mode == "Customize prompt":
+        st.markdown("#### Select variables (from your sheet)")
         vars_def = _get_variable_definitions()
-        st.caption("Click a variable to insert into your prompt (supports {var} and {{var}}):")
-        ncols = min(6, len(vars_def))
-        cols = st.columns(ncols)
-        for i, (label, placeholder, _) in enumerate(vars_def):
-            with cols[i % ncols]:
-                if st.button(f"{label} → {placeholder}", key=f"ai_ins_{i}"):
-                    cur = st.session_state.get('master_prompt', default_prompt_template)
-                    st.session_state['master_prompt'] = cur + placeholder
-                    st.rerun()
+        label_to_placeholder = {label: placeholder for (label, placeholder, _) in vars_def}
+        var_options = [label for (label, _, _) in vars_def]
+        prev_selection = set(st.session_state.get("step3_var_selection", []))
+        selected_labels = st.multiselect(
+            "Add variables to prompt",
+            options=var_options,
+            default=st.session_state.get("step3_var_selection", []),
+            help="Select one or more; they will be inserted at the end of the prompt. Same headers as your uploaded CSV.",
+            key="step3_var_multiselect"
+        )
+        st.session_state["step3_var_selection"] = selected_labels
+        new_added = set(selected_labels) - prev_selection
+        if new_added:
+            cur = st.session_state.get("master_prompt", default_prompt_template)
+            to_append = "".join(label_to_placeholder[l] for l in selected_labels if l in new_added and l in label_to_placeholder)
+            if to_append:
+                st.session_state["master_prompt"] = cur + to_append
+                st.rerun()
         ai_prompt = st.text_area(
             "Custom prompt",
-            value=st.session_state.get('master_prompt', default_prompt_template),
+            value=st.session_state.get("master_prompt", default_prompt_template),
             height=300,
-            help="Use {url}, {company_name}, {scraped_content} and any columns you selected in Step 1",
+            help="You can also type variables manually with curly brackets, e.g. {company_name} or {revenue_m}.",
             key="ai_prompt_edit"
         )
-        st.session_state['master_prompt'] = ai_prompt
+        st.session_state["master_prompt"] = ai_prompt
+        st.caption("You can type variables manually using curly brackets, e.g. {company_name}. Use {var} or {{var}} — both work.")
+        if st.button("Preview with sample lead", key="step3_sample_btn"):
+            _sample_prompt_dialog("master_prompt", sample_row_index=None)
     else:
-        ai_prompt = st.session_state.get('master_prompt', default_prompt_template)
+        ai_prompt = st.session_state.get("master_prompt", default_prompt_template)
     
-    st.session_state['ai_prompt'] = ai_prompt
-    
-    with st.expander("Preview prompt", expanded=False):
-        sample = _get_sample_lead_data_for_preview()
-        preview = ai_prompt
-        for k, v in sample.items():
-            preview = preview.replace('{' + k + '}', str(v)[:300])
-        st.code(preview, language=None)
+    st.session_state["ai_prompt"] = ai_prompt
 
 else:
     ai_api_key = None
@@ -3955,25 +3982,37 @@ Requirements:
 - No generic fluff"""
     if 'email_copy_prompt' not in st.session_state:
         st.session_state['email_copy_prompt'] = default_email_prompt
-    placeholders_ec = _get_available_placeholders()
-    var_options_ec = [f"{{{p}}}" for p in placeholders_ec]
-    ec_col1, ec_col2 = st.columns([3, 1])
-    with ec_col1:
-        st.caption("💡 Variables: " + ", ".join(var_options_ec[:8]) + (" …" if len(var_options_ec) > 8 else ""))
-    with ec_col2:
-        sel_var_ec = st.selectbox("Insert variable", options=var_options_ec, key="email_copy_var_select", label_visibility="collapsed")
-        if st.button("Insert at end", key="email_copy_insert_btn"):
-            cur = st.session_state.get('email_copy_prompt', default_email_prompt)
-            st.session_state['email_copy_prompt'] = cur + sel_var_ec
+    st.markdown("#### Select variables (from your sheet)")
+    vars_def_ec = _get_variable_definitions()
+    label_to_placeholder_ec = {label: placeholder for (label, placeholder, _) in vars_def_ec}
+    var_options_ec = [label for (label, _, _) in vars_def_ec]
+    prev_selection_ec = set(st.session_state.get("step4_var_selection", []))
+    selected_labels_ec = st.multiselect(
+        "Add variables to prompt",
+        options=var_options_ec,
+        default=st.session_state.get("step4_var_selection", []),
+        help="Select one or more; they will be inserted at the end of the prompt. Same headers as your uploaded CSV.",
+        key="step4_var_multiselect"
+    )
+    st.session_state["step4_var_selection"] = selected_labels_ec
+    new_added_ec = set(selected_labels_ec) - prev_selection_ec
+    if new_added_ec:
+        cur_ec = st.session_state.get("email_copy_prompt", default_email_prompt)
+        to_append_ec = "".join(label_to_placeholder_ec[l] for l in selected_labels_ec if l in new_added_ec and l in label_to_placeholder_ec)
+        if to_append_ec:
+            st.session_state["email_copy_prompt"] = cur_ec + to_append_ec
             st.rerun()
     email_copy_prompt = st.text_area(
         "Email copy prompt",
         value=st.session_state.get('email_copy_prompt', default_email_prompt),
         height=180,
-        help="Use {url}, {company_name}, {scraped_content} and columns from Step 1",
+        help="You can also type variables manually with curly brackets, e.g. {company_name}.",
         key="email_copy_prompt_edit"
     )
     st.session_state['email_copy_prompt'] = email_copy_prompt
+    st.caption("You can type variables manually using curly brackets, e.g. {company_name}. Use {var} or {{var}} — both work.")
+    if st.button("Preview with sample lead", key="step4_sample_btn"):
+        _sample_prompt_dialog("email_copy_prompt", sample_row_index=None)
 else:
     email_copy_api_key = None
     email_copy_provider = None
