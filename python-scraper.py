@@ -340,14 +340,35 @@ def _get_available_placeholders() -> list[str]:
 
 @st.dialog("Sample prompt — filled with one lead's data")
 def _sample_prompt_dialog(prompt_key: str, sample_row_index: int | None = None):
-    """Show the prompt with variables replaced by one lead's data (first row or random)."""
-    prompt_text = st.session_state.get(prompt_key, "")
-    sample = _get_lead_sample_from_row(sample_row_index)
-    filled = _replace_prompt_variables(prompt_text, sample)
+    """Show the prompt with variables replaced by one lead's data. User can change the sample row."""
+    prompt_text = st.session_state.get(prompt_key, "") or ""
+    csv_cfg = st.session_state.get("csv_config") or {}
+    df = csv_cfg.get("df_preview")
+    n_rows = len(df) if df is not None and not df.empty else 1
+    row_options = list(range(n_rows))
+    prev_row = st.session_state.get("sample_dialog_row_select", 0)
+    if prev_row not in row_options:
+        prev_row = 0
     st.caption("Use this to verify structure. Variables are filled from one row of your uploaded sheet.")
+    selected_row = st.selectbox(
+        "Change sample lead (row from your sheet)",
+        options=row_options,
+        index=row_options.index(prev_row) if row_options else 0,
+        format_func=lambda i: f"Row {i + 1}",
+        key="sample_dialog_row_select"
+    )
+    sample = _get_lead_sample_from_row(selected_row)
+    scraped_placeholder = sample.get("scraped_content", "[Scraped content would appear here for this lead]")
+    if prompt_key == "master_prompt":
+        filled = build_company_summary_prompt(prompt_text, sample, scraped_placeholder)
+        filled = filled + COMPANY_SUMMARY_FINAL_REMINDER
+    else:
+        filled = build_email_copy_prompt(prompt_text, sample, scraped_placeholder)
+    st.caption("This is the exact prompt (including formatting) that would be sent to the AI for this lead.")
     st.text_area("Filled prompt", value=filled, height=400, disabled=True, key="sample_dialog_ta", label_visibility="collapsed")
-    if st.button("Close"):
-        st.close_dialog()
+    if st.button("Close", key="sample_dialog_close"):
+        st.session_state.pop("_sample_dialog", None)
+        st.rerun()
 
 
 def _get_sample_lead_data_for_preview() -> dict:
@@ -391,10 +412,9 @@ def _get_lead_sample_from_row(row_index: int | None = None) -> dict:
                 ci = int(str(col_name).replace("Column ", "")) - 1
                 val = row.iloc[ci]
             v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
-            if v:
-                out[key] = v
+            out[key] = v
         except Exception:
-            pass
+            out[key] = ""
     return out
 
 
@@ -476,14 +496,41 @@ def _normalize_ai_error_for_display(msg: str, prefix: str = "Summary") -> str:
     return f"{prefix} failed: {rest}" if rest else f"{prefix} failed"
 
 
+# Appended to company summary prompt when sending to AI (so sample preview matches exactly)
+COMPANY_SUMMARY_FINAL_REMINDER = """
+
+═══════════════════════════════════════════════════════════
+CRITICAL OUTPUT FORMAT REQUIREMENTS:
+═══════════════════════════════════════════════════════════
+1. Use EXACT section headers: ===SUMMARY===, ===FACTS===, ===HYPOTHESES===
+2. Do NOT use markdown formatting (**, __, #). Use plain text only.
+3. Evidence quotes must be COMPLETE sentences, not truncated with "..."
+4. Do NOT truncate words mid-word. Always end at sentence boundaries.
+5. Keep sections separate. Do NOT mix facts into hypotheses or vice versa.
+6. Facts must be grounded (from webcopy). Hypotheses must be inferred (marked with (obs)).
+7. Use consistent format:
+   - Fact: [statement]
+   - Evidence Quote: "[complete quote from webcopy]"
+   - Source: [page name or Webcopy]
+   - Hypothesis: [inference] (obs)
+   - Signal: "[specific wording from webcopy]"
+   - Commercial implication: [why it matters]
+   - Confidence: High/Medium/Low
+8. Do NOT include inline labels like "Confidence: Medium Signal: ..." - use structured format above.
+═══════════════════════════════════════════════════════════
+"""
+
+
 def build_company_summary_prompt(base_prompt: str, lead_data: dict | None, scraped_content: str | None) -> str:
     """
     Build the complete prompt for AI company summary generation.
+    Scraped content is inserted only where {scraped_content} or {{scraped_content}} appears;
+    it is never injected elsewhere, so no double-adding.
     
     Args:
         base_prompt: User-provided base prompt (with placeholders)
         lead_data: Dictionary with lead information (URL, company name, etc.)
-        scraped_content: Scraped website content
+        scraped_content: Scraped website content (replaces {scraped_content} in prompt)
     
     Returns:
         Complete prompt string ready for AI
@@ -591,10 +638,11 @@ CRITICAL:
     def _humanize_key(k):
         return k.replace('_', ' ').title()
 
-    # Build lead information section from all lead_data
+    # Build lead information section from lead_data only (exclude scraped_content so it appears only via {scraped_content})
     lead_info_parts = [f"- {_humanize_key(k)}: {_format_var_value(v)}" for k, v in sorted(lead_data.items()) if k != 'scraped_content' and _format_var_value(v)]
     lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts) if lead_info_parts else "LEAD INFORMATION:\n(no additional lead data)"
 
+    # Replace all placeholders including {scraped_content}; scraped content is never injected elsewhere
     prompt = _replace_prompt_variables(prompt_template, lead_data)
 
     if 'LEAD INFORMATION:' in prompt:
@@ -1198,30 +1246,7 @@ async def generate_ai_summary(
     # Build complete prompt with STRICT formatting requirements
     full_prompt = build_company_summary_prompt(prompt, lead_data, scraped_content)
     
-    # Add STRICT formatting reminder
-    final_reminder = """
-
-═══════════════════════════════════════════════════════════
-CRITICAL OUTPUT FORMAT REQUIREMENTS:
-═══════════════════════════════════════════════════════════
-1. Use EXACT section headers: ===SUMMARY===, ===FACTS===, ===HYPOTHESES===
-2. Do NOT use markdown formatting (**, __, #). Use plain text only.
-3. Evidence quotes must be COMPLETE sentences, not truncated with "..."
-4. Do NOT truncate words mid-word. Always end at sentence boundaries.
-5. Keep sections separate. Do NOT mix facts into hypotheses or vice versa.
-6. Facts must be grounded (from webcopy). Hypotheses must be inferred (marked with (obs)).
-7. Use consistent format:
-   - Fact: [statement]
-   - Evidence Quote: "[complete quote from webcopy]"
-   - Source: [page name or Webcopy]
-   - Hypothesis: [inference] (obs)
-   - Signal: "[specific wording from webcopy]"
-   - Commercial implication: [why it matters]
-   - Confidence: High/Medium/Low
-8. Do NOT include inline labels like "Confidence: Medium Signal: ..." - use structured format above.
-═══════════════════════════════════════════════════════════
-"""
-    full_prompt = full_prompt + final_reminder
+    full_prompt = full_prompt + COMPANY_SUMMARY_FINAL_REMINDER
     
     # Generate summary based on provider
     raw_output = ""
@@ -3888,9 +3913,33 @@ CRITICAL:
             key="ai_prompt_edit"
         )
         st.session_state["master_prompt"] = ai_prompt
+        prompt_cur = st.session_state.get("master_prompt", "")
+        ends_with_brace = prompt_cur.rstrip().endswith("{{") or prompt_cur.rstrip().endswith("{")
+        if ends_with_brace:
+            vars_def_comp = _get_variable_definitions()
+            placeholders_comp = [p for (_, p, _) in vars_def_comp]
+            st.caption("Complete your variable — select one to insert:")
+            complete_choice = st.selectbox(
+                "Variable to insert",
+                options=placeholders_comp,
+                key="step3_complete_var",
+                label_visibility="collapsed"
+            )
+            if st.button("Insert variable", key="step3_insert_var_btn"):
+                base = prompt_cur.rstrip()
+                if base.endswith("{{"):
+                    base = base[:-2]
+                    key = complete_choice.strip("{}")
+                    insert = "{{" + key + "}}"
+                else:
+                    base = base[:-1]
+                    insert = complete_choice if complete_choice.startswith("{") else "{" + complete_choice + "}"
+                st.session_state["master_prompt"] = base + insert
+                st.rerun()
         st.caption("You can type variables manually using curly brackets, e.g. {company_name}. Use {var} or {{var}} — both work.")
         if st.button("Preview with sample lead", key="step3_sample_btn"):
-            _sample_prompt_dialog("master_prompt", sample_row_index=None)
+            st.session_state["_sample_dialog"] = "master_prompt"
+            st.rerun()
     else:
         ai_prompt = st.session_state.get("master_prompt", default_prompt_template)
     
@@ -4010,14 +4059,41 @@ Requirements:
         key="email_copy_prompt_edit"
     )
     st.session_state['email_copy_prompt'] = email_copy_prompt
+    prompt_cur_ec = st.session_state.get("email_copy_prompt", "")
+    ends_with_brace_ec = prompt_cur_ec.rstrip().endswith("{{") or prompt_cur_ec.rstrip().endswith("{")
+    if ends_with_brace_ec:
+        vars_def_comp_ec = _get_variable_definitions()
+        placeholders_comp_ec = [p for (_, p, _) in vars_def_comp_ec]
+        st.caption("Complete your variable — select one to insert:")
+        complete_choice_ec = st.selectbox(
+            "Variable to insert",
+            options=placeholders_comp_ec,
+            key="step4_complete_var",
+            label_visibility="collapsed"
+        )
+        if st.button("Insert variable", key="step4_insert_var_btn"):
+            base_ec = prompt_cur_ec.rstrip()
+            if base_ec.endswith("{{"):
+                base_ec = base_ec[:-2]
+                key_ec = complete_choice_ec.strip("{}")
+                insert_ec = "{{" + key_ec + "}}"
+            else:
+                base_ec = base_ec[:-1]
+                insert_ec = complete_choice_ec if complete_choice_ec.startswith("{") else "{" + complete_choice_ec + "}"
+            st.session_state["email_copy_prompt"] = base_ec + insert_ec
+            st.rerun()
     st.caption("You can type variables manually using curly brackets, e.g. {company_name}. Use {var} or {{var}} — both work.")
     if st.button("Preview with sample lead", key="step4_sample_btn"):
-        _sample_prompt_dialog("email_copy_prompt", sample_row_index=None)
+        st.session_state["_sample_dialog"] = "email_copy_prompt"
+        st.rerun()
 else:
     email_copy_api_key = None
     email_copy_provider = None
     email_copy_model = None
     email_copy_prompt = None
+
+if st.session_state.get("_sample_dialog"):
+    _sample_prompt_dialog(st.session_state["_sample_dialog"])
 
 # Token usage estimator (self-calculating from scraper settings + prompts)
 st.markdown("---")
