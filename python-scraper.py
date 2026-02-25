@@ -358,12 +358,14 @@ def _sample_prompt_dialog(prompt_key: str, sample_row_index: int | None = None):
         key="sample_dialog_row_select"
     )
     sample = _get_lead_sample_from_row(selected_row)
-    scraped_placeholder = sample.get("scraped_content", "[Scraped content would appear here for this lead]")
+    scraped_placeholder = "[Scraped content would appear here for this lead]"
+    sample["scraped_content"] = scraped_placeholder
     if prompt_key == "master_prompt":
         filled = build_company_summary_prompt(prompt_text, sample, scraped_placeholder)
         filled = filled + COMPANY_SUMMARY_FINAL_REMINDER
     else:
         filled = build_email_copy_prompt(prompt_text, sample, scraped_placeholder)
+    filled = filled.replace("{scraped_content}", scraped_placeholder).replace("{{scraped_content}}", scraped_placeholder)
     st.caption("This is the exact prompt (including formatting) that would be sent to the AI for this lead.")
     st.text_area("Filled prompt", value=filled, height=400, disabled=True, key="sample_dialog_ta", label_visibility="collapsed")
     if st.button("Close", key="sample_dialog_close"):
