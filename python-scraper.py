@@ -339,25 +339,10 @@ def _get_available_placeholders() -> list[str]:
 
 
 @st.dialog("Sample prompt — filled with one lead's data")
-def _sample_prompt_dialog(prompt_key: str, sample_row_index: int | None = None):
-    """Show the prompt with variables replaced by one lead's data. User can change the sample row."""
+def _sample_prompt_dialog(prompt_key: str, sample_row_index: int = 0):
+    """Show the prompt with variables replaced by one lead's data. No persistent state — only opens when button is clicked."""
     prompt_text = st.session_state.get(prompt_key, "") or ""
-    csv_cfg = st.session_state.get("csv_config") or {}
-    df = csv_cfg.get("df_preview")
-    n_rows = len(df) if df is not None and not df.empty else 1
-    row_options = list(range(n_rows))
-    prev_row = st.session_state.get("sample_dialog_row_select", 0)
-    if prev_row not in row_options:
-        prev_row = 0
-    st.caption("Use this to verify structure. Variables are filled from one row of your uploaded sheet.")
-    selected_row = st.selectbox(
-        "Change sample lead (row from your sheet)",
-        options=row_options,
-        index=row_options.index(prev_row) if row_options else 0,
-        format_func=lambda i: f"Row {i + 1}",
-        key="sample_dialog_row_select"
-    )
-    sample = _get_lead_sample_from_row(selected_row)
+    sample = _get_lead_sample_from_row(sample_row_index)
     sample["scraped_content"] = EXAMPLE_SCRAPED_CONTENT
     if prompt_key == "master_prompt":
         filled = build_company_summary_prompt(prompt_text, sample, EXAMPLE_SCRAPED_CONTENT)
@@ -368,7 +353,6 @@ def _sample_prompt_dialog(prompt_key: str, sample_row_index: int | None = None):
     st.caption("This is the exact prompt (including formatting) that would be sent to the AI for this lead.")
     st.text_area("Filled prompt", value=filled, height=400, disabled=True, key="sample_dialog_ta", label_visibility="collapsed")
     if st.button("Close", key="sample_dialog_close"):
-        st.session_state.pop("_sample_dialog", None)
         st.rerun()
 
 
@@ -3947,9 +3931,26 @@ CRITICAL:
         sample_s3["scraped_content"] = sample_s3.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
         final_preview_s3 = build_company_summary_prompt(ai_prompt, sample_s3, sample_s3["scraped_content"])
         st.text_area("", value=final_preview_s3[:14000] + ("…" if len(final_preview_s3) > 14000 else ""), height=240, disabled=True, key="step3_final_preview", label_visibility="collapsed")
-        if st.button("Preview with sample lead", key="step3_sample_btn"):
-            st.session_state["_sample_dialog"] = "master_prompt"
-            st.rerun()
+        csv_cfg_s3 = st.session_state.get("csv_config") or {}
+        df_s3 = csv_cfg_s3.get("df_preview")
+        n_rows_s3 = len(df_s3) if df_s3 is not None and not df_s3.empty else 1
+        row_options_s3 = list(range(n_rows_s3))
+        prev_row_s3 = st.session_state.get("step3_preview_row", 0)
+        if prev_row_s3 not in row_options_s3:
+            prev_row_s3 = 0
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            step3_preview_row = st.selectbox(
+                "Preview row",
+                options=row_options_s3,
+                index=row_options_s3.index(prev_row_s3) if row_options_s3 else 0,
+                format_func=lambda i: f"Row {i + 1}",
+                key="step3_preview_row_select"
+            )
+        with c2:
+            st.session_state["step3_preview_row"] = step3_preview_row
+            if st.button("Preview with sample lead", key="step3_sample_btn"):
+                _sample_prompt_dialog("master_prompt", step3_preview_row)
     else:
         ai_prompt = st.session_state.get("master_prompt", default_prompt_template)
     
@@ -4081,17 +4082,31 @@ Requirements:
     sample_ec["scraped_content"] = sample_ec.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
     final_preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec["scraped_content"])
     st.text_area("", value=final_preview_ec[:10000] + ("…" if len(final_preview_ec) > 10000 else ""), height=200, disabled=True, key="step4_final_preview", label_visibility="collapsed")
-    if st.button("Preview with sample lead", key="step4_sample_btn"):
-        st.session_state["_sample_dialog"] = "email_copy_prompt"
-        st.rerun()
+    csv_cfg_ec = st.session_state.get("csv_config") or {}
+    df_ec = csv_cfg_ec.get("df_preview")
+    n_rows_ec = len(df_ec) if df_ec is not None and not df_ec.empty else 1
+    row_options_ec = list(range(n_rows_ec))
+    prev_row_ec = st.session_state.get("step4_preview_row", 0)
+    if prev_row_ec not in row_options_ec:
+        prev_row_ec = 0
+    c1_ec, c2_ec = st.columns([1, 3])
+    with c1_ec:
+        step4_preview_row = st.selectbox(
+            "Preview row",
+            options=row_options_ec,
+            index=row_options_ec.index(prev_row_ec) if row_options_ec else 0,
+            format_func=lambda i: f"Row {i + 1}",
+            key="step4_preview_row_select"
+        )
+    with c2_ec:
+        st.session_state["step4_preview_row"] = step4_preview_row
+        if st.button("Preview with sample lead", key="step4_sample_btn"):
+            _sample_prompt_dialog("email_copy_prompt", step4_preview_row)
 else:
     email_copy_api_key = None
     email_copy_provider = None
     email_copy_model = None
     email_copy_prompt = None
-
-if st.session_state.get("_sample_dialog"):
-    _sample_prompt_dialog(st.session_state["_sample_dialog"])
 
 # Token usage estimator (self-calculating from scraper settings + prompts)
 st.markdown("---")
@@ -4357,9 +4372,9 @@ if uploaded_file and test_clicked:
                     st.rerun()
 
 if st.session_state.get("_test_running"):
-    with st.spinner("Running test... (scraping + AI may take 1–3 min, please wait)"):
-        time.sleep(2)
-    st.rerun()
+    st.info("🧪 **Test is running in the background** (scraping + AI may take 1–3 min). You can keep scrolling or editing settings. Click below to check if results are ready.")
+    if st.button("Check for results", key="test_check_results_btn"):
+        st.rerun()
 
 if st.session_state.get("_test_results") is not None and not st.session_state.get("_test_running"):
     results = st.session_state["_test_results"]
