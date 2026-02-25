@@ -3899,7 +3899,7 @@ CRITICAL:
             key="ai_prompt_edit"
         )
         st.session_state["master_prompt"] = ai_prompt
-        prompt_cur = st.session_state.get("master_prompt", "")
+        prompt_cur = ai_prompt
         ends_with_brace = prompt_cur.rstrip().endswith("{{") or prompt_cur.rstrip().endswith("{")
         if ends_with_brace:
             placeholders_comp = [p for (_, p, _) in vars_def]
@@ -3922,10 +3922,13 @@ CRITICAL:
                 st.session_state["master_prompt"] = base + insert
                 st.rerun()
         with st.expander("Preview (updates when you change the prompt)", expanded=True):
+            st.caption("Preview reflects the text above. After editing, click anywhere or use **Refresh preview** to update.")
             sample_s3 = _get_sample_lead_data_for_preview()
             sample_s3["scraped_content"] = sample_s3.get("scraped_content") or "[Scraped content would appear here]"
-            preview_s3 = build_company_summary_prompt(prompt_cur, sample_s3, sample_s3["scraped_content"])
+            preview_s3 = build_company_summary_prompt(ai_prompt, sample_s3, sample_s3["scraped_content"])
             st.text_area("", value=preview_s3[:12000] + ("…" if len(preview_s3) > 12000 else ""), height=220, disabled=True, key="step3_live_preview", label_visibility="collapsed")
+            if st.button("Refresh preview", key="step3_refresh_preview"):
+                st.rerun()
         if st.button("Preview with sample lead", key="step3_sample_btn"):
             st.session_state["_sample_dialog"] = "master_prompt"
             st.rerun()
@@ -4055,10 +4058,13 @@ Requirements:
             st.session_state["email_copy_prompt"] = base_ec + insert_ec
             st.rerun()
     with st.expander("Preview (updates when you change the prompt)", expanded=True):
+        st.caption("Preview reflects the text above. After editing, click anywhere or use **Refresh preview** to update.")
         sample_ec = _get_sample_lead_data_for_preview()
         sample_ec["scraped_content"] = sample_ec.get("scraped_content") or "[Scraped content would appear here]"
-        preview_ec = build_email_copy_prompt(prompt_cur_ec, sample_ec, sample_ec["scraped_content"])
+        preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec["scraped_content"])
         st.text_area("", value=preview_ec[:8000] + ("…" if len(preview_ec) > 8000 else ""), height=180, disabled=True, key="step4_live_preview", label_visibility="collapsed")
+        if st.button("Refresh preview", key="step4_refresh_preview"):
+            st.rerun()
     if st.button("Preview with sample lead", key="step4_sample_btn"):
         st.session_state["_sample_dialog"] = "email_copy_prompt"
         st.rerun()
