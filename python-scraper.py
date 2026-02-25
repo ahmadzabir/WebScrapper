@@ -358,19 +358,33 @@ def _sample_prompt_dialog(prompt_key: str, sample_row_index: int | None = None):
         key="sample_dialog_row_select"
     )
     sample = _get_lead_sample_from_row(selected_row)
-    scraped_placeholder = "[Scraped content would appear here for this lead]"
-    sample["scraped_content"] = scraped_placeholder
+    sample["scraped_content"] = EXAMPLE_SCRAPED_CONTENT
     if prompt_key == "master_prompt":
-        filled = build_company_summary_prompt(prompt_text, sample, scraped_placeholder)
+        filled = build_company_summary_prompt(prompt_text, sample, EXAMPLE_SCRAPED_CONTENT)
         filled = filled + COMPANY_SUMMARY_FINAL_REMINDER
     else:
-        filled = build_email_copy_prompt(prompt_text, sample, scraped_placeholder)
-    filled = filled.replace("{scraped_content}", scraped_placeholder).replace("{{scraped_content}}", scraped_placeholder)
+        filled = build_email_copy_prompt(prompt_text, sample, EXAMPLE_SCRAPED_CONTENT)
+    filled = filled.replace("{scraped_content}", EXAMPLE_SCRAPED_CONTENT).replace("{{scraped_content}}", EXAMPLE_SCRAPED_CONTENT)
     st.caption("This is the exact prompt (including formatting) that would be sent to the AI for this lead.")
     st.text_area("Filled prompt", value=filled, height=400, disabled=True, key="sample_dialog_ta", label_visibility="collapsed")
     if st.button("Close", key="sample_dialog_close"):
         st.session_state.pop("_sample_dialog", None)
         st.rerun()
+
+
+# Example scraped content shown in previews so users see how {scraped_content} will look
+EXAMPLE_SCRAPED_CONTENT = """About Us
+
+Example Company helps businesses grow through digital transformation. Founded in 2020, we provide consulting and software solutions across industries.
+
+Our Services
+- Strategy and planning: We work with leadership to define roadmaps and priorities.
+- Implementation and integration: Our team delivers projects on time and on budget.
+- Training and support: We ensure your people get the most from new systems.
+
+Why choose us? We combine deep industry experience with a practical, no-nonsense approach. Our clients include mid-market and enterprise organizations in technology, healthcare, and financial services.
+
+Contact us at info@example.com or visit our website for more information. We typically respond within one business day."""
 
 
 def _get_sample_lead_data_for_preview() -> dict:
@@ -379,8 +393,8 @@ def _get_sample_lead_data_for_preview() -> dict:
 
 
 def _get_lead_sample_from_row(row_index: int | None = None) -> dict:
-    """Get sample values from one CSV row. If row_index is None, picks a random row. For scraped_content we use placeholder text."""
-    out = {"url": "https://example.com", "company_name": "Example Company", "scraped_content": "[Scraped content would appear here for this lead]"}
+    """Get sample values from one CSV row. If row_index is None, picks a random row. scraped_content uses EXAMPLE_SCRAPED_CONTENT so preview shows realistic example."""
+    out = {"url": "https://example.com", "company_name": "Example Company", "scraped_content": EXAMPLE_SCRAPED_CONTENT}
     csv_cfg = st.session_state.get("csv_config") or {}
     df = csv_cfg.get("df_preview")
     if df is None or df.empty:
@@ -640,8 +654,13 @@ CRITICAL:
     def _humanize_key(k):
         return k.replace('_', ' ').title()
 
-    # Build lead information section from lead_data only (exclude scraped_content so it appears only via {scraped_content})
-    lead_info_parts = [f"- {_humanize_key(k)}: {_format_var_value(v)}" for k, v in sorted(lead_data.items()) if k != 'scraped_content' and _format_var_value(v)]
+    # LEAD INFORMATION block: only URL and company name by default (no auto-dump of all CSV columns).
+    # Other variables (employees, city, etc.) only appear if the user puts {employees}, {city}, etc. in their prompt.
+    lead_info_parts = []
+    for k in ("url", "company_name"):
+        v = _format_var_value(lead_data.get(k))
+        if v:
+            lead_info_parts.append(f"- {_humanize_key(k)}: {v}")
     lead_info_section = "LEAD INFORMATION:\n" + "\n".join(lead_info_parts) if lead_info_parts else "LEAD INFORMATION:\n(no additional lead data)"
 
     # Replace all placeholders including {scraped_content}; scraped content is never injected elsewhere
@@ -3887,16 +3906,17 @@ CRITICAL:
         st.session_state['master_prompt'] = default_prompt_template
     
     if prompt_mode == "Customize prompt":
-        st.markdown("#### Prompt variables")
+        st.markdown("#### Prompt template (edit below)")
         vars_def = _get_variable_definitions()
         placeholders_line = ", ".join(p for (_, p, _) in vars_def)
-        st.caption(f"**Available variables** (type in your prompt): {placeholders_line}")
+        st.caption(f"**Available variables:** {placeholders_line} — type these in the template below.")
         ai_prompt = st.text_area(
-            "Custom prompt",
+            "Prompt template",
             value=st.session_state.get("master_prompt", default_prompt_template),
-            height=300,
-            help="Type variables in curly brackets, e.g. {company_name}, {scraped_content}. Use {var} or {{var}}.",
-            key="ai_prompt_edit"
+            height=280,
+            help="This is the prompt you edit. Variables like {url}, {scraped_content} are replaced when the AI runs. Preview below shows the final version.",
+            key="ai_prompt_edit",
+            label_visibility="collapsed"
         )
         st.session_state["master_prompt"] = ai_prompt
         prompt_cur = ai_prompt
@@ -3921,14 +3941,12 @@ CRITICAL:
                     insert = complete_choice if complete_choice.startswith("{") else "{" + complete_choice + "}"
                 st.session_state["master_prompt"] = base + insert
                 st.rerun()
-        with st.expander("Preview (updates when you change the prompt)", expanded=True):
-            st.caption("Preview reflects the text above. After editing, click anywhere or use **Refresh preview** to update.")
-            sample_s3 = _get_sample_lead_data_for_preview()
-            sample_s3["scraped_content"] = sample_s3.get("scraped_content") or "[Scraped content would appear here]"
-            preview_s3 = build_company_summary_prompt(ai_prompt, sample_s3, sample_s3["scraped_content"])
-            st.text_area("", value=preview_s3[:12000] + ("…" if len(preview_s3) > 12000 else ""), height=220, disabled=True, key="step3_live_preview", label_visibility="collapsed")
-            if st.button("Refresh preview", key="step3_refresh_preview"):
-                st.rerun()
+        st.markdown("#### Final prompt (preview with sample data)")
+        st.caption("This is the exact prompt sent to the AI for each lead (variables filled with sample data from your sheet).")
+        sample_s3 = _get_sample_lead_data_for_preview()
+        sample_s3["scraped_content"] = sample_s3.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
+        final_preview_s3 = build_company_summary_prompt(ai_prompt, sample_s3, sample_s3["scraped_content"])
+        st.text_area("", value=final_preview_s3[:14000] + ("…" if len(final_preview_s3) > 14000 else ""), height=240, disabled=True, key="step3_final_preview", label_visibility="collapsed")
         if st.button("Preview with sample lead", key="step3_sample_btn"):
             st.session_state["_sample_dialog"] = "master_prompt"
             st.rerun()
@@ -4003,7 +4021,7 @@ if email_copy_enabled:
         else:
             email_copy_model = st.text_input("OpenRouter model (e.g. openai/gpt-4o-mini)", value="openai/gpt-4o-mini", key="email_copy_model_input")
         st.session_state['email_copy_model'] = email_copy_model
-    st.markdown("#### Prompt")
+    st.markdown("#### Prompt template (edit below)")
     default_email_prompt = """You are an expert B2B sales copywriter.
 
 Write a personalized outreach email for this company based on their website content.
@@ -4023,19 +4041,19 @@ Requirements:
 - No generic fluff"""
     if 'email_copy_prompt' not in st.session_state:
         st.session_state['email_copy_prompt'] = default_email_prompt
-    st.markdown("#### Prompt variables")
     vars_def_ec = _get_variable_definitions()
     placeholders_line_ec = ", ".join(p for (_, p, _) in vars_def_ec)
-    st.caption(f"**Available variables** (type in your prompt): {placeholders_line_ec}")
+    st.caption(f"**Available variables:** {placeholders_line_ec} — type these in the template below.")
     email_copy_prompt = st.text_area(
-        "Email copy prompt",
+        "Prompt template",
         value=st.session_state.get('email_copy_prompt', default_email_prompt),
-        height=180,
-        help="Type variables in curly brackets, e.g. {company_name}, {scraped_content}. Use {var} or {{var}}.",
-        key="email_copy_prompt_edit"
+        height=160,
+        help="This is the prompt you edit. Variables are replaced when the AI runs. Preview below shows the final version.",
+        key="email_copy_prompt_edit",
+        label_visibility="collapsed"
     )
     st.session_state['email_copy_prompt'] = email_copy_prompt
-    prompt_cur_ec = st.session_state.get("email_copy_prompt", "")
+    prompt_cur_ec = email_copy_prompt
     ends_with_brace_ec = prompt_cur_ec.rstrip().endswith("{{") or prompt_cur_ec.rstrip().endswith("{")
     if ends_with_brace_ec:
         placeholders_comp_ec = [p for (_, p, _) in vars_def_ec]
@@ -4057,14 +4075,12 @@ Requirements:
                 insert_ec = complete_choice_ec if complete_choice_ec.startswith("{") else "{" + complete_choice_ec + "}"
             st.session_state["email_copy_prompt"] = base_ec + insert_ec
             st.rerun()
-    with st.expander("Preview (updates when you change the prompt)", expanded=True):
-        st.caption("Preview reflects the text above. After editing, click anywhere or use **Refresh preview** to update.")
-        sample_ec = _get_sample_lead_data_for_preview()
-        sample_ec["scraped_content"] = sample_ec.get("scraped_content") or "[Scraped content would appear here]"
-        preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec["scraped_content"])
-        st.text_area("", value=preview_ec[:8000] + ("…" if len(preview_ec) > 8000 else ""), height=180, disabled=True, key="step4_live_preview", label_visibility="collapsed")
-        if st.button("Refresh preview", key="step4_refresh_preview"):
-            st.rerun()
+    st.markdown("#### Final prompt (preview with sample data)")
+    st.caption("This is the exact prompt sent to the AI for each lead (variables filled with sample data).")
+    sample_ec = _get_sample_lead_data_for_preview()
+    sample_ec["scraped_content"] = sample_ec.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
+    final_preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec["scraped_content"])
+    st.text_area("", value=final_preview_ec[:10000] + ("…" if len(final_preview_ec) > 10000 else ""), height=200, disabled=True, key="step4_final_preview", label_visibility="collapsed")
     if st.button("Preview with sample lead", key="step4_sample_btn"):
         st.session_state["_sample_dialog"] = "email_copy_prompt"
         st.rerun()
