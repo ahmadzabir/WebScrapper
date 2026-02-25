@@ -3887,39 +3887,22 @@ CRITICAL:
         st.session_state['master_prompt'] = default_prompt_template
     
     if prompt_mode == "Customize prompt":
-        st.markdown("#### Select variables (from your sheet)")
+        st.markdown("#### Prompt variables")
         vars_def = _get_variable_definitions()
-        label_to_placeholder = {label: placeholder for (label, placeholder, _) in vars_def}
-        var_options = [label for (label, _, _) in vars_def]
-        prev_selection = set(st.session_state.get("step3_var_selection", []))
-        selected_labels = st.multiselect(
-            "Add variables to prompt",
-            options=var_options,
-            default=st.session_state.get("step3_var_selection", []),
-            help="Select one or more; they will be inserted at the end of the prompt. Same headers as your uploaded CSV.",
-            key="step3_var_multiselect"
-        )
-        st.session_state["step3_var_selection"] = selected_labels
-        new_added = set(selected_labels) - prev_selection
-        if new_added:
-            cur = st.session_state.get("master_prompt", default_prompt_template)
-            to_append = "".join(label_to_placeholder[l] for l in selected_labels if l in new_added and l in label_to_placeholder)
-            if to_append:
-                st.session_state["master_prompt"] = cur + to_append
-                st.rerun()
+        placeholders_line = ", ".join(p for (_, p, _) in vars_def)
+        st.caption(f"**Available variables** (type in your prompt): {placeholders_line}")
         ai_prompt = st.text_area(
             "Custom prompt",
             value=st.session_state.get("master_prompt", default_prompt_template),
             height=300,
-            help="You can also type variables manually with curly brackets, e.g. {company_name} or {revenue_m}.",
+            help="Type variables in curly brackets, e.g. {company_name}, {scraped_content}. Use {var} or {{var}}.",
             key="ai_prompt_edit"
         )
         st.session_state["master_prompt"] = ai_prompt
         prompt_cur = st.session_state.get("master_prompt", "")
         ends_with_brace = prompt_cur.rstrip().endswith("{{") or prompt_cur.rstrip().endswith("{")
         if ends_with_brace:
-            vars_def_comp = _get_variable_definitions()
-            placeholders_comp = [p for (_, p, _) in vars_def_comp]
+            placeholders_comp = [p for (_, p, _) in vars_def]
             st.caption("Complete your variable — select one to insert:")
             complete_choice = st.selectbox(
                 "Variable to insert",
@@ -3938,7 +3921,11 @@ CRITICAL:
                     insert = complete_choice if complete_choice.startswith("{") else "{" + complete_choice + "}"
                 st.session_state["master_prompt"] = base + insert
                 st.rerun()
-        st.caption("You can type variables manually using curly brackets, e.g. {company_name}. Use {var} or {{var}} — both work.")
+        with st.expander("Preview (updates when you change the prompt)", expanded=True):
+            sample_s3 = _get_sample_lead_data_for_preview()
+            sample_s3["scraped_content"] = sample_s3.get("scraped_content") or "[Scraped content would appear here]"
+            preview_s3 = build_company_summary_prompt(prompt_cur, sample_s3, sample_s3["scraped_content"])
+            st.text_area("", value=preview_s3[:12000] + ("…" if len(preview_s3) > 12000 else ""), height=220, disabled=True, key="step3_live_preview", label_visibility="collapsed")
         if st.button("Preview with sample lead", key="step3_sample_btn"):
             st.session_state["_sample_dialog"] = "master_prompt"
             st.rerun()
@@ -4033,39 +4020,22 @@ Requirements:
 - No generic fluff"""
     if 'email_copy_prompt' not in st.session_state:
         st.session_state['email_copy_prompt'] = default_email_prompt
-    st.markdown("#### Select variables (from your sheet)")
+    st.markdown("#### Prompt variables")
     vars_def_ec = _get_variable_definitions()
-    label_to_placeholder_ec = {label: placeholder for (label, placeholder, _) in vars_def_ec}
-    var_options_ec = [label for (label, _, _) in vars_def_ec]
-    prev_selection_ec = set(st.session_state.get("step4_var_selection", []))
-    selected_labels_ec = st.multiselect(
-        "Add variables to prompt",
-        options=var_options_ec,
-        default=st.session_state.get("step4_var_selection", []),
-        help="Select one or more; they will be inserted at the end of the prompt. Same headers as your uploaded CSV.",
-        key="step4_var_multiselect"
-    )
-    st.session_state["step4_var_selection"] = selected_labels_ec
-    new_added_ec = set(selected_labels_ec) - prev_selection_ec
-    if new_added_ec:
-        cur_ec = st.session_state.get("email_copy_prompt", default_email_prompt)
-        to_append_ec = "".join(label_to_placeholder_ec[l] for l in selected_labels_ec if l in new_added_ec and l in label_to_placeholder_ec)
-        if to_append_ec:
-            st.session_state["email_copy_prompt"] = cur_ec + to_append_ec
-            st.rerun()
+    placeholders_line_ec = ", ".join(p for (_, p, _) in vars_def_ec)
+    st.caption(f"**Available variables** (type in your prompt): {placeholders_line_ec}")
     email_copy_prompt = st.text_area(
         "Email copy prompt",
         value=st.session_state.get('email_copy_prompt', default_email_prompt),
         height=180,
-        help="You can also type variables manually with curly brackets, e.g. {company_name}.",
+        help="Type variables in curly brackets, e.g. {company_name}, {scraped_content}. Use {var} or {{var}}.",
         key="email_copy_prompt_edit"
     )
     st.session_state['email_copy_prompt'] = email_copy_prompt
     prompt_cur_ec = st.session_state.get("email_copy_prompt", "")
     ends_with_brace_ec = prompt_cur_ec.rstrip().endswith("{{") or prompt_cur_ec.rstrip().endswith("{")
     if ends_with_brace_ec:
-        vars_def_comp_ec = _get_variable_definitions()
-        placeholders_comp_ec = [p for (_, p, _) in vars_def_comp_ec]
+        placeholders_comp_ec = [p for (_, p, _) in vars_def_ec]
         st.caption("Complete your variable — select one to insert:")
         complete_choice_ec = st.selectbox(
             "Variable to insert",
@@ -4084,7 +4054,11 @@ Requirements:
                 insert_ec = complete_choice_ec if complete_choice_ec.startswith("{") else "{" + complete_choice_ec + "}"
             st.session_state["email_copy_prompt"] = base_ec + insert_ec
             st.rerun()
-    st.caption("You can type variables manually using curly brackets, e.g. {company_name}. Use {var} or {{var}} — both work.")
+    with st.expander("Preview (updates when you change the prompt)", expanded=True):
+        sample_ec = _get_sample_lead_data_for_preview()
+        sample_ec["scraped_content"] = sample_ec.get("scraped_content") or "[Scraped content would appear here]"
+        preview_ec = build_email_copy_prompt(prompt_cur_ec, sample_ec, sample_ec["scraped_content"])
+        st.text_area("", value=preview_ec[:8000] + ("…" if len(preview_ec) > 8000 else ""), height=180, disabled=True, key="step4_live_preview", label_visibility="collapsed")
     if st.button("Preview with sample lead", key="step4_sample_btn"):
         st.session_state["_sample_dialog"] = "email_copy_prompt"
         st.rerun()
@@ -4362,8 +4336,8 @@ if uploaded_file and test_clicked:
 
 if st.session_state.get("_test_running"):
     with st.spinner("Running test... (scraping + AI may take 1–3 min, please wait)"):
-        time.sleep(1)
-        st.rerun()
+        time.sleep(2)
+    st.rerun()
 
 if st.session_state.get("_test_results") is not None and not st.session_state.get("_test_running"):
     results = st.session_state["_test_results"]
@@ -4374,7 +4348,7 @@ if st.session_state.get("_test_results") is not None and not st.session_state.ge
         st.error(f"❌ Test failed: {test_error}")
         if test_tb:
             st.code(test_tb, language=None)
-    st.session_state["_test_results"] = None
+    # Do not clear _test_results here so the UI stays visible; cleared when user starts a new test
 
     st.markdown("### 🧪 Test results")
     if test_logs:
