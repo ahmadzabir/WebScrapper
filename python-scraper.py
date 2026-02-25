@@ -3517,14 +3517,14 @@ if uploaded_file is not None:
                     "Which column has URLs?",
                     options=list(df_preview.columns),
                     index=0,
-                    help="Select the column that contains website URLs"
+                    help="Output Column A (Website) will be this column. Pick the one with website addresses (e.g. https://...), not lead names."
                 )
             else:
                 url_column = st.selectbox(
                     "Which column has URLs?",
                     options=[f"Column {i+1}" for i in range(len(df_preview.columns))],
                     index=0,
-                    help="Select the column that contains website URLs"
+                    help="Output Column A (Website) will be this column. Pick the one with website addresses (e.g. https://...), not lead names."
                 )
         
         with col_sel2:
@@ -3547,7 +3547,26 @@ if uploaded_file is not None:
         
         # Store in session state for use during scraping and token estimator
         url_col_idx = list(df_preview.columns).index(url_column) if csv_has_headers == "Yes" else int(url_column.replace("Column ", "")) - 1
-        url_count = sum(1 for u in df_preview.iloc[:, url_col_idx].fillna("").astype(str) if str(u).strip())
+        url_series_preview = df_preview.iloc[:, url_col_idx].fillna("").astype(str)
+        url_count = sum(1 for u in url_series_preview if str(u).strip())
+        # Warn if selected URL column doesn't look like URLs (e.g. user picked "Lead Name" by mistake)
+        def _looks_like_url(s):
+            s = (s or "").strip()
+            if not s:
+                return False
+            s_lower = s.lower()
+            if s_lower.startswith("http://") or s_lower.startswith("https://"):
+                return True
+            if "." in s and any(t in s_lower for t in [".com", ".org", ".edu", ".gov", ".net", ".io", ".co"]):
+                return True
+            return False
+        sample_vals = [u for u in url_series_preview if str(u).strip()][:20]
+        url_like_count = sum(1 for u in sample_vals if _looks_like_url(u))
+        if sample_vals and url_like_count < max(1, len(sample_vals) * 0.3):
+            st.warning(
+                "⚠️ **Selected column doesn't look like website URLs** (e.g. only names or text). "
+                "Output **Column A** will be exactly this column. If you want URLs in Column A, choose the column that contains website addresses in Step 1."
+            )
         st.session_state['csv_config'] = {
             'has_headers': csv_has_headers == "Yes",
             'url_column': url_column,
@@ -3632,6 +3651,12 @@ with col2:
         help="How long to wait per site. Unreachable sites fall back to Google cache / archive.org.",
         key="timeout"
     )
+    with st.expander("ℹ️ About Google cache & context", expanded=False):
+        st.caption(
+            "**Context source:** The app only scrapes the URLs in your sheet (no separate Google search). "
+            "When a URL is unreachable, it tries **Google cache** and **Archive.org** to get the page. "
+            "There is no feature that searches Google for extra company info—only the URL you provide is used."
+        )
 
     # Max chars: default 10k, max 50k
     max_chars = st.number_input(
@@ -4716,7 +4741,12 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
             else:
                 status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
             if idle_for >= 30:
-                eta_text.warning(f"No progress for {idle_for}s. App will pause and wait for recovery (slow network/system); do not refresh.")
+                with scrape_status_lock:
+                    n_active = len(scrape_in_progress)
+                if n_active > 0:
+                    eta_text.warning(f"No completed URLs for {idle_for}s — {n_active} still in progress. Do not refresh.")
+                else:
+                    eta_text.warning(f"No progress for {idle_for}s. App will wait for recovery (slow network/system); do not refresh.")
             else:
                 eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
             with runtime_lock:
@@ -4787,7 +4817,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                     else:
                         st.caption("_No issues_")
             
-            time.sleep(0.8)
+            # Yield so Streamlit can send UI updates and the scraper thread can run (avoid tight loop)
+            time.sleep(1.0)
         thread.join()
         with runtime_lock:
             logs_text = "\n".join(runtime_logs) or "(no logs yet)"
@@ -4980,18 +5011,15 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                         st.warning(f"⚠️ CSV file {csv_file} missing columns. Found: {header_normalized}")
                                         continue
                                     
-                                    # Read rows - CRITICAL: csv.reader already handles unquoting
+                                    # Support 3 or 4 columns (EmailCopy when present)
+                                    num_cols = 4 if 'EmailCopy' in col_indices else 3
                                     for row in csv_reader:
-                                        # Skip empty rows
                                         if len(row) == 0:
                                             continue
-                                        
-                                        # CRITICAL: Ensure row has exactly 3 columns, pad if needed
-                                        while len(row) < 3:
+                                        while len(row) < num_cols:
                                             row.append("")
-                                        # Truncate to 3 columns if somehow more
-                                        if len(row) > 3:
-                                            row = row[:3]
+                                        if len(row) > num_cols:
+                                            row = row[:num_cols]
                                         
                                         website_idx = col_indices.get('Website', 0)
                                         scraped_idx = col_indices.get('ScrapedText', 1)
@@ -5113,24 +5141,20 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 
                 if csv_all_data:
                     combined_df = pd.concat(csv_all_data, ignore_index=True)
-                    for c in EXCEL_COLS_3:
+                    for c in EXCEL_COLS_4:
                         if c not in combined_df.columns:
                             combined_df[c] = ""
-                    if "EmailCopy" in combined_df.columns:
-                        combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("")
-                    else:
-                        combined_df["EmailCopy"] = ""
-                    combined_cols = EXCEL_COLS_4 if "EmailCopy" in combined_df.columns else EXCEL_COLS_3
+                    combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("") if "EmailCopy" in combined_df.columns else ""
+                    combined_cols = EXCEL_COLS_4
                     combined_df = combined_df[combined_cols]
                 elif all_data:
                     st.warning("⚠️ CSV reading failed, using Excel files (may have incomplete data)")
                     combined_df = pd.concat(all_data, ignore_index=True)
-                    for c in EXCEL_COLS_3:
+                    for c in EXCEL_COLS_4:
                         if c not in combined_df.columns:
                             combined_df[c] = ""
-                    if "EmailCopy" not in combined_df.columns:
-                        combined_df["EmailCopy"] = ""
-                    combined_cols = EXCEL_COLS_4 if "EmailCopy" in combined_df.columns else EXCEL_COLS_3
+                    combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("") if "EmailCopy" in combined_df.columns else ""
+                    combined_cols = EXCEL_COLS_4
                     combined_df = combined_df[combined_cols]
                 else:
                     st.error("❌ No data available to combine")
@@ -5152,7 +5176,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 excel_buffer = BytesIO()
                 wb = Workbook()
                 ws = wb.active
-                combined_cols = [c for c in EXCEL_COLS_4 if c in combined_df.columns] or EXCEL_COLS_3
+                combined_cols = EXCEL_COLS_4
                 _write_excel_sheet(ws, combined_cols, combined_df)
                 
                 # CRITICAL: Save with explicit error handling
@@ -5226,12 +5250,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                 h_clean = str(h).strip().strip('"').strip("'")
                                 header_normalized.append(h_clean)
                             
-                            # CRITICAL: Expect exactly 3 columns: Website, ScrapedText, CompanySummary
-                            # If header doesn't match, log warning but try to map by position
-                            if len(header_normalized) != 3:
-                                st.warning(f"⚠️ CSV file {csv_file} has {len(header_normalized)} columns instead of 3: {header_normalized}")
-                            
-                            # Map header to standard columns - be more strict
+                            # Map header to standard columns (3 or 4 when EmailCopy present)
                             col_indices = {}
                             for idx, h in enumerate(header_normalized):
                                 h_lower = h.lower().strip()
@@ -5241,59 +5260,48 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                                     col_indices['ScrapedText'] = idx
                                 elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
                                     col_indices['CompanySummary'] = idx
-                            
-                            # If we couldn't map by name, use position (first 3 columns) as fallback
+                                elif 'email' in h_lower and 'copy' in h_lower:
+                                    col_indices['EmailCopy'] = idx
                             if 'Website' not in col_indices and len(header_normalized) >= 1:
                                 col_indices['Website'] = 0
                             if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
                                 col_indices['ScrapedText'] = 1
                             if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
                                 col_indices['CompanySummary'] = 2
-                            
-                            # Verify we have all 3 columns mapped
-                            if len(col_indices) != 3:
-                                st.warning(f"⚠️ CSV file {csv_file} column mapping incomplete. Expected 3 columns, mapped {len(col_indices)}: {col_indices}")
+                            if 'EmailCopy' not in col_indices and len(header_normalized) >= 4:
+                                col_indices['EmailCopy'] = 3
+                            if len(col_indices) < 3:
+                                st.warning(f"⚠️ CSV file {csv_file} column mapping incomplete: {col_indices}")
                                 continue
+                            num_cols_csv = 4 if 'EmailCopy' in col_indices else 3
+                            csv_cols = EXCEL_COLS_4 if 'EmailCopy' in col_indices else EXCEL_COLS_3
                             
-                            # Read all rows
                             for row_num, row in enumerate(csv_reader, start=2):
-                                # Skip empty rows
                                 if len(row) == 0:
                                     continue
-                                
-                                # CRITICAL: Ensure row has at least 3 columns, pad if needed
-                                while len(row) < 3:
+                                while len(row) < num_cols_csv:
                                     row.append("")
-                                
-                                # Extract values by column index - csv.reader already unquotes values
-                                # CRITICAL: csv.reader with QUOTE_ALL automatically handles unquoting
+                                if len(row) > num_cols_csv:
+                                    row = row[:num_cols_csv]
                                 website_idx = col_indices.get('Website', 0)
                                 scraped_idx = col_indices.get('ScrapedText', 1)
                                 summary_idx = col_indices.get('CompanySummary', 2)
-                                
-                                # Extract values - csv.reader has already unquoted them
+                                email_idx = col_indices.get('EmailCopy')
                                 website = str(row[website_idx]).strip() if website_idx < len(row) else ""
                                 scraped_text = str(row[scraped_idx]).strip() if scraped_idx < len(row) else ""
                                 company_summary = str(row[summary_idx]).strip() if summary_idx < len(row) else ""
-                                
-                                # CRITICAL: Don't strip quotes here - csv.reader already did that
-                                # The values are already clean strings without quotes
-                                # Any remaining quotes are part of the actual data content
-                                
-                                # Only add rows with valid URLs
+                                email_copy = str(row[email_idx]).strip() if email_idx is not None and email_idx < len(row) else ""
                                 if website:
-                                    rows_data.append({
-                                        'Website': website,
-                                        'ScrapedText': scraped_text,
-                                        'CompanySummary': company_summary
-                                    })
+                                    row_dict = {'Website': website, 'ScrapedText': scraped_text, 'CompanySummary': company_summary}
+                                    if email_idx is not None:
+                                        row_dict['EmailCopy'] = email_copy
+                                    rows_data.append(row_dict)
                         
                         if not rows_data:
                             st.warning(f"⚠️ CSV file {csv_file} contains no valid data rows")
                             continue
                         
-                        # Create DataFrame from clean data
-                        df_part = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
+                        df_part = pd.DataFrame(rows_data, columns=csv_cols)
                         
                         # Only add if DataFrame has rows
                         if len(df_part) > 0:
@@ -5308,11 +5316,11 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 
                 if all_data:
                     combined_df = pd.concat(all_data, ignore_index=True)
-                    
-                    # Ensure final DataFrame has correct structure (always 3 columns)
-                    if "CompanySummary" not in combined_df.columns:
-                        combined_df["CompanySummary"] = ""
-                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    for c in EXCEL_COLS_4:
+                        if c not in combined_df.columns:
+                            combined_df[c] = ""
+                    combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("") if "EmailCopy" in combined_df.columns else ""
+                    combined_df = combined_df[EXCEL_COLS_4]
                     
                     # PERFECT CSV CLEANING for combined CSV
                     def clean_dataframe_for_csv(df):
@@ -5328,12 +5336,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             df[col] = df[col].replace('', '')
                         return df
                     combined_df = clean_dataframe_for_csv(combined_df.copy())
-                    
-                    # PERFECT CSV WRITING with manual writer for absolute control
-                    # CRITICAL: Ensure DataFrame has exactly 3 columns in correct order
-                    if "CompanySummary" not in combined_df.columns:
-                        combined_df["CompanySummary"] = ""
-                    combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                    combined_df = combined_df[EXCEL_COLS_4]
                     
                     # CRITICAL: Write CSV directly to ensure Excel compatibility
                     # Use StringIO for text-based CSV writing, then encode to bytes
