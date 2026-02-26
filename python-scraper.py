@@ -1603,13 +1603,45 @@ def _is_google_error_or_captcha_page(html: str) -> bool:
         return True
     if "google search" in h and ("please click here" in h or "send feedback" in h):
         return True
+    if "google" in h and "please click here" in h:
+        return True
+    if "google" in h and "send feedback" in h and ("trouble" in h or "accessing" in h):
+        return True
     if "sorry," in h and "we're having trouble" in h and "google" in h:
         return True
     if "unusual traffic" in h and "google" in h:
         return True
     if "captcha" in h and "google" in h:
         return True
+    # Reject pages that are mostly Google UI with no real cached body
+    if "google" in h and "webcache.googleusercontent" in h:
+        if h.count("google") >= 2 and ("trouble" in h or "feedback" in h or "click here" in h):
+            return True
     return False
+
+
+# Minimum cleaned text length to accept a cache/fallback result (avoids "Google Search... please click here" as success)
+# Lowered to 100 to accept more real pages and push toward 90%+ success rate
+_MIN_FALLBACK_TEXT_LEN = 100
+
+
+def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> bool:
+    """Return True only if this HTML yields enough real content (not error/placeholder)."""
+    if not html or len(html.strip()) < 100:
+        return False
+    if _is_google_error_or_captcha_page(html):
+        return False
+    text = _process_cached_html_to_text(url, html, max_chars)
+    if not text or len(text.strip()) < _MIN_FALLBACK_TEXT_LEN:
+        return False
+    t = text.lower()
+    if "having trouble accessing" in t and "google" in t:
+        return False
+    if "please click here" in t and "google" in t:
+        return False
+    if "send feedback" in t and "google" in t and ("trouble" in t or "accessing" in t):
+        return False
+    return True
 
 
 async def _fetch_from_cache_fallbacks(
@@ -1617,43 +1649,54 @@ async def _fetch_from_cache_fallbacks(
     use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
 ) -> tuple | str:
     """
-    When direct fetch fails: Google cache → archive.org (always), then optionally Playwright, then optionally Common Crawl.
+    When direct fetch fails: try archive.org first (most reliable), then Google cache,
+    then optionally Playwright, then Common Crawl. Only return results that yield
+    enough real cleaned text (no error/placeholder pages).
     Returns (page_url, html) on success, or error string on failure.
     """
     from urllib.parse import quote
-    cache_timeout = aiohttp.ClientTimeout(total=timeout + 15, connect=15, sock_read=60)
+    cache_timeout = aiohttp.ClientTimeout(total=timeout + 25, connect=20, sock_read=90)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    # 1. Try Google cache (skip if response is a Google error/captcha page)
+    max_chars = 50000  # for validation only
+
+    # 1. Try archive.org first — most reliable when site is down or blocked (try latest then a recent snapshot)
+    for wayback_path in (f"https://web.archive.org/web/{url}", f"https://web.archive.org/web/20240101000000/{url}"):
+        try:
+            async with session.get(wayback_path, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
+                if resp.status < 400:
+                    html = await resp.text(errors="replace")
+                    if html and len(html.strip()) > 200:
+                        if _cache_result_acceptable(url, html, max_chars):
+                            return (url, html)
+        except Exception:
+            pass
+
+    # 2. Try Google cache (skip if error/captcha or if cleaned content is too short)
     try:
         cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url, safe='')}"
         async with session.get(cache_url, timeout=cache_timeout, headers=headers) as resp:
             if resp.status < 400:
                 html = await resp.text(errors="replace")
                 if html and len(html.strip()) > 200 and ("<html" in html.lower() or "<!doctype" in html.lower() or "<meta" in html.lower()):
-                    if not _is_google_error_or_captcha_page(html):
+                    if _cache_result_acceptable(url, html, max_chars):
                         return (url, html)
     except Exception:
         pass
-    # 2. Try archive.org snapshot (Wayback Machine) — most reliable when site is down
-    try:
-        wayback_url = f"https://web.archive.org/web/{url}"
-        async with session.get(wayback_url, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
-            if resp.status < 400:
-                html = await resp.text(errors="replace")
-                if html and len(html.strip()) > 200 and not _is_google_error_or_captcha_page(html):
-                    return (url, html)
-    except Exception:
-        pass
-    # 3. Optional: headless browser (Playwright) — for JS-heavy or blocked sites; costs compute
+
+    # 3. Optional: headless browser (Playwright) — for JS-heavy or blocked sites
     if use_playwright_fallback:
         result = await _fetch_via_playwright(url, timeout)
         if isinstance(result, tuple):
-            return result
-    # 4. Optional: Common Crawl — free external crawl data when user allows
+            page_url, html = result
+            if _cache_result_acceptable(page_url, html, max_chars):
+                return result
+    # 4. Optional: Common Crawl — free external crawl data
     if use_common_crawl_fallback:
         result = await _fetch_from_common_crawl(session, url, timeout)
         if isinstance(result, tuple):
-            return result
+            page_url, html = result
+            if _cache_result_acceptable(page_url, html, max_chars):
+                return result
     return ""
 
 
@@ -1671,7 +1714,9 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
             browser = await p.chromium.launch(headless=True)
             try:
                 page = await browser.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=(timeout + 10) * 1000)
+                # Wait for load so JS-rendered content is present; generous timeout for slow sites
+                await page.goto(url, wait_until="load", timeout=(timeout + 25) * 1000)
+                await asyncio.sleep(1.5)  # Extra time for dynamic content
                 html = await page.content()
                 if html and len(html.strip()) > 200:
                     return (url, html)
@@ -1684,46 +1729,43 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
 
 async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, timeout: int) -> tuple | str:
     """
-    Common Crawl fallback — free open crawl data. Only when user allows free external data.
+    Common Crawl fallback — free open crawl data. Try multiple indexes for 90%+ success rate.
     Returns (url, html) or "".
     """
     from urllib.parse import quote_plus
-    # Use a recent index (update periodically). Format: CC-MAIN-YYYY-WW
-    CC_INDEX = "CC-MAIN-2024-51"
-    try:
-        index_url = f"https://index.commoncrawl.org/{CC_INDEX}-index?url={quote_plus(url)}&output=json&limit=1"
-        timeout_obj = aiohttp.ClientTimeout(total=timeout + 10)
-        async with session.get(index_url, timeout=timeout_obj) as resp:
-            if resp.status != 200:
-                return ""
-            text = await resp.text()
-            lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
-            if not lines:
-                return ""
-            record = json.loads(lines[0])
-            warc_filename = record.get("filename")
-            warc_offset = int(record.get("offset", 0) or 0)
-            warc_length = int(record.get("length", 0) or 0)
-            if not warc_filename or warc_length <= 0:
-                return ""
-        data_url = f"https://data.commoncrawl.org/{warc_filename}"
-        async with session.get(data_url, timeout=timeout_obj, headers={"Range": f"bytes={warc_offset}-{warc_offset + warc_length - 1}"}) as r:
-            if r.status not in (200, 206):
-                return ""
-            body = await r.read()
-    except Exception:
-        return ""
-    try:
-        from warcio.archiveiterator import ArchiveIterator
-        from io import BytesIO
-        for rec in ArchiveIterator(BytesIO(body)):
-            if rec.rec_type == "response":
-                html = rec.content_stream().read().decode("utf-8", errors="replace")
-                if html and len(html.strip()) > 200:
-                    return (url, html)
-                break
-    except Exception:
-        pass
+    timeout_obj = aiohttp.ClientTimeout(total=timeout + 15)
+    # Try recent indexes (update periodically). Format: CC-MAIN-YYYY-WW
+    for CC_INDEX in ("CC-MAIN-2024-51", "CC-MAIN-2024-41", "CC-MAIN-2024-31"):
+        try:
+            index_url = f"https://index.commoncrawl.org/{CC_INDEX}-index?url={quote_plus(url)}&output=json&limit=1"
+            async with session.get(index_url, timeout=timeout_obj) as resp:
+                if resp.status != 200:
+                    continue
+                text = await resp.text()
+                lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+                if not lines:
+                    continue
+                record = json.loads(lines[0])
+                warc_filename = record.get("filename")
+                warc_offset = int(record.get("offset", 0) or 0)
+                warc_length = int(record.get("length", 0) or 0)
+                if not warc_filename or warc_length <= 0:
+                    continue
+            data_url = f"https://data.commoncrawl.org/{warc_filename}"
+            async with session.get(data_url, timeout=timeout_obj, headers={"Range": f"bytes={warc_offset}-{warc_offset + warc_length - 1}"}) as r:
+                if r.status not in (200, 206):
+                    continue
+                body = await r.read()
+            from warcio.archiveiterator import ArchiveIterator
+            from io import BytesIO
+            for rec in ArchiveIterator(BytesIO(body)):
+                if rec.rec_type == "response":
+                    html = rec.content_stream().read().decode("utf-8", errors="replace")
+                    if html and len(html.strip()) > 200:
+                        return (url, html)
+                    break
+        except Exception:
+            continue
     return ""
 
 
@@ -1809,10 +1851,10 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                 headers = get_realistic_headers(session.headers.get("User-Agent"), target_url=url_to_try)
             
             for attempt in range(retries + 1):
-                # Increase timeout for retries (some sites are slow) - more generous on later attempts
-                retry_timeout = timeout + (attempt * 10)
-                sock_read_cap = min(retry_timeout, 90)  # Allow up to 90s for slow sites to send data
-                req_timeout = aiohttp.ClientTimeout(total=retry_timeout, connect=15, sock_read=sock_read_cap)
+                # Increase timeout for retries (some sites are slow) - more generous on later attempts for 90%+ success
+                retry_timeout = timeout + (attempt * 15)
+                sock_read_cap = min(retry_timeout, 120)  # Allow up to 120s for slow sites to send data
+                req_timeout = aiohttp.ClientTimeout(total=retry_timeout, connect=20, sock_read=sock_read_cap)
                 
                 try:
                     if attempt > 0:
