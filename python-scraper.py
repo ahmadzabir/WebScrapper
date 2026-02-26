@@ -1620,9 +1620,59 @@ def _is_google_error_or_captcha_page(html: str) -> bool:
     return False
 
 
-# Minimum cleaned text length to accept a cache/fallback result (avoids "Google Search... please click here" as success)
-# Lowered to 100 to accept more real pages and push toward 90%+ success rate
-_MIN_FALLBACK_TEXT_LEN = 100
+def _is_challenge_or_verification_page(html: str) -> bool:
+    """True if HTML is a Cloudflare/bot challenge or 'please wait' verification page, not real content."""
+    if not html or len(html.strip()) < 20:
+        return False
+    h = html.lower()
+    # Cloudflare / "One moment, please" / verification interstitials (match split text too)
+    if "one moment" in h and "please" in h:
+        return True
+    if "your request is being verified" in h:
+        return True
+    if "request is being verified" in h:
+        return True
+    if "please wait" in h and ("verif" in h or "request" in h):
+        return True
+    if "please wait while" in h:
+        return True
+    if "checking your browser" in h:
+        return True
+    if "just a moment" in h and ("enable javascript" in h or "cloudflare" in h):
+        return True
+    if "cloudflare" in h and ("ray id" in h or "performance" in h or "checking" in h):
+        return True
+    if "ddos protection" in h and "cloudflare" in h:
+        return True
+    if "attention required" in h and "cloudflare" in h:
+        return True
+    # Very short body that is only verification text
+    if len(h) < 800 and ("verif" in h or "moment" in h) and "please" in h:
+        return True
+    return False
+
+
+def _cleaned_text_is_challenge(cleaned: str) -> bool:
+    """True if cleaned (visible) text is clearly a challenge/verification page, not real content."""
+    if not cleaned or len(cleaned.strip()) < 50:
+        return False
+    t = cleaned.lower()
+    if "one moment" in t and "please" in t:
+        return True
+    if "request is being verified" in t or "your request is being verified" in t:
+        return True
+    if "please wait while" in t:
+        return True
+    if len(t) < 600 and "please wait" in t and ("verif" in t or "moment" in t):
+        return True
+    return False
+
+
+# Minimum cleaned text length to accept as valid result (under this = error/blocked/insufficient)
+_MIN_CONTENT_LEN = 200
+
+# Minimum cleaned text length to accept a cache/fallback result
+_MIN_FALLBACK_TEXT_LEN = 200
 
 
 def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> bool:
@@ -1630,6 +1680,8 @@ def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> boo
     if not html or len(html.strip()) < 100:
         return False
     if _is_google_error_or_captcha_page(html):
+        return False
+    if _is_challenge_or_verification_page(html):
         return False
     text = _process_cached_html_to_text(url, html, max_chars)
     if not text or len(text.strip()) < _MIN_FALLBACK_TEXT_LEN:
@@ -1641,17 +1693,25 @@ def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> boo
         return False
     if "send feedback" in t and "google" in t and ("trouble" in t or "accessing" in t):
         return False
+    if "one moment" in t and "please" in t:
+        return False
+    if "request is being verified" in t or "your request is being verified" in t:
+        return False
+    if "please wait while" in t:
+        return False
+    if "please wait" in t and ("verif" in t or "moment" in t) and len(t) < 800:
+        return False
     return True
 
 
 async def _fetch_from_cache_fallbacks(
     session: aiohttp.ClientSession, url: str, timeout: int,
     use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
+    skip_google_cache: bool = False,
 ) -> tuple | str:
     """
-    When direct fetch fails: try archive.org first (most reliable), then Google cache,
-    then optionally Playwright, then Common Crawl. Only return results that yield
-    enough real cleaned text (no error/placeholder pages).
+    When direct fetch fails: try archive.org first, then Playwright, then Google cache (unless skipped),
+    then Common Crawl. skip_google_cache=True when we already have a Google error page (avoid retrying it).
     Returns (page_url, html) on success, or error string on failure.
     """
     from urllib.parse import quote
@@ -1659,8 +1719,14 @@ async def _fetch_from_cache_fallbacks(
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     max_chars = 50000  # for validation only
 
-    # 1. Try archive.org first — most reliable when site is down or blocked (try latest then a recent snapshot)
-    for wayback_path in (f"https://web.archive.org/web/{url}", f"https://web.archive.org/web/20240101000000/{url}"):
+    # 1. Try archive.org — most reliable when site is down or blocked (multiple snapshots)
+    for wayback_path in (
+        f"https://web.archive.org/web/{url}",
+        f"https://web.archive.org/web/20240601000000/{url}",
+        f"https://web.archive.org/web/20240101000000/{url}",
+        f"https://web.archive.org/web/20230101000000/{url}",
+        f"https://web.archive.org/web/20220101000000/{url}",
+    ):
         try:
             async with session.get(wayback_path, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
                 if resp.status < 400:
@@ -1671,26 +1737,28 @@ async def _fetch_from_cache_fallbacks(
         except Exception:
             pass
 
-    # 2. Try Google cache (skip if error/captcha or if cleaned content is too short)
-    try:
-        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url, safe='')}"
-        async with session.get(cache_url, timeout=cache_timeout, headers=headers) as resp:
-            if resp.status < 400:
-                html = await resp.text(errors="replace")
-                if html and len(html.strip()) > 200 and ("<html" in html.lower() or "<!doctype" in html.lower() or "<meta" in html.lower()):
-                    if _cache_result_acceptable(url, html, max_chars):
-                        return (url, html)
-    except Exception:
-        pass
-
-    # 3. Optional: headless browser (Playwright) — for JS-heavy or blocked sites
+    # 2. Try Playwright — gets real page for Cloudflare/bot-blocked sites
     if use_playwright_fallback:
         result = await _fetch_via_playwright(url, timeout)
         if isinstance(result, tuple):
             page_url, html = result
             if _cache_result_acceptable(page_url, html, max_chars):
                 return result
-    # 4. Optional: Common Crawl — free external crawl data
+
+    # 3. Try Google cache (skip when we already know content was Google error)
+    if not skip_google_cache:
+        try:
+            cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url, safe='')}"
+            async with session.get(cache_url, timeout=cache_timeout, headers=headers) as resp:
+                if resp.status < 400:
+                    html = await resp.text(errors="replace")
+                    if html and len(html.strip()) > 200 and ("<html" in html.lower() or "<!doctype" in html.lower() or "<meta" in html.lower()):
+                        if _cache_result_acceptable(url, html, max_chars):
+                            return (url, html)
+        except Exception:
+            pass
+
+    # 4. Common Crawl — free external crawl data
     if use_common_crawl_fallback:
         result = await _fetch_from_common_crawl(session, url, timeout)
         if isinstance(result, tuple):
@@ -1774,7 +1842,7 @@ def _process_cached_html_to_text(url: str, html: str, max_chars: int = 50000) ->
     if not html or len(html.strip()) < 50:
         return ""
     cleaned = cleanup_html(html)
-    if not cleaned or len(cleaned.strip()) < 10:
+    if not cleaned or len(cleaned.strip()) < _MIN_FALLBACK_TEXT_LEN:
         return ""
     page_header = f"\n{'='*80}\nPAGE: {url}\n{'='*80}\n\n"
     content = page_header + cleaned[:max_chars]
@@ -1948,6 +2016,11 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                                 last_error = f"Non-HTML or empty content at {final_url}"
                                 break
                         
+                        # Reject Cloudflare/challenge pages so we can try cache fallbacks instead
+                        if _is_challenge_or_verification_page(html):
+                            last_error = f"Challenge/verification page at {final_url} (e.g. Cloudflare)"
+                            break
+                        
                         # Success! Return the content
                         return (final_url, html)
                         
@@ -2010,15 +2083,27 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             return f"❌ {homepage}"
 
     page_url, html = homepage
-    # Reject Google error/captcha pages that slipped through (e.g. redirect to Google)
+    # Reject Google error/captcha pages — try archive/Playwright/Common Crawl only (skip Google cache)
     if _is_google_error_or_captcha_page(html):
-        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        cache_result = await _fetch_from_cache_fallbacks(
+            session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback,
+            skip_google_cache=True,
+        )
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_google_error_or_captcha_page(html):
                 return "❌ Google cache returned an error page; content unavailable. Try again later."
         else:
             return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
+    # Reject Cloudflare/challenge pages so we try archive and other fallbacks instead
+    if _is_challenge_or_verification_page(html):
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        if isinstance(cache_result, tuple):
+            page_url, html = cache_result
+            if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
+                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+        else:
+            return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
     
     # STRICT validation: Verify we're on the correct domain
     from urllib.parse import urlparse
@@ -2095,9 +2180,30 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 return f"❌ Content mismatch detected! Page at {page_url} contains e-commerce content that doesn't match expected domain {original_domain}. This might be a redirect or wrong content."
     
     cleaned = cleanup_html(html)
+    # Catch challenge/verification text that only appears after cleanup (e.g. split across tags)
+    if cleaned and _cleaned_text_is_challenge(cleaned):
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        if isinstance(cache_result, tuple):
+            page_url, html = cache_result
+            if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
+                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+            cleaned = cleanup_html(html)
+            if cleaned and _cleaned_text_is_challenge(cleaned):
+                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+        else:
+            return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
     
-    # Validate cleaned content
-    if cleaned and len(cleaned.strip()) > 10:  # Ensure meaningful content
+    # No content or insufficient (under 200 chars) = try fallbacks once, then error
+    if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        if isinstance(cache_result, tuple):
+            page_url, html = cache_result
+            cleaned = cleanup_html(html)
+        if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
+            return "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+    
+    # Validate cleaned content (require meaningful length)
+    if cleaned and len(cleaned.strip()) >= _MIN_CONTENT_LEN:
         # Better page header with clear separation
         page_header = f"\n{'='*80}\nPAGE: {page_url}\n{'='*80}\n\n"
         page_content = page_header + cleaned
@@ -2114,11 +2220,11 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 total_chars = max_chars
         # If total_chars > 0 and adding would exceed, skip
     else:
-        # Check if it's an error page or redirect
-        if 'error' in html_lower[:500] or '404' in html_lower[:500] or 'not found' in html_lower[:500]:
-            errors.append(f"❌ Error page detected: {page_url}")
-        else:
+        # Too short or empty — treat as error
+        if not cleaned or len(cleaned.strip()) == 0:
             errors.append(f"❌ No extractable text content on homepage: {page_url}")
+        else:
+            errors.append(f"❌ Insufficient content from {page_url} (under {_MIN_CONTENT_LEN} characters); likely error or blocked page.")
 
     # Use the actual fetched URL (after redirects) for link extraction
     links = extract_links(html, page_url)
@@ -2158,8 +2264,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             
             cleaned2 = cleanup_html(html2)
             
-            # Validate cleaned content (must have meaningful text)
-            if cleaned2 and len(cleaned2.strip()) > 10:
+            # Validate cleaned content (must have meaningful length, same as homepage)
+            if cleaned2 and len(cleaned2.strip()) >= _MIN_CONTENT_LEN:
                 # Better page header with clear separation
                 page_header = f"\n{'='*80}\nPAGE: {link_url}\n{'='*80}\n\n"
                 page_content = page_header + cleaned2
@@ -2176,13 +2282,19 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                         total_chars = max_chars
                     break  # No more space
             else:
-                errors.append(f"❌ No extractable text content on page: {link_url}")
+                if not cleaned2 or len(cleaned2.strip()) == 0:
+                    errors.append(f"❌ No extractable text content on page: {link_url}")
+                else:
+                    errors.append(f"❌ Insufficient content from {link_url} (under {_MIN_CONTENT_LEN} characters).")
 
     if not results:
         return errors[0] if errors else f"❌ Unknown error on site: {url}"
     
     # Join results with separator
     final_text = separator.join(results)
+    # Final guard: if total content is still under minimum, treat as bad result
+    if len(final_text.strip()) < _MIN_CONTENT_LEN:
+        return errors[0] if errors else f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters); likely error or blocked page. Try again later."
     
     # Add errors at the end if there's space (errors are usually short)
     if errors and len(final_text) + len("\n".join(errors)) + 20 <= max_chars:
