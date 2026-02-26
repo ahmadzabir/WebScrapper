@@ -1591,32 +1591,137 @@ _domain_request_times = {}  # Track last request time per domain
 _domain_lock = asyncio.Lock()  # Lock for thread-safe access to domain timing
 
 
-async def _fetch_from_cache_fallbacks(session: aiohttp.ClientSession, url: str, timeout: int) -> tuple | str:
+def _is_google_error_or_captcha_page(html: str) -> bool:
+    """True if HTML is a Google error/captcha/trouble page, not real cached content."""
+    if not html or len(html.strip()) < 100:
+        return False
+    h = html.lower()
+    # Google "having trouble accessing" / captcha / error pages
+    if "having trouble accessing" in h and "google" in h:
+        return True
+    if "if you're having trouble" in h and ("google search" in h or "send feedback" in h):
+        return True
+    if "google search" in h and ("please click here" in h or "send feedback" in h):
+        return True
+    if "sorry," in h and "we're having trouble" in h and "google" in h:
+        return True
+    if "unusual traffic" in h and "google" in h:
+        return True
+    if "captcha" in h and "google" in h:
+        return True
+    return False
+
+
+async def _fetch_from_cache_fallbacks(
+    session: aiohttp.ClientSession, url: str, timeout: int,
+    use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
+) -> tuple | str:
     """
-    When direct fetch fails, try Google cache or archive.org for meta/content.
+    When direct fetch fails: Google cache → archive.org (always), then optionally Playwright, then optionally Common Crawl.
     Returns (page_url, html) on success, or error string on failure.
     """
     from urllib.parse import quote
     cache_timeout = aiohttp.ClientTimeout(total=timeout + 15, connect=15, sock_read=60)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    # 1. Try Google cache
+    # 1. Try Google cache (skip if response is a Google error/captcha page)
     try:
         cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url, safe='')}"
         async with session.get(cache_url, timeout=cache_timeout, headers=headers) as resp:
             if resp.status < 400:
                 html = await resp.text(errors="replace")
                 if html and len(html.strip()) > 200 and ("<html" in html.lower() or "<!doctype" in html.lower() or "<meta" in html.lower()):
-                    return (url, html)
+                    if not _is_google_error_or_captcha_page(html):
+                        return (url, html)
     except Exception:
         pass
-    # 2. Try archive.org snapshot (Wayback Machine)
+    # 2. Try archive.org snapshot (Wayback Machine) — most reliable when site is down
     try:
         wayback_url = f"https://web.archive.org/web/{url}"
         async with session.get(wayback_url, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
             if resp.status < 400:
                 html = await resp.text(errors="replace")
+                if html and len(html.strip()) > 200 and not _is_google_error_or_captcha_page(html):
+                    return (url, html)
+    except Exception:
+        pass
+    # 3. Optional: headless browser (Playwright) — for JS-heavy or blocked sites; costs compute
+    if use_playwright_fallback:
+        result = await _fetch_via_playwright(url, timeout)
+        if isinstance(result, tuple):
+            return result
+    # 4. Optional: Common Crawl — free external crawl data when user allows
+    if use_common_crawl_fallback:
+        result = await _fetch_from_common_crawl(session, url, timeout)
+        if isinstance(result, tuple):
+            return result
+    return ""
+
+
+async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
+    """
+    Headless browser fallback — only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
+    Costs compute, not vendor fees. Returns (url, html) or "".
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return ""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=(timeout + 10) * 1000)
+                html = await page.content()
                 if html and len(html.strip()) > 200:
                     return (url, html)
+            finally:
+                await browser.close()
+    except Exception:
+        pass
+    return ""
+
+
+async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, timeout: int) -> tuple | str:
+    """
+    Common Crawl fallback — free open crawl data. Only when user allows free external data.
+    Returns (url, html) or "".
+    """
+    from urllib.parse import quote_plus
+    # Use a recent index (update periodically). Format: CC-MAIN-YYYY-WW
+    CC_INDEX = "CC-MAIN-2024-51"
+    try:
+        index_url = f"https://index.commoncrawl.org/{CC_INDEX}-index?url={quote_plus(url)}&output=json&limit=1"
+        timeout_obj = aiohttp.ClientTimeout(total=timeout + 10)
+        async with session.get(index_url, timeout=timeout_obj) as resp:
+            if resp.status != 200:
+                return ""
+            text = await resp.text()
+            lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+            if not lines:
+                return ""
+            record = json.loads(lines[0])
+            warc_filename = record.get("filename")
+            warc_offset = int(record.get("offset", 0) or 0)
+            warc_length = int(record.get("length", 0) or 0)
+            if not warc_filename or warc_length <= 0:
+                return ""
+        data_url = f"https://data.commoncrawl.org/{warc_filename}"
+        async with session.get(data_url, timeout=timeout_obj, headers={"Range": f"bytes={warc_offset}-{warc_offset + warc_length - 1}"}) as r:
+            if r.status not in (200, 206):
+                return ""
+            body = await r.read()
+    except Exception:
+        return ""
+    try:
+        from warcio.archiveiterator import ArchiveIterator
+        from io import BytesIO
+        for rec in ArchiveIterator(BytesIO(body)):
+            if rec.rec_type == "response":
+                html = rec.content_stream().read().decode("utf-8", errors="replace")
+                if html and len(html.strip()) > 200:
+                    return (url, html)
+                break
     except Exception:
         pass
     return ""
@@ -1841,7 +1946,8 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
     return last_error or f"Failed to fetch {url} after trying all variations"
 
 
-async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int, fast_mode: bool = False):
+async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, retries: int, timeout: int, fast_mode: bool = False,
+                     use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False):
     depth = max(1, int(depth) if depth is not None else 1)
     max_chars = max(100, min(int(max_chars) if max_chars is not None else 10000, 50000))
     visited, results, errors = set(), [], []
@@ -1854,14 +1960,23 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 
     homepage = await fetch(session, normalized_url, timeout, retries, fast_mode)
     if isinstance(homepage, str):
-        # Direct fetch failed: try cache fallbacks (Google cache, archive.org)
-        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout)
+        # Direct fetch failed: try cache fallbacks (Google cache, archive.org, optional Playwright, optional Common Crawl)
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
         if isinstance(cache_result, tuple):
             homepage = cache_result
         else:
             return f"❌ {homepage}"
 
     page_url, html = homepage
+    # Reject Google error/captcha pages that slipped through (e.g. redirect to Google)
+    if _is_google_error_or_captcha_page(html):
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        if isinstance(cache_result, tuple):
+            page_url, html = cache_result
+            if _is_google_error_or_captcha_page(html):
+                return "❌ Google cache returned an error page; content unavailable. Try again later."
+        else:
+            return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
     
     # STRICT validation: Verify we're on the correct domain
     from urllib.parse import urlparse
@@ -2084,7 +2199,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
                            email_copy_enabled=False, email_copy_api_key=None, email_copy_provider=None,
                            email_copy_model=None, email_copy_prompt=None,
-                           lead_data_map=None, ai_status_callback=None, scrape_status_callback=None, fast_mode: bool = False):
+                           lead_data_map=None, ai_status_callback=None, scrape_status_callback=None, fast_mode: bool = False,
+                           use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False):
     from urllib.parse import urlparse
     import random
     
@@ -2149,13 +2265,14 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 try:
                     # Wrap scraping in a timeout to prevent infinite hangs
                     scraped_text = await asyncio.wait_for(
-                        scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout, fast_mode),
+                        scrape_site(session, normalized_url, depth, keywords, max_chars, retries, timeout, fast_mode,
+                                    use_playwright_fallback, use_common_crawl_fallback),
                         timeout=max_total_time
                     )
                 except asyncio.TimeoutError:
                     err_msg = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
                     _scrape_status("error", "Timeout, trying cache fallback...")
-                    cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout)
+                    cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
                     if isinstance(cache_result, tuple):
                         page_url, html = cache_result
                         scraped_text = _process_cached_html_to_text(page_url, html, max_chars)
@@ -2175,7 +2292,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                             fallback_url = normalized_url.replace("https://", "http://", 1)
                             try:
                                 scraped_text = await asyncio.wait_for(
-                                    scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout, fast_mode),
+                                    scrape_site(session, fallback_url, depth, keywords, max_chars, retries, timeout, fast_mode,
+                                                use_playwright_fallback, use_common_crawl_fallback),
                                     timeout=max_total_time
                                 )
                             except asyncio.TimeoutError:
@@ -2186,7 +2304,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
                     if scraped_text and scraped_text.startswith("❌"):
                         _scrape_status("error", "Scrape failed, trying cache fallback...")
-                        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout)
+                        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
                         if isinstance(cache_result, tuple):
                             page_url, html = cache_result
                             cached_text = _process_cached_html_to_text(page_url, html, max_chars)
@@ -2910,7 +3028,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                       email_copy_model=None, email_copy_prompt=None,
                       lead_data_map=None, ai_status_callback=None, scrape_status_callback=None,
                       run_folder: str = "", fast_mode: bool = False,
-                      low_resource: bool = False, log_callback=None):
+                      low_resource: bool = False, log_callback=None,
+                      use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False):
     """
     Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
     Uses backpressure on result_queue to prevent memory exhaustion with large datasets.
@@ -3018,7 +3137,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
         ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt,
         email_copy_enabled, email_copy_api_key, email_copy_provider, email_copy_model, email_copy_prompt,
-        lead_data_map, ai_status_callback, scrape_status_callback, fast_mode)) for i in range(concurrency)]
+        lead_data_map, ai_status_callback, scrape_status_callback, fast_mode,
+        use_playwright_fallback, use_common_crawl_fallback)) for i in range(concurrency)]
 
     # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
@@ -4654,7 +4774,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     else:
         ai_api_key_run, ai_provider_run, ai_model_run, ai_prompt_run = ai_api_key, ai_provider, ai_model, ai_prompt
 
-    email_copy_enabled_for_run = st.session_state.get("email_copy_enabled_checkbox", False)
+    # Use checkbox value at run start so email copy setting is reliable
+    email_copy_enabled_for_run = bool(st.session_state.get("email_copy_enabled_checkbox", False))
     if not email_copy_enabled_for_run:
         email_copy_api_key_run = email_copy_provider_run = email_copy_model_run = email_copy_prompt_run = None
     else:
@@ -4662,6 +4783,11 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
         email_copy_provider_run = email_copy_provider_ui
         email_copy_model_run = email_copy_model_ui
         email_copy_prompt_run = email_copy_prompt_ui
+        if not (email_copy_api_key_run and email_copy_provider_run and email_copy_model_run):
+            st.warning("⚠️ **Email copy** was checked but API key / provider / model is missing. This run will have **3 columns** (no Email Copy). Set Step 4 API key (or use same as Step 3) and run again for email copy.")
+            log_cb("⚠️ Email copy disabled for this run: API key/provider/model missing.")
+            email_copy_enabled_for_run = False
+            email_copy_api_key_run = email_copy_provider_run = email_copy_model_run = email_copy_prompt_run = None
 
     # Auto-resilience: extra retries for unreliable sites (no checkbox)
     effective_timeout = timeout
@@ -4674,6 +4800,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
             log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
+            log_cb(f"📧 Email copy: {'enabled (output will have 4 columns)' if email_copy_enabled_for_run else 'disabled (output will have 3 columns)'}")
             asyncio.run(
                 run_scraper(urls, concurrency, effective_retries, effective_timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
@@ -4683,7 +4810,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             lead_data_map,
                             ai_status_callback if ai_enabled_for_run else None, scrape_status_callback,
                             run_folder=run_folder, fast_mode=fast_mode,
-                            low_resource=low_resource, log_callback=log_cb))
+                            low_resource=low_resource, log_callback=log_cb,
+                            use_playwright_fallback=True, use_common_crawl_fallback=True))
             log_cb("✅ Run completed")
         except Exception as e:
             scrape_error[0] = e
