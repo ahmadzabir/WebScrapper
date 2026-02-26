@@ -2993,7 +2993,7 @@ async def run_test_preview(urls: list, n: int, retries, timeout, depth, keywords
             f"test-worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars,
             retries, timeout, ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt,
             email_copy_enabled, email_copy_api_key, email_copy_provider, email_copy_model, email_copy_prompt,
-            lead_data_map, None, None, fast_mode=True))
+            lead_data_map, None, None, fast_mode=True, use_playwright_fallback=True, use_common_crawl_fallback=True))
         for i in range(min(2, n))
     ]
 
@@ -3348,168 +3348,372 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Comprehensive modern UI styling
+# Dark theme UI styling (design alignment)
 st.markdown("""
 <style>
-    /* Main container improvements */
+    /* 1. Global theme and layout */
+    .stApp {
+        background: linear-gradient(180deg, #090b14 0%, #0f172a 50%, #090b14 100%);
+    }
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
         max-width: 1200px;
+        background: rgba(15, 23, 42, 0.7);
+        border-radius: 1rem;
+        border: 1px solid rgba(51, 65, 85, 0.5);
+        backdrop-filter: blur(12px);
+    }
+    .main, .block-container {
+        color: #e2e8f0;
+    }
+    p, span, label, .stMarkdown {
+        color: #cbd5e1 !important;
+    }
+    ::selection {
+        background: rgba(6, 182, 212, 0.3);
+        color: #e0f2fe;
     }
     
-    /* Header styling */
+    /* 2. Hero - handled in HTML below */
+    
+    /* 3–4. Section headers and typography */
     h1 {
-        color: #1f2937;
+        color: #f1f5f9 !important;
         font-weight: 700;
         margin-bottom: 0.5rem;
         font-size: 2.5rem;
     }
-    
-    /* Section headers */
     h3 {
-        color: #1f2937;
+        color: #f1f5f9 !important;
         font-weight: 600;
         margin-top: 0;
         margin-bottom: 1rem;
         font-size: 1.5rem;
     }
-    
     h4 {
-        color: #374151;
+        color: #e2e8f0 !important;
         font-weight: 600;
         margin-top: 1.5rem;
         margin-bottom: 0.75rem;
     }
     
-    /* Info boxes */
-    .stInfo {
-        background-color: #f0f9ff;
-        border-left: 4px solid #0ea5e9;
-        border-radius: 8px;
+    /* Step card class (for optional wrappers) */
+    .step-card {
+        background: rgba(15, 23, 42, 0.6);
+        backdrop-filter: blur(16px);
+        border: 1px solid rgba(51, 65, 85, 0.5);
+        border-radius: 1rem;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.36);
+    }
+    .step-card.active {
+        box-shadow: 0 0 30px -5px rgba(6, 182, 212, 0.3);
+        border-color: rgba(6, 182, 212, 0.5);
+    }
+    
+    /* Tip boxes inside step cards - dark with left accent */
+    .tip-box {
         padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin-bottom: 1rem;
+        color: #e2e8f0;
+        font-size: 0.95rem;
+    }
+    .tip-box-cyan {
+        background: rgba(6, 182, 212, 0.1);
+        border-left: 4px solid #06b6d4;
+    }
+    .tip-box-emerald {
+        background: rgba(16, 185, 129, 0.1);
+        border-left: 4px solid #10b981;
+    }
+    .tip-box-fuchsia {
+        background: rgba(217, 70, 239, 0.1);
+        border-left: 4px solid #d946ef;
     }
     
-    /* Buttons */
+    /* Info / tip boxes - dark with left accent */
+    .stAlert, [data-testid="stAlert"] {
+        background: rgba(6, 182, 212, 0.08) !important;
+        border-left: 4px solid #06b6d4 !important;
+        border-radius: 0 8px 8px 0 !important;
+        color: #e0f2fe !important;
+    }
+    .stSuccess, [data-testid="stSuccess"] {
+        background: rgba(16, 185, 129, 0.12) !important;
+        border-left: 4px solid #10b981 !important;
+        border-radius: 0 8px 8px 0 !important;
+        color: #a7f3d0 !important;
+    }
+    .stWarning, [data-testid="stWarning"] {
+        background: rgba(245, 158, 11, 0.12) !important;
+        border-left: 4px solid #f59e0b !important;
+        border-radius: 0 8px 8px 0 !important;
+        color: #fde68a !important;
+    }
+    .stError, [data-testid="stError"] {
+        background: rgba(239, 68, 68, 0.12) !important;
+        border-left: 4px solid #ef4444 !important;
+        border-radius: 0 8px 8px 0 !important;
+        color: #fecaca !important;
+    }
+    
+    /* Primary CTA: button in same container as .cta-heading-block (Start Scraping) */
+    .main [data-testid="stVerticalBlock"]:has(.cta-heading-block) .stButton > button {
+        background: linear-gradient(90deg, #06b6d4 0%, #4f46e5 100%) !important;
+        color: white !important;
+        font-weight: 700 !important;
+        padding: 0.875rem 2rem !important;
+        border-radius: 12px !important;
+        border: none !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 0 20px rgba(6, 182, 212, 0.3) !important;
+    }
+    .cta-section .stButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 0 30px rgba(6, 182, 212, 0.5) !important;
+    }
+    
+    /* Secondary buttons (all other buttons) */
     .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        font-weight: 600;
-        padding: 0.75rem 2rem;
-        border-radius: 8px;
-        border: none;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
+        background: rgba(30, 41, 59, 0.8) !important;
+        color: #cbd5e1 !important;
+        border: 1px solid #475569 !important;
+        font-weight: 500 !important;
+        padding: 0.5rem 1rem !important;
+        border-radius: 8px !important;
+        transition: all 0.3s ease !important;
     }
-    
     .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
+        border-color: #22d3ee !important;
+        color: #22d3ee !important;
+        background: rgba(6, 182, 212, 0.1) !important;
     }
     
-    /* Input fields */
-    .stTextInput > div > div > input {
-        border-radius: 8px;
-        border: 2px solid #e5e7eb;
-        transition: border-color 0.3s ease;
+    /* Inputs */
+    .stTextInput > div > div > input,
+    .stNumberInput > div > div > input {
+        background: rgba(2, 6, 23, 0.6) !important;
+        border: 1px solid #475569 !important;
+        border-radius: 8px !important;
+        color: #e2e8f0 !important;
+        transition: border-color 0.2s, box-shadow 0.2s !important;
     }
-    
-    .stTextInput > div > div > input:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    .stTextInput > div > div > input:focus,
+    .stNumberInput > div > div > input:focus {
+        border-color: #06b6d4 !important;
+        box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
+    }
+    .stTextInput > div > div > input::placeholder {
+        color: #64748b !important;
     }
     
     /* Select boxes */
-    .stSelectbox > div > div > select {
-        border-radius: 8px;
-        border: 2px solid #e5e7eb;
+    .stSelectbox > div > div {
+        background: rgba(2, 6, 23, 0.6) !important;
+        border: 1px solid #475569 !important;
+        border-radius: 8px !important;
+        color: #e2e8f0 !important;
+    }
+    .stSelectbox > div > div:focus-within {
+        border-color: #06b6d4 !important;
+        box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
     }
     
-    /* Sliders */
-    .stSlider > div > div {
-        border-radius: 8px;
+    /* Text area */
+    .stTextArea > div > div > textarea {
+        background: rgba(2, 6, 23, 0.6) !important;
+        border: 1px solid #475569 !important;
+        border-radius: 8px !important;
+        color: #e2e8f0 !important;
+    }
+    .stTextArea > div > div > textarea:focus {
+        border-color: #06b6d4 !important;
+        box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
+    }
+    
+    /* Sliders - cyan accent */
+    .stSlider [data-baseweb="slider"] span[role="slider"] {
+        background: #06b6d4 !important;
+    }
+    .stSlider [data-baseweb="slider"] > div > div {
+        background: #334155 !important;
+        border-radius: 8px !important;
     }
     
     /* File uploader */
     .stFileUploader > div {
-        border-radius: 8px;
-        border: 2px dashed #cbd5e1;
-        padding: 2rem;
-        transition: all 0.3s ease;
+        background: rgba(30, 41, 59, 0.4) !important;
+        border: 2px dashed #475569 !important;
+        border-radius: 1rem !important;
+        padding: 2rem !important;
+        transition: all 0.3s ease !important;
     }
-    
     .stFileUploader > div:hover {
-        border-color: #667eea;
-        background-color: #f8fafc;
-    }
-    
-    /* Success/Error messages */
-    .stSuccess {
-        border-radius: 8px;
-        padding: 1rem;
-    }
-    
-    .stError {
-        border-radius: 8px;
-        padding: 1rem;
+        border-color: rgba(6, 182, 212, 0.5) !important;
+        background: rgba(6, 182, 212, 0.05) !important;
     }
     
     /* Expanders */
     .streamlit-expanderHeader {
         font-weight: 600;
-        color: #374151;
+        color: #e2e8f0 !important;
+        background: rgba(30, 41, 59, 0.5) !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        border-radius: 12px !important;
+    }
+    [data-testid="stExpander"] {
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        border-radius: 12px !important;
+        margin-bottom: 0.5rem !important;
+        background: rgba(30, 41, 59, 0.3) !important;
+    }
+    .streamlit-expanderContent {
+        border-top: 1px solid rgba(51, 65, 85, 0.5) !important;
+        padding-top: 1rem !important;
     }
     
     /* Captions */
     .stCaption {
-        color: #6b7280;
+        color: #94a3b8 !important;
         font-size: 0.9rem;
     }
     
-    /* Dividers */
+    /* Dividers - gradient line */
     hr {
         margin: 2rem 0;
         border: none;
-        border-top: 2px solid #e5e7eb;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.3), transparent);
     }
     
-    /* Radio buttons */
+    /* Radio / checkbox labels */
+    .stRadio > div > label, .stCheckbox > label {
+        color: #cbd5e1 !important;
+    }
     .stRadio > div {
         gap: 1rem;
     }
     
-    .stRadio > div > label {
-        padding: 0.5rem 1rem;
-        border-radius: 8px;
-        transition: background-color 0.2s ease;
+    /* Progress bar - gradient fill */
+    .stProgress > div > div > div > div {
+        background: linear-gradient(90deg, #06b6d4, #3b82f6, #4f46e5) !important;
+        border-radius: 9999px !important;
+    }
+    [data-testid="stProgressBar"] > div > div {
+        background: #1e293b !important;
+        border-radius: 9999px !important;
     }
     
-    /* Number inputs */
-    .stNumberInput > div > div > input {
-        border-radius: 8px;
-        border: 2px solid #e5e7eb;
+    /* Metrics - dark cards */
+    [data-testid="stMetric"] {
+        background: rgba(15, 23, 42, 0.8) !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        border-radius: 12px !important;
+        padding: 1rem !important;
+        box-shadow: inset 0 0 15px rgba(0,0,0,0.3);
+    }
+    [data-testid="stMetric"] label {
+        color: #94a3b8 !important;
+    }
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #22d3ee !important;
     }
     
+    /* Code / terminal log */
+    .stCodeBlock, [data-testid="stCodeBlock"] {
+        background: #0a0a0f !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+    }
+    .stCodeBlock code, [data-testid="stCodeBlock"] code {
+        color: #6ee7b7 !important;
+        font-family: ui-monospace, monospace !important;
+    }
+    
+    /* Download buttons in download section (anchor in same block as header) */
+    .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton > button {
+        background: rgba(30, 41, 59, 0.9) !important;
+        border: 1px solid #475569 !important;
+        color: #e2e8f0 !important;
+    }
+    .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton > button:hover {
+        border-color: #06b6d4 !important;
+        color: #22d3ee !important;
+    }
+    .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton:nth-of-type(2) > button,
+    .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stColumns > div:nth-child(2) .stDownloadButton > button {
+        border-color: rgba(6, 182, 212, 0.5) !important;
+        box-shadow: 0 0 20px rgba(6, 182, 212, 0.2) !important;
+    }
+    
+    /* Custom scrollbar */
+    .main ::-webkit-scrollbar { width: 8px; height: 8px; }
+    .main ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); border-radius: 4px; }
+    .main ::-webkit-scrollbar-thumb { background: rgba(51, 65, 85, 0.8); border-radius: 4px; }
+    .main ::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
+    
+    /* Resume / partial results */
+    .resume-runs .stMarkdown { color: #e2e8f0 !important; }
+    .resume-runs .stCaption { color: #94a3b8 !important; }
+    
+    /* Dialog / modal - dark overlay and panel */
+    [data-testid="stDialog"] {
+        background: rgba(0, 0, 0, 0.6) !important;
+        backdrop-filter: blur(8px);
+    }
+    [data-testid="stDialog"] > div {
+        background: #0f172a !important;
+        border: 1px solid #334155 !important;
+        border-radius: 1rem !important;
+        box-shadow: 0 0 40px rgba(0,0,0,0.5) !important;
+    }
+    [data-testid="stDialog"] .stMarkdown { color: #e2e8f0 !important; }
+    
+    /* Token estimator - terminal-style panel */
+    .main [data-testid="stExpander"]:has([class*="token-estimator-anchor"]) {
+        border: 1px solid rgba(34, 197, 94, 0.3) !important;
+        background: rgba(0, 0, 0, 0.4) !important;
+    }
+    .main [data-testid="stExpander"]:has([class*="token-estimator-anchor"]) .streamlit-expanderHeader {
+        color: #6ee7b7 !important;
+    }
+    
+    /* Test run area - subtle card */
+    .test-run-anchor ~ * { color: inherit; }
+    .main [data-testid="stVerticalBlock"]:has(.test-run-anchor) {
+        background: rgba(30, 41, 59, 0.4) !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        border-radius: 1rem !important;
+        padding: 1rem !important;
+    }
+
     /* Remove default Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# Modern header with better styling
+# Hero: icon badge + gradient title + subtitle
 st.markdown("""
-<div style="text-align: center; padding: 2rem 0; margin-bottom: 2rem;">
-    <h1 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+<div style="text-align: center; padding: 3rem 0 2rem; margin-bottom: 1rem;">
+    <div style="display: inline-flex; align-items: center; justify-content: center; padding: 0.75rem; background: rgba(30, 41, 59, 0.6); border-radius: 1rem; border: 1px solid rgba(51, 65, 85, 0.5); margin-bottom: 1rem;">
+        <span style="font-size: 2rem;">🌐</span>
+    </div>
+    <h1 style="background: linear-gradient(90deg, #22d3ee 0%, #3b82f6 50%, #6366f1 100%);
                -webkit-background-clip: text;
                -webkit-text-fill-color: transparent;
                background-clip: text;
                margin-bottom: 0.5rem;
-               font-size: 3rem;
-               font-weight: 800;">
-        🌐 Website Scraper
+               font-size: 2.75rem;
+               font-weight: 800;
+               letter-spacing: -0.02em;">
+        Website Scraper
     </h1>
-    <p style="color: #6b7280; font-size: 1.1rem; margin-top: 0.5rem;">
+    <p style="color: #94a3b8; font-size: 1.1rem; margin-top: 0.5rem; max-width: 32rem; margin-left: auto; margin-right: auto;">
         Scrape websites from your CSV file and get clean, structured text content
     </p>
 </div>
@@ -3539,6 +3743,7 @@ if os.path.isdir(outputs_dir):
 
     if incomplete_runs:
         with st.expander("📂 Resume or Download Partial Results", expanded=True):
+            st.markdown('<div class="resume-runs">', unsafe_allow_html=True)
             st.markdown("**If the app crashed or stopped, you can:**")
             for run in incomplete_runs:
                 is_done = run.get("done", False)
@@ -3567,13 +3772,13 @@ if os.path.isdir(outputs_dir):
                         if os.path.exists(zip_path):
                             with open(zip_path, "rb") as f:
                                 st.download_button("⬇️ Download", f.read(), file_name=f"{run['folder']}.zip", mime="application/zip", key=f"resume_dl_{run['folder']}")
-                    st.markdown("---")
+            st.markdown('</div>', unsafe_allow_html=True)
 
 # Step 1: Upload CSV
-st.markdown("### 📁 Step 1: Upload CSV")
 st.markdown("""
-<div style="background-color: #f0f9ff; border-left: 4px solid #0ea5e9; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    <strong>💡 Tip:</strong> Your CSV should have a column with website URLs (one per row)
+<div class="step-card">
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📁 Step 1: Upload CSV</h3>
+    <div class="tip-box tip-box-cyan"><strong>💡 Tip:</strong> Your CSV should have a column with website URLs (one per row)</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -3666,8 +3871,25 @@ if uploaded_file is not None:
                 st.code(" • ".join(f"{{{k}}}" for k in sorted(lead_data_columns.keys())[:20]) + (" …" if len(lead_data_columns) > 20 else ""), language=None)
         
         # Store in session state for use during scraping and token estimator
-        url_col_idx = list(df_preview.columns).index(url_column) if csv_has_headers == "Yes" else int(url_column.replace("Column ", "")) - 1
-        url_series_preview = df_preview.iloc[:, url_col_idx].fillna("").astype(str)
+        num_cols_preview = len(df_preview.columns) if df_preview is not None else 0
+        if num_cols_preview == 0:
+            st.error("❌ No columns detected in CSV. Check the file has headers or at least one column.")
+        else:
+            try:
+                if csv_has_headers == "Yes":
+                    if url_column not in (list(df_preview.columns) or []):
+                        st.warning("⚠️ Selected URL column not found in preview. Using first column.")
+                        url_col_idx = 0
+                    else:
+                        url_col_idx = list(df_preview.columns).index(url_column)
+                else:
+                    url_col_idx = int(str(url_column).replace("Column ", "").strip()) - 1
+                    if url_col_idx < 0 or url_col_idx >= num_cols_preview:
+                        url_col_idx = 0
+                url_col_idx = min(url_col_idx, num_cols_preview - 1)
+            except (ValueError, TypeError, IndexError):
+                url_col_idx = 0
+            url_series_preview = df_preview.iloc[:, url_col_idx].fillna("").astype(str)
         url_count = sum(1 for u in url_series_preview if str(u).strip())
         # Warn if selected URL column doesn't look like URLs (e.g. user picked "Lead Name" by mistake)
         def _looks_like_url(s):
@@ -3701,10 +3923,10 @@ if uploaded_file is not None:
         st.info("Please check your CSV file format and try again.")
 
 # Step 2: Settings
-st.markdown("### ⚙️ Step 2: Settings")
 st.markdown("""
-<div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    <strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).
+<div class="step-card">
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">⚙️ Step 2: Settings</h3>
+    <div class="tip-box tip-box-emerald"><strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -3806,10 +4028,10 @@ with col2:
         )
 
 # Step 3: Company Summary Generator (optional)
-st.markdown("### 📋 Step 3: Company Summary Generator (optional)")
 st.markdown("""
-<div style="background-color: #faf5ff; border-left: 4px solid #a855f7; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.
+<div class="step-card">
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📋 Step 3: Company Summary Generator (optional)</h3>
+    <div class="tip-box tip-box-fuchsia">Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -3904,21 +4126,24 @@ if ai_enabled:
         
         if cached_models:
             default_index = 0
-            if ai_provider == "OpenAI":
-                if "gpt-4o-mini" in cached_models:
-                    default_index = cached_models.index("gpt-4o-mini")
-                elif "gpt-4o" in cached_models:
-                    default_index = cached_models.index("gpt-4o")
-            elif ai_provider == "Gemini":
-                if "gemini-1.5-flash" in cached_models:
-                    default_index = cached_models.index("gemini-1.5-flash")
-                elif "gemini-1.5-pro" in cached_models:
-                    default_index = cached_models.index("gemini-1.5-pro")
-            else:
-                for preferred in ["openai/gpt-4o-mini", "openai/gpt-4o", "google/gemini-2.0-flash-exp:free"]:
-                    if preferred in cached_models:
-                        default_index = cached_models.index(preferred)
-                        break
+            try:
+                if ai_provider == "OpenAI":
+                    if "gpt-4o-mini" in cached_models:
+                        default_index = cached_models.index("gpt-4o-mini")
+                    elif "gpt-4o" in cached_models:
+                        default_index = cached_models.index("gpt-4o")
+                elif ai_provider == "Gemini":
+                    if "gemini-1.5-flash" in cached_models:
+                        default_index = cached_models.index("gemini-1.5-flash")
+                    elif "gemini-1.5-pro" in cached_models:
+                        default_index = cached_models.index("gemini-1.5-pro")
+                else:
+                    for preferred in ["openai/gpt-4o-mini", "openai/gpt-4o", "google/gemini-2.0-flash-exp:free"]:
+                        if preferred in cached_models:
+                            default_index = cached_models.index(preferred)
+                            break
+            except ValueError:
+                default_index = 0
             
             ai_model = st.selectbox(
                 "Model",
@@ -4109,10 +4334,10 @@ else:
 
 # Step 4: Email Copy Writer (optional, works independently)
 st.markdown("---")
-st.markdown("### ✉️ Step 4: Email Copy Writer (optional)")
 st.markdown("""
-<div style="background-color: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-    Generate personalized email copy for each lead based on scraped content. Runs independently from company summaries. Same AI providers supported.
+<div class="step-card">
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">✉️ Step 4: Email Copy Writer (optional)</h3>
+    <div class="tip-box tip-box-emerald">Generate personalized email copy for each lead based on scraped content. Runs independently from company summaries. Same AI providers supported.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -4256,6 +4481,7 @@ else:
 # Token usage estimator (self-calculating from scraper settings + prompts)
 st.markdown("---")
 with st.expander("💰 Token usage estimator", expanded=False):
+    st.markdown('<span class="token-estimator-anchor" style="display:none;"></span>', unsafe_allow_html=True)
     MODEL_PRICING = {
         "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00), "gpt-4-turbo": (10.00, 30.00),
         "gpt-3.5-turbo": (0.50, 1.50), "gemini-1.5-flash": (0.075, 0.30),
@@ -4345,27 +4571,18 @@ with st.expander("💰 Token usage estimator", expanded=False):
             st.markdown(f"- **Total: ~${sum(x[2] for x in costs):.3f}**")
         st.caption("Based on max_chars={:,}, depth={}, retries={}. ~{:.0f}% of URLs assumed to succeed.".format(max_chars_est, depth_est, retries_est, success_rate * 100))
 
-# Test run option
+# Test run option (anchor for diagnostic card styling)
 st.markdown("---")
-test_col1, test_col2 = st.columns([1, 2])
-with test_col1:
-    test_rows = st.number_input("Test with X rows", min_value=1, max_value=20, value=5, help="Preview scraping + AI on first X URLs before full run", key="test_rows_input")
-with test_col2:
-    st.caption("Run a quick test to see scraped content and AI summary in the browser (no files created)")
-    test_clicked = st.button("🧪 Test run", key="test_run_btn", help=f"Test scraping + AI on first {test_rows} row(s)")
+with st.container():
+    st.markdown('<div class="test-run-anchor" style="display:none;"></div>', unsafe_allow_html=True)
+    test_col1, test_col2 = st.columns([1, 2])
+    with test_col1:
+        test_rows = st.number_input("Test with X rows", min_value=1, max_value=20, value=5, help="Preview scraping + AI on first X URLs before full run", key="test_rows_input")
+    with test_col2:
+        st.caption("Run a quick test to see scraped content and AI summary in the browser (no files created)")
+        test_clicked = st.button("🧪 Test run", key="test_run_btn", help=f"Test scraping + AI on first {test_rows} row(s)")
 
-# Main action button with better styling
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; padding: 2rem 0;">
-    <h2 style="color: #1f2937; margin-bottom: 1rem;">🚀 Ready to Start</h2>
-    <p style="color: #6b7280; font-size: 1rem; margin-bottom: 1.5rem;">
-        Make sure you've uploaded your CSV and configured settings above.<br>
-        Then click the button below to start scraping!
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
+# Main action area (CTA section) - Get variables from tabs first so button is in same container
 # Get variables from tabs - Use session_state (proper Streamlit way)
 keywords = st.session_state.get('keywords', [])
 concurrency = st.session_state.get('concurrency', 20)
@@ -4561,8 +4778,20 @@ if st.session_state.get("_test_results") is not None and not st.session_state.ge
         st.info("No results. Check logs above.")
     # Clear results when user starts a new test (handled by test_clicked block)
 
-# -------- SCRAPE BUTTON --------
-if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
+# -------- SCRAPE BUTTON (CTA section for primary button styling) --------
+with st.container():
+    st.markdown("---")
+    st.markdown("""
+    <div class="cta-heading-block" style="text-align: center; padding: 2rem 0;">
+        <h2 style="color: #f1f5f9; margin-bottom: 1rem;">🚀 Ready to Start</h2>
+        <p style="color: #94a3b8; font-size: 1rem; margin-bottom: 1.5rem;">
+            Make sure you've uploaded your CSV and configured settings above.<br>
+            Then click the button below to start scraping!
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    start_clicked = st.button("🚀 Start Scraping", use_container_width=True, key="start_scraping_btn")
+if uploaded_file and start_clicked:
     # Get CSV configuration from session state
     csv_config = st.session_state.get('csv_config', {})
     
@@ -4917,7 +5146,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
                             badge = "scraping" if status == "scraping" else ("AI" if status == "ai_summarizing" else "email")
                             color = "#3b82f6" if status == "scraping" else ("#8b5cf6" if status == "ai_summarizing" else "#22c55e")
-                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.3rem; background:#f8fafc; border-radius:6px; border-left:3px solid {color};"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#64748b; font-size:0.8rem;">{msg}</span> <code style="background:#e2e8f0; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
+                            st.markdown(f"""<div class="dashboard-activity-row" style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid {color}; color:#e2e8f0;"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#94a3b8; font-size:0.8rem;">{msg}</span> <code style="background:rgba(51,65,85,0.8); color:#cbd5e1; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_Waiting for workers..._")
                 with col2:
@@ -4928,9 +5157,9 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             short_url = escape((u[:38] + "…") if len(u) > 38 else u)
                             if e.get("status") == "scraped":
                                 msg = escape(str(e.get("message", ""))[:50])
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#16a34a;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#64748b; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#34d399;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#94a3b8; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
                             else:
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#dc2626;'>✗ {short_url}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#f87171;'>✗ {short_url}</div>", unsafe_allow_html=True)
                     else:
                         st.caption("_None yet_")
                 with col3:
@@ -4941,7 +5170,7 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
                             m = e.get("message", "")
                             short_url = escape((u[:35] + "…") if len(u) > 35 else u)
                             msg = escape((m[:70] + "…") if len(m) > 70 else m)
-                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.3rem; background:#fef2f2; border-radius:6px; border-left:3px solid #dc2626;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#64748b;">{msg}</span></div>""", unsafe_allow_html=True)
+                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid #f87171; color:#e2e8f0;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#94a3b8;">{msg}</span></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_No issues_")
             
@@ -5051,8 +5280,8 @@ if uploaded_file and st.button("🚀 Start Scraping", use_container_width=True):
     if total > 0:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website. Each website's content was limited to this exact amount.")
     
-    # Download section
-    st.header("📥 Download Results")
+    # Download section (anchor for dark-theme download card styling)
+    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
@@ -5587,8 +5816,8 @@ if st.session_state.get('scraping_complete', False):
     if total > 0:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
     
-    # Download section (persistent)
-    st.header("📥 Download Results")
+    # Download section (persistent, same anchor for styling)
+    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
