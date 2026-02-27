@@ -3,6 +3,7 @@ import aiohttp
 import pandas as pd
 import re
 import os
+import signal
 import time
 import csv
 import zipfile
@@ -14,6 +15,33 @@ import json
 import random
 import threading
 from collections import deque
+
+# Global run context for signal handlers (captures external kills: OOM, Ctrl+C, etc.)
+_run_context = {}
+_ZIP_MEMORY_LIMIT = 50 * 1024 * 1024  # 50 MB - don't load larger ZIPs into memory (OOM risk)
+
+def _write_last_status_on_signal(signum, frame):
+    """Write last known state when process is killed (SIGTERM, SIGINT, etc.)."""
+    try:
+        out = _run_context.get("output_dir")
+        if out and os.path.isdir(out):
+            path = os.path.join(out, "last_status.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"Process received signal {signum} at {datetime.now().isoformat()}\n")
+                f.write(f"Progress: {_run_context.get('done', '?')}/{_run_context.get('total', '?')} rows\n")
+                f.write(f"\nProcess was killed externally (Ctrl+C, OOM, Task Manager, etc.).\n")
+                f.write(f"If OOM: reduce concurrency or rows_per_file.\n")
+    except Exception:
+        pass
+    raise SystemExit(128 + (signum if isinstance(signum, int) else 0))
+
+def _install_signal_handlers():
+    """Register signal handlers for external kills (only works in main thread)."""
+    try:
+        signal.signal(signal.SIGTERM, _write_last_status_on_signal)
+        signal.signal(signal.SIGINT, _write_last_status_on_signal)
+    except (ValueError, OSError):
+        pass
 
 # AI imports (optional - only if API keys provided)
 try:
@@ -3492,11 +3520,21 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     stall_monitor = asyncio.create_task(force_completion_on_stall())
     
     async def heartbeat():
+        status_path = os.path.join(output_dir, "last_status.txt")
         while True:
             await asyncio.sleep(20)
             done = progress_state["last_count"]
             elapsed = int(time.time() - progress_state["last_time"])
             emit(f"💓 Heartbeat: {done}/{total_overall} done, idle_for={elapsed}s, url_q={url_queue.qsize()}, result_q={result_queue.qsize()}")
+            # Write last known state so we have something if process is killed (OOM, etc.)
+            try:
+                with open(status_path, "w", encoding="utf-8") as f:
+                    f.write(f"Last known state at {datetime.now().isoformat()}\n")
+                    f.write(f"Progress: {done}/{total_overall} rows completed\n")
+                    f.write(f"Idle for: {elapsed}s, url_q={url_queue.qsize()}, result_q={result_queue.qsize()}\n")
+                    f.write(f"\nIf process was killed (e.g. out of memory), try reducing concurrency or rows_per_file.\n")
+            except Exception:
+                pass
     heartbeat_task = asyncio.create_task(heartbeat())
     
     try:
@@ -3632,28 +3670,29 @@ st.set_page_config(
     page_icon="🌐",
     initial_sidebar_state="collapsed"
 )
+_install_signal_handlers()
 
-# Dark theme UI styling (design alignment)
+# Dark theme UI styling - black backgrounds, white/colored text
 st.markdown("""
 <style>
-    /* 1. Global theme and layout */
+    /* 1. Global theme and layout - all black */
     .stApp {
-        background: linear-gradient(180deg, #090b14 0%, #0f172a 50%, #090b14 100%);
+        background: #000000 !important;
     }
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
         max-width: 1200px;
-        background: rgba(15, 23, 42, 0.7);
+        background: #000000 !important;
         border-radius: 1rem;
-        border: 1px solid rgba(51, 65, 85, 0.5);
+        border: 1px solid #1f2937;
         backdrop-filter: blur(12px);
     }
     .main, .block-container {
-        color: #e2e8f0;
+        color: #ffffff !important;
     }
     p, span, label, .stMarkdown {
-        color: #cbd5e1 !important;
+        color: #e5e7eb !important;
     }
     ::selection {
         background: rgba(6, 182, 212, 0.3);
@@ -3662,110 +3701,111 @@ st.markdown("""
     
     /* 2. Hero - handled in HTML below */
     
-    /* 3–4. Section headers and typography */
+    /* 3–4. Section headers and typography - white */
     h1 {
-        color: #f1f5f9 !important;
+        color: #ffffff !important;
         font-weight: 700;
         margin-bottom: 0.5rem;
         font-size: 2.5rem;
     }
     h3 {
-        color: #f1f5f9 !important;
+        color: #ffffff !important;
         font-weight: 600;
         margin-top: 0;
         margin-bottom: 1rem;
         font-size: 1.5rem;
     }
     h4 {
-        color: #e2e8f0 !important;
+        color: #f3f4f6 !important;
         font-weight: 600;
         margin-top: 1.5rem;
         margin-bottom: 0.75rem;
     }
     
-    /* Step card class (for optional wrappers) */
+    /* Step card class - black */
     .step-card {
-        background: rgba(15, 23, 42, 0.6);
+        background: #000000 !important;
         backdrop-filter: blur(16px);
-        border: 1px solid rgba(51, 65, 85, 0.5);
+        border: 1px solid #1f2937;
         border-radius: 1rem;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.36);
+        box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     }
     .step-card.active {
         box-shadow: 0 0 30px -5px rgba(6, 182, 212, 0.3);
         border-color: rgba(6, 182, 212, 0.5);
     }
     
-    /* Tip boxes inside step cards - dark with left accent */
+    /* Tip boxes - black with colored left accent */
     .tip-box {
         padding: 1rem;
         border-radius: 0 8px 8px 0;
         margin-bottom: 1rem;
-        color: #e2e8f0;
+        color: #e5e7eb;
         font-size: 0.95rem;
     }
     .tip-box-cyan {
-        background: rgba(6, 182, 212, 0.1);
+        background: #000000 !important;
         border-left: 4px solid #06b6d4;
     }
     .tip-box-emerald {
-        background: rgba(16, 185, 129, 0.1);
+        background: #000000 !important;
         border-left: 4px solid #10b981;
     }
     .tip-box-fuchsia {
-        background: rgba(217, 70, 239, 0.1);
+        background: #000000 !important;
         border-left: 4px solid #d946ef;
     }
     
-    /* Info / tip boxes - dark with left accent */
+    /* Info / tip boxes - black with colored left accent */
     .stAlert, [data-testid="stAlert"] {
-        background: rgba(6, 182, 212, 0.08) !important;
+        background: #000000 !important;
         border-left: 4px solid #06b6d4 !important;
         border-radius: 0 8px 8px 0 !important;
-        color: #e0f2fe !important;
+        color: #22d3ee !important;
     }
     .stSuccess, [data-testid="stSuccess"] {
-        background: rgba(16, 185, 129, 0.12) !important;
+        background: #000000 !important;
         border-left: 4px solid #10b981 !important;
         border-radius: 0 8px 8px 0 !important;
-        color: #a7f3d0 !important;
+        color: #34d399 !important;
     }
     .stWarning, [data-testid="stWarning"] {
-        background: rgba(245, 158, 11, 0.12) !important;
+        background: #000000 !important;
         border-left: 4px solid #f59e0b !important;
         border-radius: 0 8px 8px 0 !important;
-        color: #fde68a !important;
+        color: #fbbf24 !important;
     }
     .stError, [data-testid="stError"] {
-        background: rgba(239, 68, 68, 0.12) !important;
+        background: #000000 !important;
         border-left: 4px solid #ef4444 !important;
         border-radius: 0 8px 8px 0 !important;
-        color: #fecaca !important;
+        color: #f87171 !important;
     }
     
-    /* Primary CTA: button in same container as .cta-heading-block (Start Scraping) */
+    /* Primary CTA: Start Scraping button */
     .main [data-testid="stVerticalBlock"]:has(.cta-heading-block) .stButton > button {
-        background: linear-gradient(90deg, #06b6d4 0%, #4f46e5 100%) !important;
-        color: white !important;
+        background: #000000 !important;
+        color: #ffffff !important;
         font-weight: 700 !important;
         padding: 0.875rem 2rem !important;
         border-radius: 12px !important;
-        border: none !important;
+        border: 2px solid #06b6d4 !important;
         transition: all 0.3s ease !important;
         box-shadow: 0 0 20px rgba(6, 182, 212, 0.3) !important;
     }
     .cta-section .stButton > button:hover {
         transform: translateY(-2px) !important;
         box-shadow: 0 0 30px rgba(6, 182, 212, 0.5) !important;
+        border-color: #22d3ee !important;
     }
     
-    /* Secondary buttons (all other buttons) */
+    /* Secondary buttons - black background */
     .stButton > button {
-        background: rgba(30, 41, 59, 0.8) !important;
-        color: #cbd5e1 !important;
-        border: 1px solid #475569 !important;
+        background: #000000 !important;
+        color: #ffffff !important;
+        border: 1px solid #374151 !important;
         font-weight: 500 !important;
         padding: 0.5rem 1rem !important;
         border-radius: 8px !important;
@@ -3774,16 +3814,16 @@ st.markdown("""
     .stButton > button:hover {
         border-color: #22d3ee !important;
         color: #22d3ee !important;
-        background: rgba(6, 182, 212, 0.1) !important;
+        background: #0a0a0a !important;
     }
     
-    /* Inputs */
+    /* Inputs - black */
     .stTextInput > div > div > input,
     .stNumberInput > div > div > input {
-        background: rgba(2, 6, 23, 0.6) !important;
-        border: 1px solid #475569 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 8px !important;
-        color: #e2e8f0 !important;
+        color: #ffffff !important;
         transition: border-color 0.2s, box-shadow 0.2s !important;
     }
     .stTextInput > div > div > input:focus,
@@ -3792,55 +3832,55 @@ st.markdown("""
         box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
     }
     .stTextInput > div > div > input::placeholder {
-        color: #64748b !important;
+        color: #6b7280 !important;
     }
     
-    /* Select boxes */
+    /* Select boxes - black */
     .stSelectbox > div > div {
-        background: rgba(2, 6, 23, 0.6) !important;
-        border: 1px solid #475569 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 8px !important;
-        color: #e2e8f0 !important;
+        color: #ffffff !important;
     }
     .stSelectbox > div > div:focus-within {
         border-color: #06b6d4 !important;
         box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
     }
     
-    /* Text area */
+    /* Text area - black */
     .stTextArea > div > div > textarea {
-        background: rgba(2, 6, 23, 0.6) !important;
-        border: 1px solid #475569 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 8px !important;
-        color: #e2e8f0 !important;
+        color: #ffffff !important;
     }
     .stTextArea > div > div > textarea:focus {
         border-color: #06b6d4 !important;
         box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
     }
     
-    /* Sliders - cyan accent */
+    /* Sliders - black track, cyan accent */
     .stSlider [data-baseweb="slider"] span[role="slider"] {
         background: #06b6d4 !important;
     }
     .stSlider [data-baseweb="slider"] > div > div {
-        background: #334155 !important;
+        background: #000000 !important;
         border-radius: 8px !important;
     }
     
-    /* File uploader - greyish, no white */
+    /* File uploader - black */
     [data-testid="stFileUploader"],
     [data-testid="stFileUploader"] section,
     [data-testid="stFileUploader"] div,
     .stFileUploader,
     .stFileUploader > div,
     .stFileUploader section {
-        background: #334155 !important;
+        background: #000000 !important;
         border-radius: 1rem !important;
-        color: #e2e8f0 !important;
+        color: #ffffff !important;
     }
     .stFileUploader > div {
-        border: 2px dashed #475569 !important;
+        border: 2px dashed #374151 !important;
         padding: 2rem !important;
         transition: all 0.3s ease !important;
     }
@@ -3848,59 +3888,59 @@ st.markdown("""
     [data-testid="stFileUploader"]:hover section,
     [data-testid="stFileUploader"]:hover > div {
         border-color: rgba(6, 182, 212, 0.6) !important;
-        background: #475569 !important;
+        background: #0a0a0a !important;
     }
     [data-testid="stFileUploader"] label,
     [data-testid="stFileUploader"] p,
     .stFileUploader label,
     .stFileUploader p {
-        color: #cbd5e1 !important;
+        color: #e5e7eb !important;
     }
     
-    /* Expanders - greyish header and content, readable text */
+    /* Expanders - black */
     .streamlit-expanderHeader {
         font-weight: 600;
-        color: #e2e8f0 !important;
-        background: #334155 !important;
-        border: 1px solid #475569 !important;
+        color: #ffffff !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 12px !important;
         transition: background 0.2s ease, border-color 0.2s ease !important;
     }
     .streamlit-expanderHeader:hover {
-        background: #475569 !important;
-        border-color: #64748b !important;
+        background: #0a0a0a !important;
+        border-color: #4b5563 !important;
     }
     [data-testid="stExpander"] {
-        border: 1px solid #475569 !important;
+        border: 1px solid #374151 !important;
         border-radius: 12px !important;
         margin-bottom: 0.5rem !important;
-        background: #334155 !important;
+        background: #000000 !important;
     }
     [data-testid="stExpander"]:hover {
-        background: #374151 !important;
+        background: #0a0a0a !important;
     }
     .streamlit-expanderContent {
-        border-top: 1px solid #475569 !important;
+        border-top: 1px solid #374151 !important;
         padding-top: 1rem !important;
-        background: #1e293b !important;
-        color: #e2e8f0 !important;
+        background: #000000 !important;
+        color: #ffffff !important;
     }
     .streamlit-expanderContent .stMarkdown,
     .streamlit-expanderContent p,
     .streamlit-expanderContent label {
-        color: #cbd5e1 !important;
+        color: #e5e7eb !important;
     }
     
-    /* Number input wrapper - grey, no white */
+    /* Number input wrapper - black */
     .stNumberInput > div,
     [data-testid="stNumberInput"] > div {
-        background: rgba(30, 41, 59, 0.6) !important;
+        background: #000000 !important;
         border-radius: 8px !important;
     }
     
-    /* Captions */
+    /* Captions - light gray */
     .stCaption {
-        color: #94a3b8 !important;
+        color: #9ca3af !important;
         font-size: 0.9rem;
     }
     
@@ -3914,53 +3954,53 @@ st.markdown("""
     
     /* Radio / checkbox labels */
     .stRadio > div > label, .stCheckbox > label {
-        color: #cbd5e1 !important;
+        color: #ffffff !important;
     }
     .stRadio > div {
         gap: 1rem;
     }
     
-    /* Progress bar - gradient fill */
+    /* Progress bar - colored fill on black track */
     .stProgress > div > div > div > div {
         background: linear-gradient(90deg, #06b6d4, #3b82f6, #4f46e5) !important;
         border-radius: 9999px !important;
     }
     [data-testid="stProgressBar"] > div > div {
-        background: #1e293b !important;
+        background: #000000 !important;
         border-radius: 9999px !important;
     }
     
-    /* Metrics - dark cards */
+    /* Metrics - black cards */
     [data-testid="stMetric"] {
-        background: rgba(15, 23, 42, 0.8) !important;
-        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 12px !important;
         padding: 1rem !important;
-        box-shadow: inset 0 0 15px rgba(0,0,0,0.3);
+        box-shadow: inset 0 0 15px rgba(0,0,0,0.5);
     }
     [data-testid="stMetric"] label {
-        color: #94a3b8 !important;
+        color: #9ca3af !important;
     }
     [data-testid="stMetric"] [data-testid="stMetricValue"] {
         color: #22d3ee !important;
     }
     
-    /* Code / terminal log */
+    /* Code / terminal log - black */
     .stCodeBlock, [data-testid="stCodeBlock"] {
-        background: #0a0a0f !important;
-        border: 1px solid #334155 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 8px !important;
     }
     .stCodeBlock code, [data-testid="stCodeBlock"] code {
-        color: #6ee7b7 !important;
+        color: #34d399 !important;
         font-family: ui-monospace, monospace !important;
     }
     
-    /* Download buttons in download section (anchor in same block as header) */
+    /* Download buttons - black */
     .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton > button {
-        background: rgba(30, 41, 59, 0.9) !important;
-        border: 1px solid #475569 !important;
-        color: #e2e8f0 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
+        color: #ffffff !important;
     }
     .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton > button:hover {
         border-color: #06b6d4 !important;
@@ -3972,55 +4012,71 @@ st.markdown("""
         box-shadow: 0 0 20px rgba(6, 182, 212, 0.2) !important;
     }
     
-    /* Custom scrollbar */
+    /* Custom scrollbar - black */
     .main ::-webkit-scrollbar { width: 8px; height: 8px; }
-    .main ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); border-radius: 4px; }
-    .main ::-webkit-scrollbar-thumb { background: rgba(51, 65, 85, 0.8); border-radius: 4px; }
+    .main ::-webkit-scrollbar-track { background: #000000; border-radius: 4px; }
+    .main ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
     .main ::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.5); }
     
     /* Resume / partial results */
-    .resume-runs .stMarkdown { color: #e2e8f0 !important; }
-    .resume-runs .stCaption { color: #94a3b8 !important; }
+    .resume-runs .stMarkdown { color: #ffffff !important; }
+    .resume-runs .stCaption { color: #9ca3af !important; }
     
-    /* Dialog / modal - dark overlay and panel */
+    /* Dialog / modal - black */
     [data-testid="stDialog"] {
-        background: rgba(0, 0, 0, 0.6) !important;
+        background: rgba(0, 0, 0, 0.9) !important;
         backdrop-filter: blur(8px);
     }
     [data-testid="stDialog"] > div {
-        background: #0f172a !important;
-        border: 1px solid #334155 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 1rem !important;
         box-shadow: 0 0 40px rgba(0,0,0,0.5) !important;
     }
-    [data-testid="stDialog"] .stMarkdown { color: #e2e8f0 !important; }
+    [data-testid="stDialog"] .stMarkdown { color: #ffffff !important; }
     
-    /* Token estimator - terminal-style panel */
+    /* Token estimator - black panel */
     .main [data-testid="stExpander"]:has([class*="token-estimator-anchor"]) {
         border: 1px solid rgba(34, 197, 94, 0.3) !important;
-        background: rgba(0, 0, 0, 0.4) !important;
+        background: #000000 !important;
     }
     .main [data-testid="stExpander"]:has([class*="token-estimator-anchor"]) .streamlit-expanderHeader {
-        color: #6ee7b7 !important;
+        color: #34d399 !important;
     }
     
-    /* Test run area - grey card, readable text */
+    /* Test run area - black card */
     .test-run-anchor ~ * { color: inherit; }
     .main [data-testid="stVerticalBlock"]:has(.test-run-anchor) {
-        background: #334155 !important;
-        border: 1px solid #475569 !important;
+        background: #000000 !important;
+        border: 1px solid #374151 !important;
         border-radius: 1rem !important;
         padding: 1rem !important;
     }
     .main [data-testid="stVerticalBlock"]:has(.test-run-anchor):hover {
-        background: #374151 !important;
-        border-color: #64748b !important;
+        background: #0a0a0a !important;
+        border-color: #4b5563 !important;
     }
     .main [data-testid="stVerticalBlock"]:has(.test-run-anchor) .stCaption,
     .main [data-testid="stVerticalBlock"]:has(.test-run-anchor) label {
-        color: #cbd5e1 !important;
+        color: #e5e7eb !important;
     }
 
+    /* Section/block containers - black */
+    section[data-testid="stSidebar"],
+    section[data-testid="stSidebar"] > div {
+        background: #000000 !important;
+    }
+    div[data-testid="stVerticalBlock"],
+    div[data-testid="stHorizontalBlock"] {
+        background: transparent !important;
+    }
+    
+    /* Checkbox/radio - ensure visible on black */
+    .stCheckbox [role="checkbox"],
+    .stRadio [role="radio"] {
+        accent-color: #06b6d4;
+    }
+    
     /* Remove default Streamlit branding */
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
@@ -4031,7 +4087,7 @@ st.markdown("""
 # Hero: icon badge + gradient title + subtitle
 st.markdown("""
 <div style="text-align: center; padding: 3rem 0 2rem; margin-bottom: 1rem;">
-    <div style="display: inline-flex; align-items: center; justify-content: center; padding: 0.75rem; background: rgba(30, 41, 59, 0.6); border-radius: 1rem; border: 1px solid rgba(51, 65, 85, 0.5); margin-bottom: 1rem;">
+    <div style="display: inline-flex; align-items: center; justify-content: center; padding: 0.75rem; background: #000000; border-radius: 1rem; border: 1px solid #374151; margin-bottom: 1rem;">
         <span style="font-size: 2rem;">🌐</span>
     </div>
     <h1 style="background: linear-gradient(90deg, #22d3ee 0%, #3b82f6 50%, #6366f1 100%);
@@ -4044,18 +4100,19 @@ st.markdown("""
                letter-spacing: -0.02em;">
         Website Scraper
     </h1>
-    <p style="color: #94a3b8; font-size: 1.1rem; margin-top: 0.5rem; max-width: 32rem; margin-left: auto; margin-right: auto;">
+    <p style="color: #9ca3af; font-size: 1.1rem; margin-top: 0.5rem; max-width: 32rem; margin-left: auto; margin-right: auto;">
         Scrape websites from your CSV file and get clean, structured text content
     </p>
 </div>
 """, unsafe_allow_html=True)
 
-# -------- CRASH REPORT (always visible when crash logs exist) --------
-# One button to get the latest crash report - works even after refresh/crash
+# -------- CRASH REPORT (always visible when crash logs or status exist) --------
+# One button to get the latest crash/status report - works even after refresh/crash
 outputs_dir = "outputs"
 latest_crash_path = None
+latest_report_label = "crash report"
 if os.path.isdir(outputs_dir):
-    all_crash_logs_flat = []
+    all_reports_flat = []
     for run_folder in sorted(os.listdir(outputs_dir), reverse=True):
         run_path = os.path.join(outputs_dir, run_folder)
         if not os.path.isdir(run_path):
@@ -4063,28 +4120,34 @@ if os.path.isdir(outputs_dir):
         for f in os.listdir(run_path):
             if f.startswith("crash_log_") and f.endswith(".txt"):
                 fp = os.path.join(run_path, f)
-                all_crash_logs_flat.append((fp, os.path.getmtime(fp)))
+                all_reports_flat.append((fp, os.path.getmtime(fp), "crash"))
+            elif f == "last_status.txt":
+                fp = os.path.join(run_path, f)
+                if os.path.isfile(fp):
+                    all_reports_flat.append((fp, os.path.getmtime(fp), "status"))
     # Also check outputs/ for fallback last_crash_*.txt
     for f in os.listdir(outputs_dir):
         if f.startswith("last_crash_") and f.endswith(".txt"):
             fp = os.path.join(outputs_dir, f)
             if os.path.isfile(fp):
-                all_crash_logs_flat.append((fp, os.path.getmtime(fp)))
-    if all_crash_logs_flat:
-        latest_crash_path = max(all_crash_logs_flat, key=lambda x: x[1])[0]
+                all_reports_flat.append((fp, os.path.getmtime(fp), "crash"))
+    if all_reports_flat:
+        latest = max(all_reports_flat, key=lambda x: x[1])
+        latest_crash_path = latest[0]
+        latest_report_label = "status report" if latest[2] == "status" else "crash report"
 
 if latest_crash_path and os.path.exists(latest_crash_path):
     try:
         with open(latest_crash_path, "rb") as f:
             crash_data = f.read()
-        st.warning("⚠️ **Crash detected.** Download the report below to debug.")
+        st.warning("⚠️ **Crash or unexpected stop detected.** Download the report below to debug.")
         st.download_button(
-            "📥 Download latest crash report",
+            f"📥 Download latest {latest_report_label}",
             crash_data,
             file_name=os.path.basename(latest_crash_path),
             mime="text/plain",
             key="dl_latest_crash_report",
-            help="One-click download of the most recent crash/error log. Always available after a crash, even if you refresh."
+            help="One-click download. Always available after a crash, even if you refresh."
         )
     except Exception:
         pass
@@ -4108,6 +4171,8 @@ if os.path.isdir(outputs_dir):
         # Find most recent crash log to show why it crashed
         crash_reason = None
         crash_log_path = None
+        last_status_path = None
+        last_status_content = None
         try:
             crash_logs = sorted([f for f in os.listdir(run_path) if f.startswith("crash_log_") and f.endswith(".txt")], reverse=True)
             if crash_logs:
@@ -4121,9 +4186,18 @@ if os.path.isdir(outputs_dir):
                         break
                 if not crash_reason and lines:
                     crash_reason = "".join(lines[-50:]).strip()
+            # Fallback: last_status.txt (written by heartbeat when process is killed before crash handler runs)
+            status_file = os.path.join(run_path, "last_status.txt")
+            if not crash_reason and os.path.exists(status_file):
+                last_status_path = status_file
+                try:
+                    with open(status_file, "r", encoding="utf-8", errors="replace") as f:
+                        last_status_content = f.read().strip()
+                except Exception:
+                    pass
         except Exception:
             pass
-        run_data = {"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path, "crash_reason": crash_reason, "crash_log_path": crash_log_path}
+        run_data = {"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path, "crash_reason": crash_reason, "crash_log_path": crash_log_path, "last_status_path": last_status_path, "last_status_content": last_status_content}
         if completed > 0 and completed < total_urls:
             incomplete_runs.append(run_data)
         elif completed >= total_urls and total_urls > 0:
@@ -4169,19 +4243,29 @@ if os.path.isdir(outputs_dir):
                         crash_reason = run.get("crash_reason")
                         crash_log_path = run.get("crash_log_path")
                         if not is_done:
-                            with st.expander("⚠️ Why did it crash? (error details)", expanded=bool(crash_reason)):
+                            with st.expander("⚠️ Why did it crash? (error details)", expanded=bool(crash_reason or run.get("last_status_content"))):
                                 if crash_reason:
                                     st.code(crash_reason[:3000] + ("..." if len(crash_reason) > 3000 else ""), language=None)
                                     st.caption("Use the **Crash log** button on the right to download the full log.")
+                                elif run.get("last_status_content"):
+                                    st.code(run["last_status_content"], language=None)
+                                    st.caption("**Last known state** (process was likely killed before a crash log could be written). Try reducing **concurrency** or **rows per file**.")
+                                    if run.get("last_status_path") and os.path.exists(run["last_status_path"]):
+                                        with open(run["last_status_path"], "rb") as sf:
+                                            st.download_button("📥 Download status report", sf.read(), file_name="last_status.txt", mime="text/plain", key=f"status_dl_{run['folder']}")
                                 else:
                                     st.info("No crash log found. The process may have been killed (e.g. out of memory, or browser closed). Try reducing **concurrency** or **rows per file** in settings, then resume.")
                     with col_b:
-                        # Easy one-click downloads: ZIP and crash log side by side
+                        # Easy one-click downloads: ZIP, crash log, or status report
                         zip_path = os.path.join(run["path"], f"{run['folder']}.zip")
                         crash_log_path = run.get("crash_log_path")
+                        last_status_path = run.get("last_status_path")
                         if crash_log_path and os.path.exists(crash_log_path):
                             with open(crash_log_path, "rb") as clf:
                                 st.download_button("📥 Crash log", clf.read(), file_name=os.path.basename(crash_log_path), mime="text/plain", key=f"crash_dl_{run['folder']}", help="Download crash/error log for this run")
+                        elif last_status_path and os.path.exists(last_status_path):
+                            with open(last_status_path, "rb") as sf:
+                                st.download_button("📥 Status report", sf.read(), file_name="last_status.txt", mime="text/plain", key=f"status_dl_{run['folder']}", help="Download last known state (process was killed)")
                         if not os.path.exists(zip_path):
                             csv_files = sorted([f for f in os.listdir(run["path"]) if f.startswith("output_part_") and f.endswith(".csv") and "combined" not in f.lower()])
                             if csv_files:
@@ -4207,7 +4291,7 @@ if os.path.isdir(outputs_dir):
                                         if os.path.exists(combined_path):
                                             zf.write(combined_path, arcname="combined_all_results.csv")
                                         for f in os.listdir(run["path"]):
-                                            if (f.endswith(".xlsx") or (f.endswith(".txt") and f.startswith("crash_log_"))) and "combined" not in f.lower():
+                                            if (f.endswith(".xlsx") or (f.endswith(".txt") and (f.startswith("crash_log_") or f == "last_status.txt"))) and "combined" not in f.lower():
                                                 zf.write(os.path.join(run["path"], f), arcname=f)
                                 except Exception:
                                     pass
@@ -4219,7 +4303,7 @@ if os.path.isdir(outputs_dir):
 # Step 1: Upload CSV
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📁 Step 1: Upload CSV</h3>
+    <h3 style="color: #ffffff !important; margin-top: 0;">📁 Step 1: Upload CSV</h3>
     <div class="tip-box tip-box-cyan"><strong>💡 Tip:</strong> Your CSV should have a column with website URLs (one per row)</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4367,7 +4451,7 @@ if uploaded_file is not None:
 # Step 2: Settings
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">⚙️ Step 2: Settings</h3>
+    <h3 style="color: #ffffff !important; margin-top: 0;">⚙️ Step 2: Settings</h3>
     <div class="tip-box tip-box-emerald"><strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4472,7 +4556,7 @@ with col2:
 # Step 3: Company Summary Generator (optional)
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📋 Step 3: Company Summary Generator (optional)</h3>
+    <h3 style="color: #ffffff !important; margin-top: 0;">📋 Step 3: Company Summary Generator (optional)</h3>
     <div class="tip-box tip-box-fuchsia">Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4778,7 +4862,7 @@ else:
 st.markdown("---")
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">✉️ Step 4: Email Copy Writer (optional)</h3>
+    <h3 style="color: #ffffff !important; margin-top: 0;">✉️ Step 4: Email Copy Writer (optional)</h3>
     <div class="tip-box tip-box-emerald">Generate personalized email copy for each lead based on scraped content. Runs independently from company summaries. Same AI providers supported.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -5225,8 +5309,8 @@ with st.container():
     st.markdown("---")
     st.markdown("""
     <div class="cta-heading-block" style="text-align: center; padding: 2rem 0;">
-        <h2 style="color: #f1f5f9; margin-bottom: 1rem;">🚀 Ready to Start</h2>
-        <p style="color: #94a3b8; font-size: 1rem; margin-bottom: 1.5rem;">
+        <h2 style="color: #ffffff; margin-bottom: 1rem;">🚀 Ready to Start</h2>
+        <p style="color: #9ca3af; font-size: 1rem; margin-bottom: 1.5rem;">
             Make sure you've uploaded your CSV and configured settings above.<br>
             Then click the button below to start scraping!
         </p>
@@ -5416,6 +5500,8 @@ if uploaded_file and start_clicked:
             progress_state_ui["done"] = done_count
             progress_state_ui["total"] = max(total_count, 1)
             progress_samples.append((time.time(), done_count))
+        _run_context["done"] = done_count
+        _run_context["total"] = max(total_count, 1)
 
     def scrape_status_callback(url: str, status: str, message: str):
         with scrape_status_lock:
@@ -5468,6 +5554,9 @@ if uploaded_file and start_clicked:
 
     def run_async_scraper():
         try:
+            _run_context["output_dir"] = output_dir
+            _run_context["done"] = 0
+            _run_context["total"] = total
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
@@ -5535,6 +5624,7 @@ if uploaded_file and start_clicked:
                     pass
         finally:
             progress_state_ui["running"] = False
+            _run_context.clear()
 
     with st.spinner("Scraping — runs in-page. Progress is saved; if you refresh or lose connection, re-upload the CSV and click Start to resume."):
         lead_data_map = st.session_state.get('lead_data_map', None)
@@ -5619,7 +5709,7 @@ if uploaded_file and start_clicked:
                             icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
                             badge = "scraping" if status == "scraping" else ("AI" if status == "ai_summarizing" else "email")
                             color = "#3b82f6" if status == "scraping" else ("#8b5cf6" if status == "ai_summarizing" else "#22c55e")
-                            st.markdown(f"""<div class="dashboard-activity-row" style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid {color}; color:#e2e8f0;"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#94a3b8; font-size:0.8rem;">{msg}</span> <code style="background:rgba(51,65,85,0.8); color:#cbd5e1; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
+                            st.markdown(f"""<div class="dashboard-activity-row" style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:#000000; border-radius:6px; border-left:3px solid {color}; color:#ffffff;"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#9ca3af; font-size:0.8rem;">{msg}</span> <code style="background:#0a0a0a; color:#e5e7eb; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_Waiting for workers..._")
                 with col2:
@@ -5630,7 +5720,7 @@ if uploaded_file and start_clicked:
                             short_url = escape((u[:38] + "…") if len(u) > 38 else u)
                             if e.get("status") == "scraped":
                                 msg = escape(str(e.get("message", ""))[:50])
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#34d399;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#94a3b8; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#34d399;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#9ca3af; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
                             else:
                                 st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#f87171;'>✗ {short_url}</div>", unsafe_allow_html=True)
                     else:
@@ -5643,13 +5733,17 @@ if uploaded_file and start_clicked:
                             m = e.get("message", "")
                             short_url = escape((u[:35] + "…") if len(u) > 35 else u)
                             msg = escape((m[:70] + "…") if len(m) > 70 else m)
-                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid #f87171; color:#e2e8f0;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#94a3b8;">{msg}</span></div>""", unsafe_allow_html=True)
+                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:#000000; border-radius:6px; border-left:3px solid #f87171; color:#ffffff;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#9ca3af;">{msg}</span></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_No issues_")
             
             # Yield so Streamlit can send UI updates and the scraper thread can run (avoid tight loop)
             time.sleep(1.0)
         thread.join()
+        # Re-set run context for signal handler (crash can happen during post-run ZIP/Excel)
+        _run_context["output_dir"] = output_dir
+        _run_context["done"] = total
+        _run_context["total"] = total
         with runtime_lock:
             logs_text = "\n".join(runtime_logs) or "(no logs yet)"
         logs_placeholder.code(logs_text, language=None)
@@ -5674,6 +5768,16 @@ if uploaded_file and start_clicked:
     zip_path = os.path.join(output_dir, zip_name)
     csv_files = []
     excel_files = []
+    
+    # Write status before heavy work (if crash here, last_status shows where)
+    try:
+        status_path = os.path.join(output_dir, "last_status.txt")
+        with open(status_path, "w", encoding="utf-8") as sf:
+            sf.write(f"Creating ZIP and loading results at {datetime.now().isoformat()}\n")
+            sf.write(f"Progress: {total}/{total} rows (scraper finished)\n")
+            sf.write("\nIf crash happens here, likely out of memory. Try reducing concurrency or rows_per_file.\n")
+    except Exception:
+        pass
     
     # CRITICAL: Wait a moment for files to be fully written to disk
     import time
@@ -5737,31 +5841,48 @@ if uploaded_file and start_clicked:
     st.session_state['excel_files'] = excel_files
     st.session_state['total_processed'] = total
     
-    # Read ZIP file data and store in session_state
+    # Read ZIP file data and store in session_state (skip if too large to avoid OOM)
     try:
         if os.path.exists(zip_path):
-            with open(zip_path, 'rb') as f:
-                st.session_state['zip_data'] = f.read()
+            zip_size = os.path.getsize(zip_path)
+            if zip_size > _ZIP_MEMORY_LIMIT:
+                st.session_state['zip_data'] = None
+                st.session_state['zip_too_large'] = True
+                st.info(f"📦 ZIP is large ({zip_size / (1024*1024):.1f} MB). Download directly from: `{os.path.abspath(zip_path)}`")
+            else:
+                with open(zip_path, 'rb') as f:
+                    st.session_state['zip_data'] = f.read()
+                st.session_state['zip_too_large'] = False
         else:
             st.warning(f"⚠️ ZIP file not found at {zip_path}")
             st.session_state['zip_data'] = None
+            st.session_state['zip_too_large'] = False
+    except MemoryError:
+        st.session_state['zip_data'] = None
+        st.session_state['zip_too_large'] = True
+        st.warning("⚠️ Not enough memory to load ZIP. Download from file explorer.")
     except Exception as e:
         st.error(f"❌ Error reading ZIP file: {e}")
         st.session_state['zip_data'] = None
+        st.session_state['zip_too_large'] = False
     
     # Show accuracy info for max_chars
     if total > 0:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website. Each website's content was limited to this exact amount.")
     
     # Download section (anchor for dark-theme download card styling)
-    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
+    st.markdown("""<h2 class="download-section-anchor" style="color: #ffffff; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
     with col_dl1:
         st.subheader("📦 All Files (ZIP)")
         zip_data = st.session_state.get('zip_data')
-        if zip_data:
+        zip_too_large = st.session_state.get('zip_too_large', False)
+        if zip_too_large:
+            st.code(os.path.abspath(zip_path), language=None)
+            st.caption("ZIP too large for in-app download. Copy path above and open in file explorer.")
+        elif zip_data:
             st.download_button(
                 label="⬇️ Download ZIP Archive",
                 data=zip_data,
@@ -5771,19 +5892,23 @@ if uploaded_file and start_clicked:
                 key="download_zip"
             )
         else:
-            # Fallback: read from file if not in session_state
+            # Fallback: read from file if not in session_state (and not too large)
             try:
-                with open(zip_path, 'rb') as f:
-                    zip_data = f.read()
-                    st.session_state['zip_data'] = zip_data
-                    st.download_button(
-                        label="⬇️ Download ZIP Archive",
-                        data=zip_data,
-                        file_name=zip_name,
-                        mime="application/zip",
-                        help="Download all CSV and Excel files in a ZIP archive",
-                        key="download_zip_fallback"
-                    )
+                if os.path.exists(zip_path) and os.path.getsize(zip_path) <= _ZIP_MEMORY_LIMIT:
+                    with open(zip_path, 'rb') as f:
+                        zip_data = f.read()
+                        st.session_state['zip_data'] = zip_data
+                        st.download_button(
+                            label="⬇️ Download ZIP Archive",
+                            data=zip_data,
+                            file_name=zip_name,
+                            mime="application/zip",
+                            help="Download all CSV and Excel files in a ZIP archive",
+                            key="download_zip_fallback"
+                        )
+                else:
+                    st.code(os.path.abspath(zip_path), language=None)
+                    st.caption("ZIP saved. Open path above in file explorer.")
             except Exception as e:
                 st.error(f"Could not read ZIP file: {e}")
         st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
@@ -6290,14 +6415,18 @@ if st.session_state.get('scraping_complete', False):
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
     
     # Download section (persistent, same anchor for styling)
-    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
+    st.markdown("""<h2 class="download-section-anchor" style="color: #ffffff; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
     with col_dl1:
         st.subheader("📦 All Files (ZIP)")
         zip_data = st.session_state.get('zip_data')
-        if zip_data:
+        zip_too_large = st.session_state.get('zip_too_large', False)
+        if zip_too_large:
+            st.code(os.path.abspath(zip_path) if zip_path else "(path unknown)", language=None)
+            st.caption("ZIP too large for in-app download. Copy path above and open in file explorer.")
+        elif zip_data:
             st.download_button(
                 label="⬇️ Download ZIP Archive",
                 data=zip_data,
@@ -6307,20 +6436,24 @@ if st.session_state.get('scraping_complete', False):
                 key="download_zip_persistent"
             )
         else:
-            # Fallback: read from file
+            # Fallback: read from file (if not too large)
             try:
                 if zip_path and os.path.exists(zip_path):
-                    with open(zip_path, 'rb') as f:
-                        zip_data = f.read()
-                        st.session_state['zip_data'] = zip_data
-                        st.download_button(
-                            label="⬇️ Download ZIP Archive",
-                            data=zip_data,
-                            file_name=zip_name,
-                            mime="application/zip",
-                            help="Download all CSV and Excel files in a ZIP archive",
-                            key="download_zip_persistent2"
-                        )
+                    if os.path.getsize(zip_path) <= _ZIP_MEMORY_LIMIT:
+                        with open(zip_path, 'rb') as f:
+                            zip_data = f.read()
+                            st.session_state['zip_data'] = zip_data
+                            st.download_button(
+                                label="⬇️ Download ZIP Archive",
+                                data=zip_data,
+                                file_name=zip_name,
+                                mime="application/zip",
+                                help="Download all CSV and Excel files in a ZIP archive",
+                                key="download_zip_persistent2"
+                            )
+                    else:
+                        st.code(os.path.abspath(zip_path), language=None)
+                        st.caption("ZIP too large. Open path above in file explorer.")
                 else:
                     st.info("ZIP file not available")
             except Exception as e:
@@ -6591,7 +6724,9 @@ if st.session_state.get('scraping_complete', False):
         st.session_state['scraping_complete'] = False
         st.session_state.pop('output_dir', None)
         st.session_state.pop('zip_data', None)
+        st.session_state.pop('zip_too_large', None)
         st.session_state.pop('combined_csv_data', None)
         st.session_state.pop('combined_excel_data', None)
         st.session_state.pop('combined_df', None)
+        _run_context.clear()
         st.rerun()
