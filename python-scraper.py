@@ -2823,8 +2823,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     processed = 0
     files_written = []
     last_flush_ts = time.time()
-    emergency_flush_every_s = 10  # Flush more often to reduce data loss on crash
-    emergency_flush_min_rows = max(25, min(100, rows_per_file // 10))
+    emergency_flush_every_s = 5  # Flush every 5s to minimize data loss on crash
+    emergency_flush_min_rows = max(15, min(50, rows_per_file // 20))
 
     while True:
         item = await result_queue.get()
@@ -3125,6 +3125,11 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
                             company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
                             writer.writerow([website, scraped_text, company_summary])
+            except BaseException as write_err:
+                # CRITICAL: Never crash the writer - log and continue so progress is never lost
+                emit(f"⚠️ Writer: Error writing chunk (skipping to prevent crash): {write_err}")
+                import traceback
+                traceback.print_exc()
 
     # Write remaining buffer
     if buffer:
@@ -3590,7 +3595,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 
         await session.close()
         await asyncio.sleep(2)
-    except Exception as e:
+    except BaseException as e:
         import traceback
         tb = traceback.format_exc()
         emit(f"⚠️ Scraper error (progress saved): {type(e).__name__}: {e}")
@@ -3604,15 +3609,18 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             try:
                 if task and not task.done():
                     task.cancel()
-            except Exception:
+            except BaseException:
                 pass
         try:
             if not session.closed:
                 await session.close()
-        except Exception:
+        except BaseException:
             pass
-        save_checkpoint(checkpoint_data, checkpoint_path)
-        emit("💾 Checkpoint saved.")
+        try:
+            save_checkpoint(checkpoint_data, checkpoint_path)
+            emit("💾 Checkpoint saved.")
+        except BaseException as cp_err:
+            emit(f"⚠️ Checkpoint save failed (progress may be in files): {cp_err}")
 
 # -------------------------
 # Streamlit UI
@@ -4077,16 +4085,33 @@ if os.path.isdir(outputs_dir):
                         st.markdown(f"**{label}**")
                         if not is_done:
                             st.caption("To resume: Re-upload your CSV and click Start — the app will auto-detect and continue.")
+                        st.caption("ZIP includes combined_all_results.csv with all rows in one file.")
                     with col_b:
                         zip_path = os.path.join(run["path"], f"{run['folder']}.zip")
                         if not os.path.exists(zip_path):
-                            csv_files = [f for f in os.listdir(run["path"]) if f.endswith(".csv") and "combined" not in f]
+                            csv_files = sorted([f for f in os.listdir(run["path"]) if f.startswith("output_part_") and f.endswith(".csv") and "combined" not in f.lower()])
                             if csv_files:
                                 try:
                                     import zipfile
+                                    # Create combined CSV with ALL rows in one file (so user gets 900 rows, not 100 per file)
+                                    combined_path = os.path.join(run["path"], "combined_all_results.csv")
+                                    dfs = []
+                                    for f in csv_files:
+                                        fp = os.path.join(run["path"], f)
+                                        try:
+                                            df = pd.read_csv(fp, encoding="utf-8-sig")
+                                            if len(df) > 0:
+                                                dfs.append(df)
+                                        except Exception:
+                                            pass
+                                    if dfs:
+                                        combined_df = pd.concat(dfs, ignore_index=True)
+                                        combined_df.to_csv(combined_path, index=False, encoding="utf-8-sig")
                                     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                                         for f in csv_files:
                                             zf.write(os.path.join(run["path"], f), arcname=f)
+                                        if os.path.exists(combined_path):
+                                            zf.write(combined_path, arcname="combined_all_results.csv")
                                         for f in os.listdir(run["path"]):
                                             if (f.endswith(".xlsx") or (f.endswith(".txt") and f.startswith("crash_log_"))) and "combined" not in f.lower():
                                                 zf.write(os.path.join(run["path"], f), arcname=f)
@@ -5365,7 +5390,7 @@ if uploaded_file and start_clicked:
                             low_resource=low_resource, log_callback=log_cb,
                             use_playwright_fallback=True, use_common_crawl_fallback=True))
             log_cb("✅ Run completed")
-        except Exception as e:
+        except BaseException as e:
             scrape_error[0] = e
             import traceback
             tb = traceback.format_exc()
