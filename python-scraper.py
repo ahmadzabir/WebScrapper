@@ -1654,16 +1654,25 @@ def _is_challenge_or_verification_page(html: str) -> bool:
 
 def _cleaned_text_is_challenge(cleaned: str) -> bool:
     """True if cleaned (visible) text is clearly a challenge/verification page, not real content."""
-    if not cleaned or len(cleaned.strip()) < 50:
+    if not cleaned:
         return False
-    t = cleaned.lower()
+    # Normalize: collapse whitespace so "one   moment" / "one\nmoment" still match
+    t = re.sub(r'\s+', ' ', cleaned.strip()).lower()
+    if len(t) < 40:
+        return False
     if "one moment" in t and "please" in t:
+        return True
+    if "just a moment" in t or "just one moment" in t:
         return True
     if "request is being verified" in t or "your request is being verified" in t:
         return True
     if "please wait while" in t:
         return True
-    if len(t) < 600 and "please wait" in t and ("verif" in t or "moment" in t):
+    if "please wait" in t and ("verif" in t or "moment" in t):
+        return True
+    if "checking your browser" in t and ("moment" in t or "please" in t):
+        return True
+    if "enable javascript" in t and ("verify" in t or "moment" in t):
         return True
     return False
 
@@ -1673,6 +1682,32 @@ _MIN_CONTENT_LEN = 200
 
 # Minimum cleaned text length to accept a cache/fallback result
 _MIN_FALLBACK_TEXT_LEN = 200
+
+# Below this length, content from a different domain is treated as mismatch (wrong page)
+_SHORT_CONTENT_FOR_MISMATCH = 500
+
+
+def _scraped_result_is_bad(text: str) -> bool:
+    """True if this scraped result should be treated as error (empty, short, challenge, or Google error)."""
+    if text is None:
+        return True
+    s = (text if isinstance(text, str) else "").strip()
+    if s.startswith("❌"):
+        return False  # already an error message, don't replace
+    if len(s) < _MIN_CONTENT_LEN:
+        return True
+    # Check full text for challenge (catches "One moment, please..." in body)
+    if _cleaned_text_is_challenge(s):
+        return True
+    # Check each page body (content after "PAGE: url" blocks) in case of multi-page output
+    page_blocks = re.split(r'\n={20,}\s*\nPAGE:\s*[^\n]+\n={20,}\s*\n+', s)
+    for block in page_blocks:
+        if block.strip() and _cleaned_text_is_challenge(block):
+            return True
+    t = s.lower()
+    if "content was a google error" in t or ("google" in t and "captcha" in t) or ("having trouble" in t and "google" in t):
+        return True
+    return False
 
 
 def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> bool:
@@ -2202,8 +2237,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
             return "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
     
-    # Validate cleaned content (require meaningful length)
-    if cleaned and len(cleaned.strip()) >= _MIN_CONTENT_LEN:
+    # Validate cleaned content (require meaningful length and reject challenge/verification pages)
+    if cleaned and len(cleaned.strip()) >= _MIN_CONTENT_LEN and not _cleaned_text_is_challenge(cleaned):
         # Better page header with clear separation
         page_header = f"\n{'='*80}\nPAGE: {page_url}\n{'='*80}\n\n"
         page_content = page_header + cleaned
@@ -2220,9 +2255,11 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 total_chars = max_chars
         # If total_chars > 0 and adding would exceed, skip
     else:
-        # Too short or empty — treat as error
+        # Too short, empty, or challenge page — treat as error
         if not cleaned or len(cleaned.strip()) == 0:
             errors.append(f"❌ No extractable text content on homepage: {page_url}")
+        elif _cleaned_text_is_challenge(cleaned):
+            errors.append(f"❌ Challenge/verification page (e.g. Cloudflare) on homepage: {page_url}")
         else:
             errors.append(f"❌ Insufficient content from {page_url} (under {_MIN_CONTENT_LEN} characters); likely error or blocked page.")
 
@@ -2264,8 +2301,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             
             cleaned2 = cleanup_html(html2)
             
-            # Validate cleaned content (must have meaningful length, same as homepage)
-            if cleaned2 and len(cleaned2.strip()) >= _MIN_CONTENT_LEN:
+            # Validate cleaned content (meaningful length and not challenge/verification page)
+            if cleaned2 and len(cleaned2.strip()) >= _MIN_CONTENT_LEN and not _cleaned_text_is_challenge(cleaned2):
                 # Better page header with clear separation
                 page_header = f"\n{'='*80}\nPAGE: {link_url}\n{'='*80}\n\n"
                 page_content = page_header + cleaned2
@@ -2284,6 +2321,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             else:
                 if not cleaned2 or len(cleaned2.strip()) == 0:
                     errors.append(f"❌ No extractable text content on page: {link_url}")
+                elif _cleaned_text_is_challenge(cleaned2):
+                    errors.append(f"❌ Challenge/verification page on: {link_url}")
                 else:
                     errors.append(f"❌ Insufficient content from {link_url} (under {_MIN_CONTENT_LEN} characters).")
 
@@ -2430,7 +2469,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     if isinstance(cache_result, tuple):
                         page_url, html = cache_result
                         scraped_text = _process_cached_html_to_text(page_url, html, max_chars)
-                        if scraped_text:
+                        if scraped_text and not _scraped_result_is_bad(scraped_text):
                             _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
                         else:
                             scraped_text = err_msg
@@ -2462,11 +2501,16 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         if isinstance(cache_result, tuple):
                             page_url, html = cache_result
                             cached_text = _process_cached_html_to_text(page_url, html, max_chars)
-                            if cached_text:
+                            if cached_text and not _scraped_result_is_bad(cached_text):
                                 scraped_text = cached_text
                                 _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
                     if scraped_text and scraped_text.startswith("❌"):
                         _scrape_status("error", scraped_text[:120])
+                
+                # Single gate: never treat bad content as success (short, challenge, or error-like)
+                if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
+                    scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+                    _scrape_status("error", scraped_text[:120])
                 
                 # RELAXED VALIDATION: Only flag obvious mismatches
                 # Many sites legitimately redirect to different domains (same organization)
@@ -2491,7 +2535,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         if actual_base != expected_base:
                             if not (actual_domain.endswith('.' + expected_domain) or expected_domain.endswith('.' + actual_domain)):
                                 # Check if content is suspiciously short (might be wrong page)
-                                if len(scraped_text.strip()) < 500:
+                                if len(scraped_text.strip()) < _SHORT_CONTENT_FOR_MISMATCH:
                                     # Very short content from different domain - likely wrong
                                     scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
                                     _scrape_status("error", scraped_text[:120])
@@ -2499,9 +2543,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 if scraped_text and not scraped_text.startswith("❌"):
                     _scrape_status("scraped", f"{len(scraped_text):,} chars scraped")
                 
-                # Generate AI summary if enabled (skip when scraping already failed)
+                # Generate AI summary if enabled (skip when scraping already failed or insufficient content)
                 if ai_enabled and ai_api_key and ai_provider and ai_model:
-                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < 50:
+                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
                         ai_summary = "❌ Summary skipped: site unreachable or insufficient content"
                     else:
                         _scrape_status("ai_summarizing", "Generating AI summary...")
@@ -2533,9 +2577,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 _scrape_status("error", "Company summary failed")
                 else:
                     ai_summary = ""
-                # Generate email copy if enabled (skip when scraping already failed)
+                # Generate email copy if enabled (skip when scraping already failed or insufficient content)
                 if email_copy_enabled and email_copy_api_key and email_copy_provider and email_copy_model:
-                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < 50:
+                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
                         email_copy = "❌ Email skipped: site unreachable or insufficient content"
                     else:
                         _scrape_status("email_copy", "Generating email copy...")
@@ -2567,6 +2611,11 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 else:
                     email_copy = ""
             
+            # Reject bad results (short or challenge pages) so they never get written as success
+            if scraped_text and _scraped_result_is_bad(scraped_text):
+                scraped_text = f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters) or blocked/verification page. Try again later."
+                _scrape_status("error", scraped_text[:100])
+
             # PERFECT CSV CLEANING - Zero tolerance for formatting errors
             def clean_csv_field(field_value):
                 """
@@ -2609,6 +2658,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 
                 return field_str
             
+            # Final gate: never enqueue bad content as success (defense in depth)
+            if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
+                scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
             # Clean all fields perfectly; normalize AI/email errors for clearer CSV display
             ai_for_csv = _normalize_ai_error_for_display(ai_summary, "Summary")
             email_for_csv = _normalize_ai_error_for_display(email_copy, "Email") if email_copy else ""
