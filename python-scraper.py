@@ -1613,6 +1613,14 @@ def get_realistic_headers(user_agent=None, target_url=None):
 _domain_request_times = {}  # Track last request time per domain
 _domain_lock = asyncio.Lock()  # Lock for thread-safe access to domain timing
 
+# Limit concurrent Playwright instances - prevents OOM when 100+ URLs timeout and all try browser
+_playwright_semaphore = None
+def _get_playwright_semaphore():
+    global _playwright_semaphore
+    if _playwright_semaphore is None:
+        _playwright_semaphore = asyncio.Semaphore(2)
+    return _playwright_semaphore
+
 
 def _is_google_error_or_captcha_page(html: str) -> bool:
     """True if HTML is a Google error/captcha/trouble page, not real cached content."""
@@ -1781,20 +1789,17 @@ async def _fetch_from_cache_fallbacks(
     Returns (page_url, html) on success, or error string on failure.
     """
     from urllib.parse import quote
-    cache_timeout = aiohttp.ClientTimeout(total=timeout + 25, connect=20, sock_read=90)
+    cache_timeout = aiohttp.ClientTimeout(total=20, connect=10, sock_read=15)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     max_chars = 50000  # for validation only
 
-    # 1. Try archive.org — most reliable when site is down or blocked (multiple snapshots)
-    # Try latest first, then specific dates (recent to older) for 95%+ success rate
+    # 1. Try archive.org — most reliable when site is down or blocked
+    # Use 4 snapshots (20s each) to stay within time budget; most sites in recent indexes
     for wayback_path in (
         f"https://web.archive.org/web/{url}",
         f"https://web.archive.org/web/20240601000000/{url}",
         f"https://web.archive.org/web/20240101000000/{url}",
         f"https://web.archive.org/web/20230601000000/{url}",
-        f"https://web.archive.org/web/20230101000000/{url}",
-        f"https://web.archive.org/web/20220101000000/{url}",
-        f"https://web.archive.org/web/20210101000000/{url}",
     ):
         try:
             async with session.get(wayback_path, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
@@ -1840,14 +1845,14 @@ async def _fetch_from_cache_fallbacks(
 async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
     """
     Headless browser fallback — only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
-    Costs compute, not vendor fees. Returns (url, html) or "".
-    Waits longer for Cloudflare/bot challenges to clear (often 5-10 seconds).
-    Tries http if https fails (and vice versa) for 95%+ success rate.
+    Semaphore limits concurrent browsers to 2 to prevent OOM when many URLs timeout at once.
+    Returns (url, html) or "".
     """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
         return ""
+    sem = _get_playwright_semaphore()
     urls_to_try = [url]
     if url.startswith("https://"):
         urls_to_try.append(url.replace("https://", "http://", 1))
@@ -1855,20 +1860,21 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
         urls_to_try.append(url.replace("http://", "https://", 1))
     for try_url in urls_to_try:
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                try:
-                    page = await browser.new_page()
-                    await page.goto(try_url, wait_until="load", timeout=(timeout + 25) * 1000)
-                    await asyncio.sleep(6)
-                    html = await page.content()
-                    if html and _is_challenge_or_verification_page(html):
-                        await asyncio.sleep(5)
+            async with sem:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    try:
+                        page = await browser.new_page()
+                        await page.goto(try_url, wait_until="domcontentloaded", timeout=25000)
+                        await asyncio.sleep(4)
                         html = await page.content()
-                    if html and len(html.strip()) > 200 and not _is_challenge_or_verification_page(html):
-                        return (try_url, html)
-                finally:
-                    await browser.close()
+                        if html and _is_challenge_or_verification_page(html):
+                            await asyncio.sleep(3)
+                            html = await page.content()
+                        if html and len(html.strip()) > 200 and not _is_challenge_or_verification_page(html):
+                            return (try_url, html)
+                    finally:
+                        await browser.close()
         except Exception:
             pass
     return ""
@@ -1880,7 +1886,7 @@ async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, tim
     Returns (url, html) or "".
     """
     from urllib.parse import quote_plus
-    timeout_obj = aiohttp.ClientTimeout(total=timeout + 15)
+    timeout_obj = aiohttp.ClientTimeout(total=15)
     # Try recent indexes (update periodically). Format: CC-MAIN-YYYY-WW
     for CC_INDEX in ("CC-MAIN-2025-51", "CC-MAIN-2025-47", "CC-MAIN-2025-43", "CC-MAIN-2024-51", "CC-MAIN-2024-41", "CC-MAIN-2024-31"):
         try:
@@ -1972,19 +1978,17 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
         if url.startswith('https://'):
             url_variations.append(url.replace('https://', 'http://'))
     
-    # Generate MANY realistic header sets - more variations = better success rate
+    # Header variations - fewer in fast_mode to fail faster and leave time for cache fallback
     header_variations = []
-    for _ in range(15):  # Generate 15 different header combinations
+    n_headers = 5 if fast_mode else 15
+    for _ in range(n_headers):
         headers = get_realistic_headers(target_url=url)
         header_variations.append(headers)
-    
-    # Add variations without brotli (for compatibility)
-    for _ in range(5):
-        headers = get_realistic_headers(target_url=url)
-        headers["Accept-Encoding"] = "gzip, deflate"
-        header_variations.append(headers)
-    
-    # Shuffle header variations for maximum randomness
+    if not fast_mode:
+        for _ in range(5):
+            headers = get_realistic_headers(target_url=url)
+            headers["Accept-Encoding"] = "gzip, deflate"
+            header_variations.append(headers)
     random.shuffle(header_variations)
     
     last_error = None
@@ -2152,7 +2156,16 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     # Normalize URL before fetching
     normalized_url = normalize_url(url)
 
-    homepage = await fetch(session, normalized_url, timeout, retries, fast_mode)
+    # In fast_mode, limit direct fetch to 45s so cache fallback gets 75s within the 120s budget
+    fetch_budget = 45 if fast_mode else None
+    fetch_retries = min(retries, 2) if fast_mode else retries
+    try:
+        if fetch_budget:
+            homepage = await asyncio.wait_for(fetch(session, normalized_url, timeout, fetch_retries, fast_mode), fetch_budget)
+        else:
+            homepage = await fetch(session, normalized_url, timeout, fetch_retries, fast_mode)
+    except asyncio.TimeoutError:
+        homepage = f"Timeout: Direct fetch exceeded {fetch_budget}s"
     if isinstance(homepage, str):
         # Direct fetch failed: try cache fallbacks (archive.org, Playwright, Google cache, Common Crawl)
         cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
@@ -2525,8 +2538,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 _scrape_status("error", scraped_text)
             else:
                 # Global timeout per URL - shorter in fast mode, generous for slow sites
-                # For large runs (500+), use 120s cap to reduce timeout failures; 90s can be too aggressive
-                fast_cap = 120 if (total_urls or 0) >= 500 else 90
+                # For large runs (500+), use 180s so cache fallback has time (fetch 45s + cache 135s)
+                fast_cap = 180 if (total_urls or 0) >= 500 else 90
                 max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), fast_cap if fast_mode else 300)
                 
                 try:
