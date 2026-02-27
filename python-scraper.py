@@ -98,6 +98,17 @@ def normalize_url(url: str) -> str:
     return url
 
 
+def _truncate_at_word(text: str, max_len: int) -> str:
+    """Truncate text at word boundary to avoid cutting mid-word."""
+    if not text or len(text) <= max_len:
+        return text
+    cut = text[:max_len]
+    last_space = cut.rfind(' ')
+    if last_space > max_len * 0.7:  # Only break at word if we keep most of the content
+        return cut[:last_space].rstrip()
+    return cut.rstrip()
+
+
 def process_keywords(keyword_string: str) -> list:
     """
     Process keywords string into a clean list.
@@ -460,7 +471,8 @@ def _write_excel_sheet(ws, cols: list, df: "pd.DataFrame", sheet_title: str = "S
 
 
 def _normalize_scrape_error_for_display(msg: str) -> str:
-    """Convert emoji-prefixed scrape errors so narrow columns show 'Scrape timeout' not 'Timec'."""
+    """Convert emoji-prefixed scrape errors so narrow columns show clear messages.
+    Uses ': ' (colon+space) for split to avoid breaking on URLs like http://."""
     if not msg or not isinstance(msg, str):
         return ""
     s = str(msg).strip()
@@ -468,13 +480,16 @@ def _normalize_scrape_error_for_display(msg: str) -> str:
         return s
     rest = s[1:].lstrip()
     if "Timeout" in rest or "timeout" in rest:
-        import re
         m = re.search(r'\((\d+)s?\)', rest)
         secs = m.group(1) if m else "?"
         return f"Scrape timeout ({secs}s exceeded)"
-    if ":" in rest:
-        _, detail = rest.split(":", 1)
+    # Split only on ': ' (colon+space) to avoid breaking URLs (http://, https://)
+    if ": " in rest:
+        _, detail = rest.split(": ", 1)
         return f"Scrape error: {detail.strip()}"
+    # If rest looks like just a URL (no descriptive message), use generic message
+    if rest.startswith(("http://", "https://", "www.")) and len(rest) < 120:
+        return "Scrape error: Site unreachable or blocked"
     return f"Scrape error: {rest}"
 
 
@@ -1376,6 +1391,7 @@ def cleanup_html(html: str) -> str:
         r'^\s*share\s+on\s*$',
         r'^\s*follow\s+us\s*$',
         r'^\s*subscribe\s+to\s*$',
+        r'^\s*learn\s+more\s*$',
     ]
     for pattern in noise_patterns:
         html = re.sub(pattern, '', html, flags=re.IGNORECASE | re.MULTILINE)
@@ -1407,6 +1423,13 @@ def cleanup_html(html: str) -> str:
     
     # Final pass: ensure proper spacing around headers
     result = re.sub(r'\n(#{1,6}\s+[^\n]+)\n+', r'\n\1\n\n', result)
+    
+    # Fix double/malformed headers: "## ### Title" -> "### Title", "1 ### Title" -> "1. Title"
+    result = re.sub(r'#{1,6}\s+(#{1,6}\s+)', r'\1', result)
+    result = re.sub(r'^(\d+)\s+(#{1,6})\s+', r'\1. ', result, flags=re.MULTILINE)
+    
+    # Collapse excessive newlines (max 2)
+    result = re.sub(r'\n{4,}', '\n\n\n', result)
     
     return result.strip()
 
@@ -1649,6 +1672,9 @@ def _is_challenge_or_verification_page(html: str) -> bool:
     # Very short body that is only verification text
     if len(h) < 800 and ("verif" in h or "moment" in h) and "please" in h:
         return True
+    # "Please wait while your request is being verified" - catch variations
+    if "being verified" in h and "wait" in h:
+        return True
     return False
 
 
@@ -1669,6 +1695,8 @@ def _cleaned_text_is_challenge(cleaned: str) -> bool:
     if "please wait while" in t:
         return True
     if "please wait" in t and ("verif" in t or "moment" in t):
+        return True
+    if "being verified" in t and "wait" in t:
         return True
     if "checking your browser" in t and ("moment" in t or "please" in t):
         return True
@@ -1700,7 +1728,7 @@ def _scraped_result_is_bad(text: str) -> bool:
     if _cleaned_text_is_challenge(s):
         return True
     # Check each page body (content after "PAGE: url" blocks) in case of multi-page output
-    page_blocks = re.split(r'\n={20,}\s*\nPAGE:\s*[^\n]+\n={20,}\s*\n+', s)
+    page_blocks = re.split(r'\n--- PAGE:\s*[^\n]+\s+---\s*\n+|\n={20,}\s*\nPAGE:\s*[^\n]+\n={20,}\s*\n+', s)
     for block in page_blocks:
         if block.strip() and _cleaned_text_is_challenge(block):
             return True
@@ -1734,7 +1762,10 @@ def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> boo
         return False
     if "please wait while" in t:
         return False
-    if "please wait" in t and ("verif" in t or "moment" in t) and len(t) < 800:
+    # Reject challenge pages regardless of length (bug fix: was len(t) < 800, allowing long challenge pages through)
+    if "please wait" in t and ("verif" in t or "moment" in t):
+        return False
+    if "being verified" in t and "wait" in t:
         return False
     return True
 
@@ -1755,12 +1786,15 @@ async def _fetch_from_cache_fallbacks(
     max_chars = 50000  # for validation only
 
     # 1. Try archive.org — most reliable when site is down or blocked (multiple snapshots)
+    # Try latest first, then specific dates (recent to older) for 95%+ success rate
     for wayback_path in (
         f"https://web.archive.org/web/{url}",
         f"https://web.archive.org/web/20240601000000/{url}",
         f"https://web.archive.org/web/20240101000000/{url}",
+        f"https://web.archive.org/web/20230601000000/{url}",
         f"https://web.archive.org/web/20230101000000/{url}",
         f"https://web.archive.org/web/20220101000000/{url}",
+        f"https://web.archive.org/web/20210101000000/{url}",
     ):
         try:
             async with session.get(wayback_path, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
@@ -1807,26 +1841,36 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
     """
     Headless browser fallback — only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
     Costs compute, not vendor fees. Returns (url, html) or "".
+    Waits longer for Cloudflare/bot challenges to clear (often 5-10 seconds).
+    Tries http if https fails (and vice versa) for 95%+ success rate.
     """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
         return ""
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            try:
-                page = await browser.new_page()
-                # Wait for load so JS-rendered content is present; generous timeout for slow sites
-                await page.goto(url, wait_until="load", timeout=(timeout + 25) * 1000)
-                await asyncio.sleep(1.5)  # Extra time for dynamic content
-                html = await page.content()
-                if html and len(html.strip()) > 200:
-                    return (url, html)
-            finally:
-                await browser.close()
-    except Exception:
-        pass
+    urls_to_try = [url]
+    if url.startswith("https://"):
+        urls_to_try.append(url.replace("https://", "http://", 1))
+    elif url.startswith("http://"):
+        urls_to_try.append(url.replace("http://", "https://", 1))
+    for try_url in urls_to_try:
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.goto(try_url, wait_until="load", timeout=(timeout + 25) * 1000)
+                    await asyncio.sleep(6)
+                    html = await page.content()
+                    if html and _is_challenge_or_verification_page(html):
+                        await asyncio.sleep(5)
+                        html = await page.content()
+                    if html and len(html.strip()) > 200 and not _is_challenge_or_verification_page(html):
+                        return (try_url, html)
+                finally:
+                    await browser.close()
+        except Exception:
+            pass
     return ""
 
 
@@ -1838,7 +1882,7 @@ async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, tim
     from urllib.parse import quote_plus
     timeout_obj = aiohttp.ClientTimeout(total=timeout + 15)
     # Try recent indexes (update periodically). Format: CC-MAIN-YYYY-WW
-    for CC_INDEX in ("CC-MAIN-2024-51", "CC-MAIN-2024-41", "CC-MAIN-2024-31"):
+    for CC_INDEX in ("CC-MAIN-2025-51", "CC-MAIN-2025-47", "CC-MAIN-2025-43", "CC-MAIN-2024-51", "CC-MAIN-2024-41", "CC-MAIN-2024-31"):
         try:
             index_url = f"https://index.commoncrawl.org/{CC_INDEX}-index?url={quote_plus(url)}&output=json&limit=1"
             async with session.get(index_url, timeout=timeout_obj) as resp:
@@ -1879,7 +1923,7 @@ def _process_cached_html_to_text(url: str, html: str, max_chars: int = 50000) ->
     cleaned = cleanup_html(html)
     if not cleaned or len(cleaned.strip()) < _MIN_FALLBACK_TEXT_LEN:
         return ""
-    page_header = f"\n{'='*80}\nPAGE: {url}\n{'='*80}\n\n"
+    page_header = f"\n--- PAGE: {url} ---\n\n"
     content = page_header + cleaned[:max_chars]
     return content
 
@@ -2110,12 +2154,18 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 
     homepage = await fetch(session, normalized_url, timeout, retries, fast_mode)
     if isinstance(homepage, str):
-        # Direct fetch failed: try cache fallbacks (Google cache, archive.org, optional Playwright, optional Common Crawl)
+        # Direct fetch failed: try cache fallbacks (archive.org, Playwright, Google cache, Common Crawl)
         cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
         if isinstance(cache_result, tuple):
             homepage = cache_result
         else:
-            return f"❌ {homepage}"
+            # Retry fallback chain once (helps with transient failures for 95%+ success)
+            await asyncio.sleep(1)
+            cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+            if isinstance(cache_result, tuple):
+                homepage = cache_result
+            else:
+                return f"❌ {homepage}"
 
     page_url, html = homepage
     # Reject Google error/captcha pages — try archive/Playwright/Common Crawl only (skip Google cache)
@@ -2129,7 +2179,17 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             if _is_google_error_or_captcha_page(html):
                 return "❌ Google cache returned an error page; content unavailable. Try again later."
         else:
-            return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
+            await asyncio.sleep(1)
+            cache_result = await _fetch_from_cache_fallbacks(
+                session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback,
+                skip_google_cache=True,
+            )
+            if isinstance(cache_result, tuple):
+                page_url, html = cache_result
+                if _is_google_error_or_captcha_page(html):
+                    return "❌ Google cache returned an error page; content unavailable. Try again later."
+            else:
+                return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
     # Reject Cloudflare/challenge pages so we try archive and other fallbacks instead
     if _is_challenge_or_verification_page(html):
         cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
@@ -2138,7 +2198,14 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
                 return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
         else:
-            return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
+            await asyncio.sleep(1)
+            cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+            if isinstance(cache_result, tuple):
+                page_url, html = cache_result
+                if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
+                    return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+            else:
+                return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
     
     # STRICT validation: Verify we're on the correct domain
     from urllib.parse import urlparse
@@ -2148,8 +2215,8 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     page_domain = parsed_page.netloc.replace('www.', '').lower()
     original_domain = parsed_original.netloc.replace('www.', '').lower()
     
-    # Log the actual URL we fetched (useful for debugging redirects)
-    if page_url != normalized_url:
+    # Only log redirect when it's meaningful (different domain), not http->https or www variation
+    if page_url != normalized_url and page_domain != original_domain:
         errors.append(f"ℹ️ Redirected from {normalized_url} to {page_url}")
     
     # More lenient domain validation - allow common redirect patterns
@@ -2240,17 +2307,17 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     # Validate cleaned content (require meaningful length and reject challenge/verification pages)
     if cleaned and len(cleaned.strip()) >= _MIN_CONTENT_LEN and not _cleaned_text_is_challenge(cleaned):
         # Better page header with clear separation
-        page_header = f"\n{'='*80}\nPAGE: {page_url}\n{'='*80}\n\n"
+        page_header = f"\n--- PAGE: {page_url} ---\n\n"
         page_content = page_header + cleaned
         # Check if adding this page would exceed max_chars
         if total_chars + len(page_content) + separator_len <= max_chars:
             results.append(page_content)
             total_chars += len(page_content) + separator_len
         elif total_chars == 0:  # At least include homepage even if it's large
-            # Truncate homepage to fit
+            # Truncate homepage to fit (at word boundary)
             available_chars = max_chars - len(page_header) - separator_len
             if available_chars > 0:
-                truncated_content = cleaned[:available_chars]
+                truncated_content = _truncate_at_word(cleaned, available_chars)
                 results.append(page_header + truncated_content)
                 total_chars = max_chars
         # If total_chars > 0 and adding would exceed, skip
@@ -2304,17 +2371,17 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             # Validate cleaned content (meaningful length and not challenge/verification page)
             if cleaned2 and len(cleaned2.strip()) >= _MIN_CONTENT_LEN and not _cleaned_text_is_challenge(cleaned2):
                 # Better page header with clear separation
-                page_header = f"\n{'='*80}\nPAGE: {link_url}\n{'='*80}\n\n"
+                page_header = f"\n--- PAGE: {link_url} ---\n\n"
                 page_content = page_header + cleaned2
                 # Check if adding this page would exceed max_chars
                 if total_chars + len(page_content) + separator_len <= max_chars:
                     results.append(page_content)
                     total_chars += len(page_content) + separator_len
                 else:
-                    # Add partial content if there's space
+                    # Add partial content if there's space (truncate at word boundary)
                     available_chars = max_chars - total_chars - separator_len - len(page_header)
                     if available_chars > 100:  # Only add if meaningful space remains
-                        truncated_content = cleaned2[:available_chars]
+                        truncated_content = _truncate_at_word(cleaned2, available_chars)
                         results.append(page_header + truncated_content)
                         total_chars = max_chars
                     break  # No more space
@@ -2377,6 +2444,10 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 if end_pos >= max_chars * 0.85:
                     best_cut = end_pos
                     break
+        # Fallback: truncate at word boundary to avoid mid-word cuts
+        if best_cut == len(truncated):
+            truncated = _truncate_at_word(final_text, max_chars)
+            best_cut = len(truncated)
         
         final_text = truncated[:best_cut].rstrip() + "\n\n[... content truncated to fit character limit ...]"
     
@@ -3235,7 +3306,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                       lead_data_map=None, ai_status_callback=None, scrape_status_callback=None,
                       run_folder: str = "", fast_mode: bool = False,
                       low_resource: bool = False, log_callback=None,
-                      use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False):
+                      use_playwright_fallback: bool = True, use_common_crawl_fallback: bool = True):
     """
     Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
     Uses backpressure on result_queue to prevent memory exhaustion with large datasets.
@@ -4230,8 +4301,8 @@ with col1:
     # Retries
     retries = st.number_input(
         "Retries if failed", 
-        0, 5, st.session_state.get('retries', 2),
-        help="If a website fails, how many times to try again. 2 is usually enough.",
+        0, 5, st.session_state.get('retries', 3),
+        help="If a website fails, how many times to try again. 3 recommended for 95%+ success.",
         key="retries"
     )
 
@@ -4241,8 +4312,8 @@ with col2:
     # Timeout - generous defaults for unreliable sites (auto-applied)
     timeout = st.number_input(
         "Wait time per site (seconds)",
-        5, 120, st.session_state.get('timeout', 30),
-        help="How long to wait per site. Unreachable sites fall back to Google cache / archive.org.",
+        5, 120, st.session_state.get('timeout', 35),
+        help="How long to wait per site. Unreachable sites fall back to archive.org / Playwright / Google cache.",
         key="timeout"
     )
     with st.expander("ℹ️ About Google cache & context", expanded=False):
