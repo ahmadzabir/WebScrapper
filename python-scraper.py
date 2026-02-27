@@ -1781,26 +1781,33 @@ def _cache_result_acceptable(url: str, html: str, max_chars: int = 50000) -> boo
 async def _fetch_from_cache_fallbacks(
     session: aiohttp.ClientSession, url: str, timeout: int,
     use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
-    skip_google_cache: bool = False,
+    skip_google_cache: bool = False, quick_mode: bool = False,
 ) -> tuple | str:
     """
     When direct fetch fails: try archive.org first, then Playwright, then Google cache (unless skipped),
     then Common Crawl. skip_google_cache=True when we already have a Google error page (avoid retrying it).
+    quick_mode=True uses shorter timeouts (for post-timeout recovery when we have a 60s cap).
     Returns (page_url, html) on success, or error string on failure.
     """
     from urllib.parse import quote
-    cache_timeout = aiohttp.ClientTimeout(total=20, connect=10, sock_read=15)
+    cache_total = 12 if quick_mode else 20
+    cache_timeout = aiohttp.ClientTimeout(total=cache_total, connect=8 if quick_mode else 10, sock_read=10 if quick_mode else 15)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     max_chars = 50000  # for validation only
 
     # 1. Try archive.org — most reliable when site is down or blocked
-    # Use 4 snapshots (20s each) to stay within time budget; most sites in recent indexes
-    for wayback_path in (
-        f"https://web.archive.org/web/{url}",
-        f"https://web.archive.org/web/20240601000000/{url}",
-        f"https://web.archive.org/web/20240101000000/{url}",
-        f"https://web.archive.org/web/20230601000000/{url}",
-    ):
+    # quick_mode: 2 snapshots only; normal: 4 snapshots
+    wayback_paths = (
+        (f"https://web.archive.org/web/{url}", f"https://web.archive.org/web/20240601000000/{url}")
+        if quick_mode
+        else (
+            f"https://web.archive.org/web/{url}",
+            f"https://web.archive.org/web/20240601000000/{url}",
+            f"https://web.archive.org/web/20240101000000/{url}",
+            f"https://web.archive.org/web/20230601000000/{url}",
+        )
+    )
+    for wayback_path in wayback_paths:
         try:
             async with session.get(wayback_path, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
                 if resp.status < 400:
@@ -1813,14 +1820,14 @@ async def _fetch_from_cache_fallbacks(
 
     # 2. Try Playwright — gets real page for Cloudflare/bot-blocked sites
     if use_playwright_fallback:
-        result = await _fetch_via_playwright(url, timeout)
+        result = await _fetch_via_playwright(url, timeout, quick_mode=quick_mode)
         if isinstance(result, tuple):
             page_url, html = result
             if _cache_result_acceptable(page_url, html, max_chars):
                 return result
 
-    # 3. Try Google cache (skip when we already know content was Google error)
-    if not skip_google_cache:
+    # 3. Try Google cache (skip when we already know content was Google error; skip in quick_mode - often slow)
+    if not skip_google_cache and not quick_mode:
         try:
             cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url, safe='')}"
             async with session.get(cache_url, timeout=cache_timeout, headers=headers) as resp:
@@ -1834,7 +1841,7 @@ async def _fetch_from_cache_fallbacks(
 
     # 4. Common Crawl — free external crawl data
     if use_common_crawl_fallback:
-        result = await _fetch_from_common_crawl(session, url, timeout)
+        result = await _fetch_from_common_crawl(session, url, timeout, quick_mode=quick_mode)
         if isinstance(result, tuple):
             page_url, html = result
             if _cache_result_acceptable(page_url, html, max_chars):
@@ -1842,7 +1849,7 @@ async def _fetch_from_cache_fallbacks(
     return ""
 
 
-async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
+async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False) -> tuple | str:
     """
     Headless browser fallback — only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
     Semaphore limits concurrent browsers to 2 to prevent OOM when many URLs timeout at once.
@@ -1853,6 +1860,8 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
     except ImportError:
         return ""
     sem = _get_playwright_semaphore()
+    goto_timeout = 15000 if quick_mode else 25000
+    sleep_after = 2 if quick_mode else 4
     urls_to_try = [url]
     if url.startswith("https://"):
         urls_to_try.append(url.replace("https://", "http://", 1))
@@ -1865,11 +1874,11 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
                     browser = await p.chromium.launch(headless=True)
                     try:
                         page = await browser.new_page()
-                        await page.goto(try_url, wait_until="domcontentloaded", timeout=25000)
-                        await asyncio.sleep(4)
+                        await page.goto(try_url, wait_until="domcontentloaded", timeout=goto_timeout)
+                        await asyncio.sleep(sleep_after)
                         html = await page.content()
                         if html and _is_challenge_or_verification_page(html):
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(2 if quick_mode else 3)
                             html = await page.content()
                         if html and len(html.strip()) > 200 and not _is_challenge_or_verification_page(html):
                             return (try_url, html)
@@ -1880,15 +1889,17 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
     return ""
 
 
-async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, timeout: int) -> tuple | str:
+async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, timeout: int, quick_mode: bool = False) -> tuple | str:
     """
     Common Crawl fallback — free open crawl data. Try multiple indexes for 90%+ success rate.
     Returns (url, html) or "".
     """
     from urllib.parse import quote_plus
-    timeout_obj = aiohttp.ClientTimeout(total=15)
-    # Try recent indexes (update periodically). Format: CC-MAIN-YYYY-WW
-    for CC_INDEX in ("CC-MAIN-2025-51", "CC-MAIN-2025-47", "CC-MAIN-2025-43", "CC-MAIN-2024-51", "CC-MAIN-2024-41", "CC-MAIN-2024-31"):
+    cc_timeout = 10 if quick_mode else 15
+    timeout_obj = aiohttp.ClientTimeout(total=cc_timeout)
+    # Try recent indexes (update periodically). Format: CC-MAIN-YYYY-WW. quick_mode: 2 indexes only
+    indexes = ("CC-MAIN-2025-51", "CC-MAIN-2025-47") if quick_mode else ("CC-MAIN-2025-51", "CC-MAIN-2025-47", "CC-MAIN-2025-43", "CC-MAIN-2024-51", "CC-MAIN-2024-41", "CC-MAIN-2024-31")
+    for CC_INDEX in indexes:
         try:
             index_url = f"https://index.commoncrawl.org/{CC_INDEX}-index?url={quote_plus(url)}&output=json&limit=1"
             async with session.get(index_url, timeout=timeout_obj) as resp:
@@ -2552,7 +2563,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 except asyncio.TimeoutError:
                     err_msg = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
                     _scrape_status("error", "Timeout, trying cache fallback...")
-                    cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+                    try:
+                        cache_result = await asyncio.wait_for(
+                            _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True),
+                            timeout=60
+                        )
+                    except asyncio.TimeoutError:
+                        cache_result = ""
                     if isinstance(cache_result, tuple):
                         page_url, html = cache_result
                         scraped_text = _process_cached_html_to_text(page_url, html, max_chars)
@@ -2584,7 +2601,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
                     if scraped_text and scraped_text.startswith("❌"):
                         _scrape_status("error", "Scrape failed, trying cache fallback...")
-                        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+                        try:
+                            cache_result = await asyncio.wait_for(
+                                _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True),
+                                timeout=60
+                            )
+                        except asyncio.TimeoutError:
+                            cache_result = ""
                         if isinstance(cache_result, tuple):
                             page_url, html = cache_result
                             cached_text = _process_cached_html_to_text(page_url, html, max_chars)
