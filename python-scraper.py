@@ -4050,9 +4050,47 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# -------- CRASH REPORT (always visible when crash logs exist) --------
+# One button to get the latest crash report - works even after refresh/crash
+outputs_dir = "outputs"
+latest_crash_path = None
+if os.path.isdir(outputs_dir):
+    all_crash_logs_flat = []
+    for run_folder in sorted(os.listdir(outputs_dir), reverse=True):
+        run_path = os.path.join(outputs_dir, run_folder)
+        if not os.path.isdir(run_path):
+            continue
+        for f in os.listdir(run_path):
+            if f.startswith("crash_log_") and f.endswith(".txt"):
+                fp = os.path.join(run_path, f)
+                all_crash_logs_flat.append((fp, os.path.getmtime(fp)))
+    # Also check outputs/ for fallback last_crash_*.txt
+    for f in os.listdir(outputs_dir):
+        if f.startswith("last_crash_") and f.endswith(".txt"):
+            fp = os.path.join(outputs_dir, f)
+            if os.path.isfile(fp):
+                all_crash_logs_flat.append((fp, os.path.getmtime(fp)))
+    if all_crash_logs_flat:
+        latest_crash_path = max(all_crash_logs_flat, key=lambda x: x[1])[0]
+
+if latest_crash_path and os.path.exists(latest_crash_path):
+    try:
+        with open(latest_crash_path, "rb") as f:
+            crash_data = f.read()
+        st.warning("⚠️ **Crash detected.** Download the report below to debug.")
+        st.download_button(
+            "📥 Download latest crash report",
+            crash_data,
+            file_name=os.path.basename(latest_crash_path),
+            mime="text/plain",
+            key="dl_latest_crash_report",
+            help="One-click download of the most recent crash/error log. Always available after a crash, even if you refresh."
+        )
+    except Exception:
+        pass
+
 # -------- RESUME / PARTIAL RESULTS --------
 # Scan outputs/ for checkpoints - show runs that can be resumed or have partial data
-outputs_dir = "outputs"
 if os.path.isdir(outputs_dir):
     incomplete_runs = []
     for run_folder in sorted(os.listdir(outputs_dir), reverse=True)[:10]:
@@ -4067,15 +4105,56 @@ if os.path.isdir(outputs_dir):
         # Use actual row count from files (source of truth) — checkpoint can be wrong after crash
         actual_rows, _ = get_actual_completed_from_files(run_path)
         completed = actual_rows if actual_rows > 0 else len(ck.get("completed_urls", []))
+        # Find most recent crash log to show why it crashed
+        crash_reason = None
+        crash_log_path = None
+        try:
+            crash_logs = sorted([f for f in os.listdir(run_path) if f.startswith("crash_log_") and f.endswith(".txt")], reverse=True)
+            if crash_logs:
+                crash_log_path = os.path.join(run_path, crash_logs[0])
+                with open(crash_log_path, "r", encoding="utf-8", errors="replace") as cf:
+                    lines = cf.readlines()
+                # Extract error line and traceback (last ~80 lines usually have the useful part)
+                for i, line in enumerate(lines):
+                    if "Run crashed:" in line or "Traceback" in line or "Error" in line:
+                        crash_reason = "".join(lines[i:min(i+80, len(lines))]).strip()
+                        break
+                if not crash_reason and lines:
+                    crash_reason = "".join(lines[-50:]).strip()
+        except Exception:
+            pass
+        run_data = {"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path, "crash_reason": crash_reason, "crash_log_path": crash_log_path}
         if completed > 0 and completed < total_urls:
-            incomplete_runs.append({"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path})
+            incomplete_runs.append(run_data)
         elif completed >= total_urls and total_urls > 0:
-            incomplete_runs.append({"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path, "done": True})
+            run_data["done"] = True
+            incomplete_runs.append(run_data)
 
     if incomplete_runs:
         with st.expander("📂 Resume or Download Partial Results", expanded=True):
             st.markdown('<div class="resume-runs">', unsafe_allow_html=True)
             st.markdown("**If the app crashed or stopped, you can:**")
+            # One-click: download ALL crash logs from all runs in one ZIP
+            all_crash_logs = []
+            for run in incomplete_runs:
+                run_path = run.get("path", "")
+                if run_path and os.path.isdir(run_path):
+                    for f in os.listdir(run_path):
+                        if f.startswith("crash_log_") and f.endswith(".txt"):
+                            all_crash_logs.append((os.path.join(run_path, f), f"{run.get('folder', 'run')}_{f}"))
+            if all_crash_logs:
+                try:
+                    import zipfile
+                    import io
+                    zip_buf = io.BytesIO()
+                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for fp, arcname in all_crash_logs:
+                            zf.write(fp, arcname=arcname)
+                    zip_buf.seek(0)
+                    st.download_button("📥 Download all crash logs", zip_buf.getvalue(), file_name="all_crash_logs.zip", mime="application/zip", key="dl_all_crash_logs", help="One click: get all crash/error logs from all runs")
+                    st.caption("_Get all crash logs from all runs in one ZIP_")
+                except Exception:
+                    pass
             for run in incomplete_runs:
                 is_done = run.get("done", False)
                 label = f"✅ {run['folder']}: {run['completed']:,}/{run['total']:,} rows" if is_done else f"⏸️ {run['folder']}: {run['completed']:,}/{run['total']:,} rows in files (partial)"
@@ -4086,8 +4165,23 @@ if os.path.isdir(outputs_dir):
                         if not is_done:
                             st.caption("To resume: Re-upload your CSV and click Start — the app will auto-detect and continue.")
                         st.caption("ZIP includes combined_all_results.csv with all rows in one file.")
+                        # Show crash reason so user knows WHY it crashed
+                        crash_reason = run.get("crash_reason")
+                        crash_log_path = run.get("crash_log_path")
+                        if not is_done:
+                            with st.expander("⚠️ Why did it crash? (error details)", expanded=bool(crash_reason)):
+                                if crash_reason:
+                                    st.code(crash_reason[:3000] + ("..." if len(crash_reason) > 3000 else ""), language=None)
+                                    st.caption("Use the **Crash log** button on the right to download the full log.")
+                                else:
+                                    st.info("No crash log found. The process may have been killed (e.g. out of memory, or browser closed). Try reducing **concurrency** or **rows per file** in settings, then resume.")
                     with col_b:
+                        # Easy one-click downloads: ZIP and crash log side by side
                         zip_path = os.path.join(run["path"], f"{run['folder']}.zip")
+                        crash_log_path = run.get("crash_log_path")
+                        if crash_log_path and os.path.exists(crash_log_path):
+                            with open(crash_log_path, "rb") as clf:
+                                st.download_button("📥 Crash log", clf.read(), file_name=os.path.basename(crash_log_path), mime="text/plain", key=f"crash_dl_{run['folder']}", help="Download crash/error log for this run")
                         if not os.path.exists(zip_path):
                             csv_files = sorted([f for f in os.listdir(run["path"]) if f.startswith("output_part_") and f.endswith(".csv") and "combined" not in f.lower()])
                             if csv_files:
@@ -5230,7 +5324,8 @@ if uploaded_file and start_clicked:
             - Excel files may be large - CSV recommended for very large datasets
 
             **Crash recovery:** Progress is saved automatically every ~10 seconds. If the app crashes,
-            scroll to the top → "Resume or Download Partial Results" to download what you have, or
+            check the **terminal/console** (where you ran `streamlit run`) for the full crash report and traceback.
+            Also scroll to the top → "Resume or Download Partial Results" to download crash logs and partial data, or
             re-upload your CSV and click Start to resume automatically (no run name needed).
             """)
     elif total > 5000:
@@ -5376,6 +5471,7 @@ if uploaded_file and start_clicked:
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
+            print(f"\n🚀 Run started: {total:,} URLs, {concurrency} workers — watch this console for crash reports\n")
             log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
             log_cb(f"📧 Email copy: {'enabled (output will have 4 columns)' if email_copy_enabled_for_run else 'disabled (output will have 3 columns)'}")
             asyncio.run(
@@ -5390,26 +5486,53 @@ if uploaded_file and start_clicked:
                             low_resource=low_resource, log_callback=log_cb,
                             use_playwright_fallback=True, use_common_crawl_fallback=True))
             log_cb("✅ Run completed")
+            print("✅ Run completed successfully\n")
         except BaseException as e:
             scrape_error[0] = e
             import traceback
             tb = traceback.format_exc()
-            log_cb(f"❌ Run crashed: {type(e).__name__}: {e}")
-            log_cb("--- Full traceback (send this for bug reports) ---")
-            for line in tb.strip().split("\n"):
-                log_cb(line)
-            log_cb("--- End traceback ---")
+            # Console output for debugging (visible in terminal when running streamlit run)
+            print("\n" + "=" * 70)
+            print("CRASH REPORT (see console for details)")
+            print("=" * 70)
+            print(f"Error: {type(e).__name__}: {e}")
+            print("--- Full traceback ---")
+            print(tb)
+            print("=" * 70 + "\n")
             traceback.print_exc()
-            # Persist crash logs to output dir so they survive page refresh
+            try:
+                log_cb(f"❌ Run crashed: {type(e).__name__}: {e}")
+                log_cb("--- Full traceback (send this for bug reports) ---")
+                for line in tb.strip().split("\n"):
+                    log_cb(line)
+                log_cb("--- End traceback ---")
+            except Exception:
+                pass
+            # CRITICAL: Always persist crash log so user can see why it crashed (survives page refresh)
+            crash_log_path = os.path.join(output_dir, f"crash_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
             try:
                 with runtime_lock:
                     crash_log_content = "\n".join(runtime_logs)
-                crash_log_path = os.path.join(output_dir, f"crash_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+            except Exception:
+                crash_log_content = f"❌ Run crashed: {type(e).__name__}: {e}\n\n{tb}"
+            try:
                 with open(crash_log_path, "w", encoding="utf-8") as f:
                     f.write(crash_log_content)
-                log_cb(f"📄 Crash log saved to: {crash_log_path}")
-            except Exception:
-                pass
+                print(f"📄 Crash log saved to: {crash_log_path}")
+                try:
+                    log_cb(f"📄 Crash log saved to: {crash_log_path}")
+                except Exception:
+                    pass
+            except Exception as save_err:
+                # Fallback: write to outputs/ if run folder fails
+                try:
+                    fallback_path = os.path.join("outputs", f"last_crash_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                    os.makedirs("outputs", exist_ok=True)
+                    with open(fallback_path, "w", encoding="utf-8") as f:
+                        f.write(crash_log_content)
+                    print(f"📄 Crash log (fallback) saved to: {fallback_path}")
+                except Exception:
+                    pass
         finally:
             progress_state_ui["running"] = False
 
@@ -5456,7 +5579,9 @@ if uploaded_file and start_clicked:
                 eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
             with runtime_lock:
                 logs_text = "\n".join(runtime_logs)
-            logs_placeholder.code(logs_text or "(no logs yet)", language=None)
+            # Truncate for display to avoid memory/rendering issues (keep last 500 lines)
+            display_logs = logs_text if len(logs_text) < 100000 else ("... (earlier logs truncated) ...\n\n" + "\n".join(logs_text.split("\n")[-500:]))
+            logs_placeholder.code(display_logs or "(no logs yet)", language=None)
             
             # Real-time activity dashboard (enhanced data & visuals)
             with dashboard_placeholder.container():
