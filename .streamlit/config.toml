@@ -9,10 +9,10 @@ disconnectedSessionTTL = 3600
 fileWatcherType = "none"
 
 [theme]
-primaryColor = "#1f77b4"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
+primaryColor = "#06b6d4"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#000000"
+textColor = "#ffffff"
 font = "sans serif"
 
 [browser]

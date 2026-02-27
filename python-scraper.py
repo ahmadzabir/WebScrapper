@@ -3675,6 +3675,12 @@ _install_signal_handlers()
 # Dark theme UI styling - black backgrounds, white/colored text
 st.markdown("""
 <style>
+    /* 0. Override Streamlit theme CSS variables (used by widgets) */
+    :root {
+        --background-color: #000000 !important;
+        --secondary-background-color: #000000 !important;
+    }
+    
     /* 1. Global theme and layout - all black */
     .stApp {
         background: #000000 !important;
@@ -3801,8 +3807,13 @@ st.markdown("""
         border-color: #22d3ee !important;
     }
     
-    /* Secondary buttons - black background */
-    .stButton > button {
+    /* All buttons - black background (stButton, stDownloadButton, etc.) */
+    .stButton > button,
+    .stDownloadButton > button,
+    [data-testid="stButton"] > button,
+    [data-testid="stDownloadButton"] > button,
+    button[kind="secondary"],
+    button[kind="primary"] {
         background: #000000 !important;
         color: #ffffff !important;
         border: 1px solid #374151 !important;
@@ -3811,15 +3822,22 @@ st.markdown("""
         border-radius: 8px !important;
         transition: all 0.3s ease !important;
     }
-    .stButton > button:hover {
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    [data-testid="stButton"] > button:hover,
+    [data-testid="stDownloadButton"] > button:hover {
         border-color: #22d3ee !important;
         color: #22d3ee !important;
         background: #0a0a0a !important;
     }
     
-    /* Inputs - black */
+    /* Inputs - black (all input types, nested baseweb) */
     .stTextInput > div > div > input,
-    .stNumberInput > div > div > input {
+    .stNumberInput > div > div > input,
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    input[type="text"],
+    input[type="number"] {
         background: #000000 !important;
         border: 1px solid #374151 !important;
         border-radius: 8px !important;
@@ -3827,12 +3845,22 @@ st.markdown("""
         transition: border-color 0.2s, box-shadow 0.2s !important;
     }
     .stTextInput > div > div > input:focus,
-    .stNumberInput > div > div > input:focus {
+    .stNumberInput > div > div > input:focus,
+    [data-testid="stTextInput"] input:focus,
+    [data-testid="stNumberInput"] input:focus {
         border-color: #06b6d4 !important;
         box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.3) !important;
     }
-    .stTextInput > div > div > input::placeholder {
+    .stTextInput > div > div > input::placeholder,
+    input::placeholder {
         color: #6b7280 !important;
+    }
+    /* Number input +/- buttons - black */
+    [data-testid="stNumberInput"] button,
+    .stNumberInput button {
+        background: #000000 !important;
+        color: #ffffff !important;
+        border: 1px solid #374151 !important;
     }
     
     /* Select boxes - black */
@@ -3897,16 +3925,22 @@ st.markdown("""
         color: #e5e7eb !important;
     }
     
-    /* Expanders - black */
-    .streamlit-expanderHeader {
-        font-weight: 600;
+    /* Expanders - black (all variants: header, summary, first child) */
+    .streamlit-expanderHeader,
+    [data-testid="stExpander"] > details > summary,
+    [data-testid="stExpander"] > div:first-child,
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] [role="button"] {
+        font-weight: 600 !important;
         color: #ffffff !important;
         background: #000000 !important;
         border: 1px solid #374151 !important;
         border-radius: 12px !important;
         transition: background 0.2s ease, border-color 0.2s ease !important;
     }
-    .streamlit-expanderHeader:hover {
+    .streamlit-expanderHeader:hover,
+    [data-testid="stExpander"] > details > summary:hover,
+    [data-testid="stExpander"] summary:hover {
         background: #0a0a0a !important;
         border-color: #4b5563 !important;
     }
@@ -3931,9 +3965,11 @@ st.markdown("""
         color: #e5e7eb !important;
     }
     
-    /* Number input wrapper - black */
+    /* Number input wrapper - black (including inner divs) */
     .stNumberInput > div,
-    [data-testid="stNumberInput"] > div {
+    [data-testid="stNumberInput"] > div,
+    [data-testid="stNumberInput"] div,
+    .stNumberInput div {
         background: #000000 !important;
         border-radius: 8px !important;
     }
@@ -3952,12 +3988,18 @@ st.markdown("""
         background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.3), transparent);
     }
     
-    /* Radio / checkbox labels */
+    /* Radio / checkbox - black background, white text */
     .stRadio > div > label, .stCheckbox > label {
         color: #ffffff !important;
     }
     .stRadio > div {
         gap: 1rem;
+    }
+    .stCheckbox > div,
+    [data-testid="stCheckbox"] > div,
+    .stCheckbox [role="checkbox"],
+    [data-testid="stCheckbox"] [role="checkbox"] {
+        background: #000000 !important;
     }
     
     /* Progress bar - colored fill on black track */
