@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import aiohttp
 import pandas as pd
 import re
@@ -42,10 +42,10 @@ def _is_low_resource_default() -> bool:
 
 
 def _get_concurrency_max() -> int:
-    """Max parallel workers: liberal formula for I/O-bound scraping. 8 cores -> 96, 16 cores -> 192."""
+    """Max parallel workers: liberal formula for I/O-bound scraping. 8 cores ΓåÆ 96, 16 cores ΓåÆ 192."""
     try:
         n = os.cpu_count() or 2
-        return min(max(20, n * 12), 250)  # 8 cores -> 96, 16 cores -> 192
+        return min(max(20, n * 12), 250)
     except Exception:
         return 80
 
