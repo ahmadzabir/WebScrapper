@@ -189,7 +189,7 @@ def save_checkpoint(checkpoint_data: dict, checkpoint_path: str) -> None:
         with open(checkpoint_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"ΓÜá∩╕Å Checkpoint save failed: {e}")
+        print(f"⚠️ Checkpoint save failed: {e}")
 
 
 def load_checkpoint(checkpoint_path: str) -> dict | None:
@@ -210,7 +210,7 @@ def load_checkpoint(checkpoint_path: str) -> dict | None:
             data["completed_urls"] = set()
         return data
     except Exception as e:
-        print(f"ΓÜá∩╕Å Checkpoint load failed: {e}")
+        print(f"⚠️ Checkpoint load failed: {e}")
         return None
 
 
@@ -349,9 +349,9 @@ def _get_available_placeholders() -> list[str]:
     return [r[2] for r in _get_variable_definitions()]
 
 
-@st.dialog("Sample prompt ΓÇö filled with one lead's data")
+@st.dialog("Sample prompt — filled with one lead's data")
 def _sample_prompt_dialog(prompt_key: str, sample_row_index: int = 0):
-    """Show the prompt with variables replaced by one lead's data. No persistent state ΓÇö only opens when button is clicked."""
+    """Show the prompt with variables replaced by one lead's data. No persistent state — only opens when button is clicked."""
     prompt_text = st.session_state.get(prompt_key, "") or ""
     sample = _get_lead_sample_from_row(sample_row_index)
     sample["scraped_content"] = EXAMPLE_SCRAPED_CONTENT
@@ -476,7 +476,7 @@ def _normalize_scrape_error_for_display(msg: str) -> str:
     if not msg or not isinstance(msg, str):
         return ""
     s = str(msg).strip()
-    if not s.startswith("Γ¥î"):
+    if not s.startswith("❌"):
         return s
     rest = s[1:].lstrip()
     if "Timeout" in rest or "timeout" in rest:
@@ -499,7 +499,7 @@ def _normalize_ai_error_for_display(msg: str, prefix: str = "Summary") -> str:
     if not msg or not isinstance(msg, str):
         return ""
     s = str(msg).strip()
-    if not s.startswith("Γ¥î"):
+    if not s.startswith("❌"):
         return s
     rest = s[1:].lstrip()
     if ":" in rest:
@@ -514,9 +514,9 @@ def _normalize_ai_error_for_display(msg: str, prefix: str = "Summary") -> str:
 # Appended to company summary prompt when sending to AI (so sample preview matches exactly)
 COMPANY_SUMMARY_FINAL_REMINDER = """
 
-ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+===========================================================
 CRITICAL OUTPUT FORMAT REQUIREMENTS:
-ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+===========================================================
 1. Use EXACT section headers: ===SUMMARY===, ===FACTS===, ===HYPOTHESES===
 2. Do NOT use markdown formatting (**, __, #). Use plain text only.
 3. Evidence quotes must be COMPLETE sentences, not truncated with "..."
@@ -532,7 +532,7 @@ CRITICAL OUTPUT FORMAT REQUIREMENTS:
    - Commercial implication: [why it matters]
    - Confidence: High/Medium/Low
 8. Do NOT include inline labels like "Confidence: Medium Signal: ..." - use structured format above.
-ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+===========================================================
 """
 
 
@@ -551,7 +551,7 @@ def build_company_summary_prompt(base_prompt: str, lead_data: dict | None, scrap
         Complete prompt string ready for AI
     """
     # Default prompt structure - Commercial analysis focused
-    default_base = """You are Hypothesis BotΓÇª an advanced commercial analysis agent.
+    default_base = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
 INPUT
 You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
@@ -566,11 +566,11 @@ You are not writing outreach. You are building the intelligence layer that enabl
 
 NON NEGOTIABLE RULES
 1) Do not invent facts. If it is not explicitly supported by the webcopy, it is not a fact.
-2) Facts must be short and must include Evidence QuoteΓÇª an exact snippet from the webcopy.
+2) Facts must be short and must include Evidence Quote… an exact snippet from the webcopy.
 3) Hypotheses must be explicitly labeled as hypotheses and must include:
-   ΓÇó SignalΓÇª the specific wording or structural clue that triggered the inference
-   ΓÇó Commercial implicationΓÇª why it matters in a sales or growth context
-   ΓÇó Confidence: High, Medium, or Low
+   • Signal… the specific wording or structural clue that triggered the inference
+   • Commercial implication… why it matters in a sales or growth context
+   • Confidence: High, Medium, or Low
 4) Never mention any external tools or data sources (Apollo, LinkedIn, Crunchbase, funding, headcount, etc.). You only have webcopy.
 5) If the company name is unclear, write "Company: Not explicitly stated" and proceed.
 6) Avoid cringe adjectives like great, amazing, innovative. Be surgical.
@@ -579,20 +579,20 @@ NON NEGOTIABLE RULES
 
 ANALYSIS GUIDELINES
 When extracting facts, prioritize:
-ΓÇó What they do (offer categories, deliverables)
-ΓÇó Who they serve (industries, segments, buyer language)
-ΓÇó How they sell (engagement models, pricing mentions, process)
-ΓÇó Proof (case studies, client names, testimonials, quantified claims)
-ΓÇó Differentiators (positioning phrases, guarantees, compliance, security)
-ΓÇó Operational signals (hiring, support hours, global language, locations)
-ΓÇó Technology signals (stacks, platforms, integrations) only if stated
+• What they do (offer categories, deliverables)
+• Who they serve (industries, segments, buyer language)
+• How they sell (engagement models, pricing mentions, process)
+• Proof (case studies, client names, testimonials, quantified claims)
+• Differentiators (positioning phrases, guarantees, compliance, security)
+• Operational signals (hiring, support hours, global language, locations)
+• Technology signals (stacks, platforms, integrations) only if stated
 
 When generating hypotheses, prioritize:
-ΓÇó Likely buying triggers (growth, hiring, new initiatives, modernization)
-ΓÇó Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
-ΓÇó Likely maturity level (specialist vs generalist, product vs services)
-ΓÇó Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
-ΓÇó Contradictions or gaps between claims and proof
+• Likely buying triggers (growth, hiring, new initiatives, modernization)
+• Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
+• Likely maturity level (specialist vs generalist, product vs services)
+• Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
+• Contradictions or gaps between claims and proof
 Each hypothesis must connect to a commercial implication.
 
 LEAD INFORMATION:
@@ -607,10 +607,10 @@ Return exactly these 3 sections with EXACT headers:
 
 ===SUMMARY===
 Write 3 to 5 sentences in one paragraph describing:
-ΓÇó what the company appears to do
-ΓÇó who it appears to serve
-ΓÇó how it positions itself
-ΓÇó one notable proof element (only if present)
+• what the company appears to do
+• who it appears to serve
+• how it positions itself
+• one notable proof element (only if present)
 Mark inferences with (obs).
 Do NOT use markdown (**, __, #). Use plain text only.
 
@@ -801,7 +801,7 @@ async def fetch_openrouter_models(api_key: str = "") -> list:
 async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
     """Generate company summary using OpenRouter API (OpenAI-compatible)."""
     if not OPENAI_AVAILABLE:
-        return "Γ¥î OpenAI library not installed. Install with: pip install openai"
+        return "❌ OpenAI library not installed. Install with: pip install openai"
     
     client = AsyncOpenAI(
         base_url="https://openrouter.ai/api/v1",
@@ -836,7 +836,7 @@ async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max
             if is_rate_limit:
                 wait_time = min(2 ** attempt, 60)
                 if status_callback:
-                    status_callback(f"ΓÅ│ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    status_callback(f"⏳ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                 await asyncio.sleep(wait_time)
                 continue
             
@@ -851,24 +851,24 @@ async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max
             if is_retryable and attempt < max_retries - 1:
                 wait_time = min(2 ** attempt, 30)
                 if status_callback:
-                    status_callback(f"ΓÜá∩╕Å API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
+                    status_callback(f"⚠️ API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
                 await asyncio.sleep(wait_time)
                 continue
             
             if attempt == max_retries - 1:
                 if is_rate_limit:
-                    return f"Γ¥î OpenRouter Rate Limit: Exceeded after {max_retries} retries."
-                return f"Γ¥î OpenRouter API Error: {error_msg}"
+                    return f"❌ OpenRouter Rate Limit: Exceeded after {max_retries} retries."
+                return f"❌ OpenRouter API Error: {error_msg}"
             
             await asyncio.sleep(1 + attempt)
     
-    return "Γ¥î OpenRouter API failed after retries"
+    return "❌ OpenRouter API failed after retries"
 
 
 async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
     """Generate company summary using OpenAI API with automatic rate limit handling."""
     if not OPENAI_AVAILABLE:
-        return "Γ¥î OpenAI library not installed. Install with: pip install openai"
+        return "❌ OpenAI library not installed. Install with: pip install openai"
     
     client = AsyncOpenAI(api_key=api_key, timeout=120.0)
     
@@ -904,7 +904,7 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
                 wait_time = min(2 ** attempt, 60)
                 
                 if status_callback:
-                    status_callback(f"ΓÅ│ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    status_callback(f"⏳ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                 
                 await asyncio.sleep(wait_time)
                 continue  # Retry after waiting
@@ -922,7 +922,7 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
                 wait_time = min(2 ** attempt, 30)
                 
                 if status_callback:
-                    status_callback(f"ΓÜá∩╕Å API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
+                    status_callback(f"⚠️ API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
                 
                 await asyncio.sleep(wait_time)
                 continue
@@ -930,8 +930,8 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
             # Final attempt or non-retryable error
             if attempt == max_retries - 1:
                 if is_rate_limit:
-                    return f"Γ¥î OpenAI Rate Limit: Exceeded after {max_retries} retries. Please wait a few minutes and try again, or upgrade your API plan."
-                return f"Γ¥î OpenAI API Error: {error_msg}"
+                    return f"❌ OpenAI Rate Limit: Exceeded after {max_retries} retries. Please wait a few minutes and try again, or upgrade your API plan."
+                return f"❌ OpenAI API Error: {error_msg}"
             
             # Default wait for other errors
             await asyncio.sleep(1 + attempt)
@@ -940,12 +940,12 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
 async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
     """Generate company summary using Google Gemini API with automatic rate limit handling."""
     if not GEMINI_AVAILABLE:
-        return "Γ¥î Gemini library not installed. Install with: pip install google-generativeai"
+        return "❌ Gemini library not installed. Install with: pip install google-generativeai"
     
     try:
         genai.configure(api_key=api_key)
     except Exception as e:
-        return f"Γ¥î Gemini API Configuration Error: {str(e)}"
+        return f"❌ Gemini API Configuration Error: {str(e)}"
     
     for attempt in range(max_retries):
         try:
@@ -970,7 +970,7 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
             if hasattr(response, 'text'):
                 return response.text.strip()
             else:
-                return f"Γ¥î Gemini API returned unexpected response format"
+                return f"❌ Gemini API returned unexpected response format"
         except Exception as e:
             error_str = str(e).lower()
             error_msg = str(e)
@@ -991,7 +991,7 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
                 wait_time = min(2 ** attempt, 60)
                 
                 if status_callback:
-                    status_callback(f"ΓÅ│ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    status_callback(f"⏳ Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                 
                 await asyncio.sleep(wait_time)
                 continue  # Retry after waiting
@@ -1010,7 +1010,7 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
                 wait_time = min(2 ** attempt, 30)
                 
                 if status_callback:
-                    status_callback(f"ΓÜá∩╕Å API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
+                    status_callback(f"⚠️ API error. Retrying in {wait_time}s ({attempt + 1}/{max_retries})...")
                 
                 await asyncio.sleep(wait_time)
                 continue
@@ -1018,13 +1018,13 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
             # Final attempt or non-retryable error
             if attempt == max_retries - 1:
                 if is_rate_limit:
-                    return f"Γ¥î Gemini Rate Limit: Exceeded after {max_retries} retries. Please wait a few minutes and try again, or check your API quota."
-                return f"Γ¥î Gemini API Error: {error_msg}"
+                    return f"❌ Gemini Rate Limit: Exceeded after {max_retries} retries. Please wait a few minutes and try again, or check your API quota."
+                return f"❌ Gemini API Error: {error_msg}"
             
             # Default wait for other errors
             await asyncio.sleep(1 + attempt)
     
-    return "Γ¥î Gemini API failed after retries"
+    return "❌ Gemini API failed after retries"
 
 
 def clean_and_structure_ai_output(raw_output: str) -> str:
@@ -1037,7 +1037,7 @@ def clean_and_structure_ai_output(raw_output: str) -> str:
     - Standardize section headers
     - Clean up semantic noise
     """
-    if not raw_output or raw_output.startswith("Γ¥î"):
+    if not raw_output or raw_output.startswith("❌"):
         return raw_output
     
     import re
@@ -1254,14 +1254,14 @@ async def generate_ai_summary(
         Generated summary string (cleaned and structured)
     """
     if not api_key or not api_key.strip():
-        return "Γ¥î No API key provided"
+        return "❌ No API key provided"
     
-    if not scraped_content or scraped_content.startswith("Γ¥î"):
-        return "Γ¥î No valid scraped content available"
+    if not scraped_content or scraped_content.startswith("❌"):
+        return "❌ No valid scraped content available"
     
     # Validate scraped content has meaningful content before sending to AI
     if len(scraped_content.strip()) < 50:
-        return "Γ¥î Insufficient content scraped. Content too short to generate meaningful summary."
+        return "❌ Insufficient content scraped. Content too short to generate meaningful summary."
     
     # Build complete prompt with STRICT formatting requirements
     full_prompt = build_company_summary_prompt(prompt, lead_data, scraped_content)
@@ -1277,7 +1277,7 @@ async def generate_ai_summary(
     elif provider.lower() == 'openrouter':
         raw_output = await generate_openrouter_summary(api_key, model, full_prompt, status_callback=status_callback)
     else:
-        return f"Γ¥î Unknown provider: {provider}"
+        return f"❌ Unknown provider: {provider}"
     
     # Post-process to fix all formatting issues
     cleaned_output = clean_and_structure_ai_output(raw_output)
@@ -1304,11 +1304,11 @@ async def generate_email_copy(
 ) -> str:
     """Generate email copy for a lead. Works independently of company summary."""
     if not api_key or not api_key.strip():
-        return "Γ¥î No API key provided"
-    if not scraped_content or scraped_content.startswith("Γ¥î"):
-        return "Γ¥î No valid scraped content available"
+        return "❌ No API key provided"
+    if not scraped_content or scraped_content.startswith("❌"):
+        return "❌ No valid scraped content available"
     if len(scraped_content.strip()) < 50:
-        return "Γ¥î Insufficient content scraped. Content too short to generate email copy."
+        return "❌ Insufficient content scraped. Content too short to generate email copy."
     full_prompt = build_email_copy_prompt(prompt_template, lead_data, scraped_content)
     raw_output = ""
     if provider.lower() == "openai":
@@ -1318,9 +1318,9 @@ async def generate_email_copy(
     elif provider.lower() == "openrouter":
         raw_output = await generate_openrouter_summary(api_key, model, full_prompt, status_callback=status_callback)
     else:
-        return f"Γ¥î Unknown provider: {provider}"
+        return f"❌ Unknown provider: {provider}"
     # Light cleanup for email copy (preserve line breaks)
-    if raw_output and not raw_output.startswith("Γ¥î"):
+    if raw_output and not raw_output.startswith("❌"):
         raw_output = raw_output.strip()
     return raw_output
 
@@ -1720,7 +1720,7 @@ def _scraped_result_is_bad(text: str) -> bool:
     if text is None:
         return True
     s = (text if isinstance(text, str) else "").strip()
-    if s.startswith("Γ¥î"):
+    if s.startswith("❌"):
         return False  # already an error message, don't replace
     if len(s) < _MIN_CONTENT_LEN:
         return True
@@ -1785,7 +1785,7 @@ async def _fetch_from_cache_fallbacks(
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     max_chars = 50000  # for validation only
 
-    # 1. Try archive.org ΓÇö most reliable when site is down or blocked (multiple snapshots)
+    # 1. Try archive.org — most reliable when site is down or blocked (multiple snapshots)
     # Try latest first, then specific dates (recent to older) for 95%+ success rate
     for wayback_path in (
         f"https://web.archive.org/web/{url}",
@@ -1806,7 +1806,7 @@ async def _fetch_from_cache_fallbacks(
         except Exception:
             pass
 
-    # 2. Try Playwright ΓÇö gets real page for Cloudflare/bot-blocked sites
+    # 2. Try Playwright — gets real page for Cloudflare/bot-blocked sites
     if use_playwright_fallback:
         result = await _fetch_via_playwright(url, timeout)
         if isinstance(result, tuple):
@@ -1827,7 +1827,7 @@ async def _fetch_from_cache_fallbacks(
         except Exception:
             pass
 
-    # 4. Common Crawl ΓÇö free external crawl data
+    # 4. Common Crawl — free external crawl data
     if use_common_crawl_fallback:
         result = await _fetch_from_common_crawl(session, url, timeout)
         if isinstance(result, tuple):
@@ -1839,7 +1839,7 @@ async def _fetch_from_cache_fallbacks(
 
 async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
     """
-    Headless browser fallback ΓÇö only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
+    Headless browser fallback — only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
     Costs compute, not vendor fees. Returns (url, html) or "".
     Waits longer for Cloudflare/bot challenges to clear (often 5-10 seconds).
     Tries http if https fails (and vice versa) for 95%+ success rate.
@@ -1876,7 +1876,7 @@ async def _fetch_via_playwright(url: str, timeout: int) -> tuple | str:
 
 async def _fetch_from_common_crawl(session: aiohttp.ClientSession, url: str, timeout: int) -> tuple | str:
     """
-    Common Crawl fallback ΓÇö free open crawl data. Try multiple indexes for 90%+ success rate.
+    Common Crawl fallback — free open crawl data. Try multiple indexes for 90%+ success rate.
     Returns (url, html) or "".
     """
     from urllib.parse import quote_plus
@@ -2146,7 +2146,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     max_chars = max(100, min(int(max_chars) if max_chars is not None else 10000, 50000))
     visited, results, errors = set(), [], []
     total_chars = 0
-    separator = "\n\n" + "ΓöÇ" * 80 + "\n\n"  # Better visual separator between pages
+    separator = "\n\n" + "-" * 80 + "\n\n"  # Better visual separator between pages
     separator_len = len(separator)
 
     # Normalize URL before fetching
@@ -2165,10 +2165,10 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             if isinstance(cache_result, tuple):
                 homepage = cache_result
             else:
-                return f"Γ¥î {homepage}"
+                return f"❌ {homepage}"
 
     page_url, html = homepage
-    # Reject Google error/captcha pages ΓÇö try archive/Playwright/Common Crawl only (skip Google cache)
+    # Reject Google error/captcha pages — try archive/Playwright/Common Crawl only (skip Google cache)
     if _is_google_error_or_captcha_page(html):
         cache_result = await _fetch_from_cache_fallbacks(
             session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback,
@@ -2177,7 +2177,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_google_error_or_captcha_page(html):
-                return "Γ¥î Google cache returned an error page; content unavailable. Try again later."
+                return "❌ Google cache returned an error page; content unavailable. Try again later."
         else:
             await asyncio.sleep(1)
             cache_result = await _fetch_from_cache_fallbacks(
@@ -2187,25 +2187,25 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             if isinstance(cache_result, tuple):
                 page_url, html = cache_result
                 if _is_google_error_or_captcha_page(html):
-                    return "Γ¥î Google cache returned an error page; content unavailable. Try again later."
+                    return "❌ Google cache returned an error page; content unavailable. Try again later."
             else:
-                return "Γ¥î Content was a Google error page; cache fallback had no better result. Try again later."
+                return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
     # Reject Cloudflare/challenge pages so we try archive and other fallbacks instead
     if _is_challenge_or_verification_page(html):
         cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
-                return "Γ¥î Challenge/verification page; cache fallback had no better result. Try again later."
+                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
         else:
             await asyncio.sleep(1)
             cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
             if isinstance(cache_result, tuple):
                 page_url, html = cache_result
                 if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
-                    return "Γ¥î Challenge/verification page; cache fallback had no better result. Try again later."
+                    return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
             else:
-                return "Γ¥î Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
+                return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
     
     # STRICT validation: Verify we're on the correct domain
     from urllib.parse import urlparse
@@ -2217,7 +2217,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     
     # Only log redirect when it's meaningful (different domain), not http->https or www variation
     if page_url != normalized_url and page_domain != original_domain:
-        errors.append(f"Γä╣∩╕Å Redirected from {normalized_url} to {page_url}")
+        errors.append(f"ℹ️ Redirected from {normalized_url} to {page_url}")
     
     # More lenient domain validation - allow common redirect patterns
     # Extract base domains for comparison
@@ -2237,7 +2237,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     
     # Validate HTML content before processing
     if not html or len(html.strip()) < 50:
-        return f"Γ¥î Empty or too short HTML content from {page_url}"
+        return f"❌ Empty or too short HTML content from {page_url}"
     
     # Check if HTML looks valid (has some HTML structure)
     html_lower = html.lower()
@@ -2255,7 +2255,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     if not has_content:
         # Check if it's a redirect page
         if 'location.href' in html_lower or 'window.location' in html_lower or 'meta http-equiv="refresh"' in html_lower:
-            return f"Γ¥î JavaScript/Meta redirect detected at {page_url}. Content may not be accessible."
+            return f"❌ JavaScript/Meta redirect detected at {page_url}. Content may not be accessible."
         # Might still have content, continue
     
     # ADDITIONAL SAFETY CHECK: Detect if content seems wrong for the domain
@@ -2279,7 +2279,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             # Check if domain name appears in content (if not, it's definitely wrong)
             domain_in_content = original_domain.split('.')[0] in html_sample
             if not domain_in_content:
-                return f"Γ¥î Content mismatch detected! Page at {page_url} contains e-commerce content that doesn't match expected domain {original_domain}. This might be a redirect or wrong content."
+                return f"❌ Content mismatch detected! Page at {page_url} contains e-commerce content that doesn't match expected domain {original_domain}. This might be a redirect or wrong content."
     
     cleaned = cleanup_html(html)
     # Catch challenge/verification text that only appears after cleanup (e.g. split across tags)
@@ -2288,12 +2288,12 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
-                return "Γ¥î Challenge/verification page; cache fallback had no better result. Try again later."
+                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
             cleaned = cleanup_html(html)
             if cleaned and _cleaned_text_is_challenge(cleaned):
-                return "Γ¥î Challenge/verification page; cache fallback had no better result. Try again later."
+                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
         else:
-            return "Γ¥î Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
+            return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
     
     # No content or insufficient (under 200 chars) = try fallbacks once, then error
     if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
@@ -2302,7 +2302,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             page_url, html = cache_result
             cleaned = cleanup_html(html)
         if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
-            return "Γ¥î Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+            return "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
     
     # Validate cleaned content (require meaningful length and reject challenge/verification pages)
     if cleaned and len(cleaned.strip()) >= _MIN_CONTENT_LEN and not _cleaned_text_is_challenge(cleaned):
@@ -2322,13 +2322,13 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 total_chars = max_chars
         # If total_chars > 0 and adding would exceed, skip
     else:
-        # Too short, empty, or challenge page ΓÇö treat as error
+        # Too short, empty, or challenge page — treat as error
         if not cleaned or len(cleaned.strip()) == 0:
-            errors.append(f"Γ¥î No extractable text content on homepage: {page_url}")
+            errors.append(f"❌ No extractable text content on homepage: {page_url}")
         elif _cleaned_text_is_challenge(cleaned):
-            errors.append(f"Γ¥î Challenge/verification page (e.g. Cloudflare) on homepage: {page_url}")
+            errors.append(f"❌ Challenge/verification page (e.g. Cloudflare) on homepage: {page_url}")
         else:
-            errors.append(f"Γ¥î Insufficient content from {page_url} (under {_MIN_CONTENT_LEN} characters); likely error or blocked page.")
+            errors.append(f"❌ Insufficient content from {page_url} (under {_MIN_CONTENT_LEN} characters); likely error or blocked page.")
 
     # Use the actual fetched URL (after redirects) for link extraction
     links = extract_links(html, page_url)
@@ -2351,19 +2351,19 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         
         res = await fetch(session, link, timeout, retries, fast_mode)
         if isinstance(res, str):
-            errors.append(f"Γ¥î {res}")
+            errors.append(f"❌ {res}")
         elif isinstance(res, tuple):
             link_url, html2 = res
             
             # Validate HTML content
             if not html2 or len(html2.strip()) < 50:
-                errors.append(f"Γ¥î Empty or invalid HTML from: {link_url}")
+                errors.append(f"❌ Empty or invalid HTML from: {link_url}")
                 continue
             
             # Check for error pages
             html2_lower = html2.lower()
             if 'error' in html2_lower[:500] or '404' in html2_lower[:500] or 'not found' in html2_lower[:500]:
-                errors.append(f"Γ¥î Error page detected: {link_url}")
+                errors.append(f"❌ Error page detected: {link_url}")
                 continue
             
             cleaned2 = cleanup_html(html2)
@@ -2387,20 +2387,20 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                     break  # No more space
             else:
                 if not cleaned2 or len(cleaned2.strip()) == 0:
-                    errors.append(f"Γ¥î No extractable text content on page: {link_url}")
+                    errors.append(f"❌ No extractable text content on page: {link_url}")
                 elif _cleaned_text_is_challenge(cleaned2):
-                    errors.append(f"Γ¥î Challenge/verification page on: {link_url}")
+                    errors.append(f"❌ Challenge/verification page on: {link_url}")
                 else:
-                    errors.append(f"Γ¥î Insufficient content from {link_url} (under {_MIN_CONTENT_LEN} characters).")
+                    errors.append(f"❌ Insufficient content from {link_url} (under {_MIN_CONTENT_LEN} characters).")
 
     if not results:
-        return errors[0] if errors else f"Γ¥î Unknown error on site: {url}"
+        return errors[0] if errors else f"❌ Unknown error on site: {url}"
     
     # Join results with separator
     final_text = separator.join(results)
     # Final guard: if total content is still under minimum, treat as bad result
     if len(final_text.strip()) < _MIN_CONTENT_LEN:
-        return errors[0] if errors else f"Γ¥î Insufficient content (under {_MIN_CONTENT_LEN} characters); likely error or blocked page. Try again later."
+        return errors[0] if errors else f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters); likely error or blocked page. Try again later."
     
     # Add errors at the end if there's space (errors are usually short)
     if errors and len(final_text) + len("\n".join(errors)) + 20 <= max_chars:
@@ -2464,7 +2464,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                            email_copy_enabled=False, email_copy_api_key=None, email_copy_provider=None,
                            email_copy_model=None, email_copy_prompt=None,
                            lead_data_map=None, ai_status_callback=None, scrape_status_callback=None, fast_mode: bool = False,
-                           use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False):
+                           use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
+                           total_urls: int = 0):
     from urllib.parse import urlparse
     import random
     
@@ -2518,13 +2519,15 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             # Be lenient with URL validation - let the actual HTTP request determine validity
             # Only reject obviously invalid URLs (empty or completely malformed)
             if not normalized_url or len(normalized_url.strip()) < 4:
-                scraped_text = "Γ¥î Invalid URL: URL is empty or too short"
-                ai_summary = "Γ¥î Invalid URL: URL is empty or too short"
+                scraped_text = "❌ Invalid URL: URL is empty or too short"
+                ai_summary = "❌ Invalid URL: URL is empty or too short"
                 email_copy = ""
                 _scrape_status("error", scraped_text)
             else:
                 # Global timeout per URL - shorter in fast mode, generous for slow sites
-                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), 90 if fast_mode else 300)
+                # For large runs (500+), use 120s cap to reduce timeout failures; 90s can be too aggressive
+                fast_cap = 120 if (total_urls or 0) >= 500 else 90
+                max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), fast_cap if fast_mode else 300)
                 
                 try:
                     # Wrap scraping in a timeout to prevent infinite hangs
@@ -2534,7 +2537,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         timeout=max_total_time
                     )
                 except asyncio.TimeoutError:
-                    err_msg = f"Γ¥î Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
+                    err_msg = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
                     _scrape_status("error", "Timeout, trying cache fallback...")
                     cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
                     if isinstance(cache_result, tuple):
@@ -2561,12 +2564,12 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                     timeout=max_total_time
                                 )
                             except asyncio.TimeoutError:
-                                scraped_text = f"Γ¥î Timeout: Scraping {fallback_url} exceeded maximum time limit ({max_total_time}s)"
+                                scraped_text = f"❌ Timeout: Scraping {fallback_url} exceeded maximum time limit ({max_total_time}s)"
                         else:
-                            scraped_text = f"Γ¥î Error scraping {normalized_url}: {str(e)}"
+                            scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
                     except Exception as e2:
-                        scraped_text = f"Γ¥î Error scraping {normalized_url}: {str(e2)}"
-                    if scraped_text and scraped_text.startswith("Γ¥î"):
+                        scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
+                    if scraped_text and scraped_text.startswith("❌"):
                         _scrape_status("error", "Scrape failed, trying cache fallback...")
                         cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
                         if isinstance(cache_result, tuple):
@@ -2575,18 +2578,18 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                             if cached_text and not _scraped_result_is_bad(cached_text):
                                 scraped_text = cached_text
                                 _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
-                    if scraped_text and scraped_text.startswith("Γ¥î"):
+                    if scraped_text and scraped_text.startswith("❌"):
                         _scrape_status("error", scraped_text[:120])
                 
                 # Single gate: never treat bad content as success (short, challenge, or error-like)
-                if scraped_text and not scraped_text.startswith("Γ¥î") and _scraped_result_is_bad(scraped_text):
-                    scraped_text = "Γ¥î Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+                if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
+                    scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
                     _scrape_status("error", scraped_text[:120])
                 
                 # RELAXED VALIDATION: Only flag obvious mismatches
                 # Many sites legitimately redirect to different domains (same organization)
                 # Only check for obvious content mismatches, not domain redirects
-                if scraped_text and not scraped_text.startswith("Γ¥î"):
+                if scraped_text and not scraped_text.startswith("❌"):
                     # Check if scraped content contains PAGE: header
                     page_header_match = re.search(r'PAGE:\s*(https?://[^\s\n]+)', scraped_text[:5000])
                     if page_header_match:
@@ -2608,16 +2611,16 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 # Check if content is suspiciously short (might be wrong page)
                                 if len(scraped_text.strip()) < _SHORT_CONTENT_FOR_MISMATCH:
                                     # Very short content from different domain - likely wrong
-                                    scraped_text = f"Γ¥î CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
+                                    scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
                                     _scrape_status("error", scraped_text[:120])
                                 # Otherwise, allow it - many sites redirect to related domains
-                if scraped_text and not scraped_text.startswith("Γ¥î"):
+                if scraped_text and not scraped_text.startswith("❌"):
                     _scrape_status("scraped", f"{len(scraped_text):,} chars scraped")
                 
                 # Generate AI summary if enabled (skip when scraping already failed or insufficient content)
                 if ai_enabled and ai_api_key and ai_provider and ai_model:
-                    if not scraped_text or scraped_text.startswith("Γ¥î") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
-                        ai_summary = "Γ¥î Summary skipped: site unreachable or insufficient content"
+                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
+                        ai_summary = "❌ Summary skipped: site unreachable or insufficient content"
                     else:
                         _scrape_status("ai_summarizing", "Generating AI summary...")
                         def url_status_callback(msg):
@@ -2637,21 +2640,21 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 timeout=120
                             )
                         except asyncio.TimeoutError:
-                            ai_summary = "Γ¥î AI Summary timeout: Generation exceeded 2 minutes"
+                            ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
                             _scrape_status("error", "Company summary: timeout (2 min)")
                         except Exception as e:
-                            ai_summary = f"Γ¥î AI Summary error: {str(e)}"
+                            ai_summary = f"❌ AI Summary error: {str(e)}"
                             err_short = str(e)[:80] if e else "unknown"
                             _scrape_status("error", f"Company summary failed: {err_short}")
                         else:
-                            if ai_summary and ai_summary.startswith("Γ¥î"):
+                            if ai_summary and ai_summary.startswith("❌"):
                                 _scrape_status("error", "Company summary failed")
                 else:
                     ai_summary = ""
                 # Generate email copy if enabled (skip when scraping already failed or insufficient content)
                 if email_copy_enabled and email_copy_api_key and email_copy_provider and email_copy_model:
-                    if not scraped_text or scraped_text.startswith("Γ¥î") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
-                        email_copy = "Γ¥î Email skipped: site unreachable or insufficient content"
+                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
+                        email_copy = "❌ Email skipped: site unreachable or insufficient content"
                     else:
                         _scrape_status("email_copy", "Generating email copy...")
                         def email_status_callback(msg):
@@ -2670,21 +2673,21 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 timeout=120
                             )
                         except asyncio.TimeoutError:
-                            email_copy = "Γ¥î Email copy timeout: Generation exceeded 2 minutes"
+                            email_copy = "❌ Email copy timeout: Generation exceeded 2 minutes"
                             _scrape_status("error", "Email copy: timeout (2 min)")
                         except Exception as e:
-                            email_copy = f"Γ¥î Email copy error: {str(e)}"
+                            email_copy = f"❌ Email copy error: {str(e)}"
                             err_short = str(e)[:80] if e else "unknown"
                             _scrape_status("error", f"Email copy failed: {err_short}")
                         else:
-                            if email_copy and email_copy.startswith("Γ¥î"):
+                            if email_copy and email_copy.startswith("❌"):
                                 _scrape_status("error", "Email copy failed")
                 else:
                     email_copy = ""
             
             # Reject bad results (short or challenge pages) so they never get written as success
             if scraped_text and _scraped_result_is_bad(scraped_text):
-                scraped_text = f"Γ¥î Insufficient content (under {_MIN_CONTENT_LEN} characters) or blocked/verification page. Try again later."
+                scraped_text = f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters) or blocked/verification page. Try again later."
                 _scrape_status("error", scraped_text[:100])
 
             # PERFECT CSV CLEANING - Zero tolerance for formatting errors
@@ -2730,8 +2733,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 return field_str
             
             # Final gate: never enqueue bad content as success (defense in depth)
-            if scraped_text and not scraped_text.startswith("Γ¥î") and _scraped_result_is_bad(scraped_text):
-                scraped_text = "Γ¥î Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+            if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
+                scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
             # Clean all fields perfectly; normalize AI/email errors for clearer CSV display
             ai_for_csv = _normalize_ai_error_for_display(ai_summary, "Summary")
             email_for_csv = _normalize_ai_error_for_display(email_copy, "Email") if email_copy else ""
@@ -2767,7 +2770,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     return field_str
                 
                 original_url_val = original_url if 'original_url' in locals() else "unknown URL"
-                error_msg = f"Γ¥î Worker error processing {original_url_val}: {str(e)}"
+                error_msg = f"❌ Worker error processing {original_url_val}: {str(e)}"
                 cleaned_url = clean_csv_field(original_url_val)
                 cleaned_scraped_text = clean_csv_field(error_msg)
                 cleaned_ai_summary = clean_csv_field("")
@@ -2780,9 +2783,9 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             except:
                 try:
                     if email_copy_enabled:
-                        await result_queue.put(("", f"Γ¥î Critical worker error: {str(e)}", "", ""))
+                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", ""))
                     else:
-                        await result_queue.put(("", f"Γ¥î Critical worker error: {str(e)}", ""))
+                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", ""))
                 except:
                     pass  # If even this fails, just continue
         finally:
@@ -2810,9 +2813,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     # CRITICAL: Create output directory first
     try:
         os.makedirs(output_dir, exist_ok=True)
-        emit(f"≡ƒôü Writer: Created output directory: {output_dir}")
+        emit(f"📁 Writer: Created output directory: {output_dir}")
     except Exception as e:
-        emit(f"Γ¥î Writer: Failed to create output directory: {e}")
+        emit(f"❌ Writer: Failed to create output directory: {e}")
         import traceback
         traceback.print_exc()
         return  # Exit if we can't create directory
@@ -2829,7 +2832,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     while True:
         item = await result_queue.get()
         if item is None:
-            emit(f"≡ƒô¥ Writer: Received stop signal. Processed {processed}/{total_urls}. Buffer has {len(buffer)}.")
+            emit(f"📝 Writer: Received stop signal. Processed {processed}/{total_urls}. Buffer has {len(buffer)}.")
             result_queue.task_done()
             break
         buffer.append(item)
@@ -2850,7 +2853,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             buffer = buffer[chunk_size:]
             last_flush_ts = time.time()
             if chunk_size < rows_per_file:
-                emit(f"≡ƒÆ╛ Early flush: writing {chunk_size} buffered rows to reduce loss risk")
+                emit(f"⚠️ Early flush: writing {chunk_size} buffered rows to reduce loss risk")
             
             try:
                 # Filter out ONLY truly empty rows (keep error messages as they are valid data)
@@ -2859,7 +2862,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     if len(row) >= 2:
                         url = str(row[0]).strip() if row[0] else ""
                         scraped_text = str(row[1]).strip() if row[1] else ""
-                        # Include rows with valid URL - keep error messages (they start with Γ¥î)
+                        # Include rows with valid URL - keep error messages (they start with ❌)
                         # Only exclude rows where URL is empty or scraped_text is completely empty
                         if url and url != "":
                             # Include even if scraped_text is empty or is an error message
@@ -2950,7 +2953,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         await loop.run_in_executor(None, _save_excel)
                     except Exception as save_error:
                         # If save fails, try to save with minimal data
-                        print(f"ΓÜá∩╕Å Excel save failed, attempting recovery: {save_error}")
+                        print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
                         # Create a fresh workbook with just headers
                         wb_recovery = Workbook()
                         ws_recovery = wb_recovery.active
@@ -2963,12 +2966,12 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
                         files_written.append(excel_path)
                         excel_written = True
-                        emit(f"Γ£à Writer: Wrote Excel file: {os.path.basename(excel_path)} ({len(df_excel)} rows)")
+                        emit(f"✅ Writer: Wrote Excel file: {os.path.basename(excel_path)} ({len(df_excel)} rows)")
                     else:
-                        emit(f"Γ¥î Writer: Excel file missing/empty: {os.path.basename(excel_path)}")
+                        emit(f"❌ Writer: Excel file missing/empty: {os.path.basename(excel_path)}")
                 except Exception as e:
                     # If Excel fails, log error but continue
-                    emit(f"ΓÜá∩╕Å Writer: Excel export failed for part {part}: {e}")
+                    emit(f"⚠️ Writer: Excel export failed for part {part}: {e}")
                     import traceback
                     traceback.print_exc()
                 
@@ -3002,9 +3005,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     # Verify file was written
                     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                         files_written.append(csv_path)
-                        emit(f"Γ£à Writer: Wrote CSV file: {os.path.basename(csv_path)} ({len(df)} rows)")
+                        emit(f"✅ Writer: Wrote CSV file: {os.path.basename(csv_path)} ({len(df)} rows)")
                     else:
-                        emit(f"Γ¥î Writer: CSV file missing/empty: {os.path.basename(csv_path)}")
+                        emit(f"❌ Writer: CSV file missing/empty: {os.path.basename(csv_path)}")
                     
                     # VALIDATION: Verify CSV file is valid by reading it back
                     try:
@@ -3021,7 +3024,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         import logging
                         logging.warning(f"CSV validation warning: {e}")
                         # Also print to console for debugging
-                        emit(f"ΓÜá∩╕Å CSV validation warning for {os.path.basename(csv_path)}: {e}")
+                        emit(f"⚠️ CSV validation warning for {os.path.basename(csv_path)}: {e}")
                     # CRASH RECOVERY: Update checkpoint after each successful write
                     if checkpoint_data is not None and checkpoint_path and len(df) > 0:
                         try:
@@ -3030,7 +3033,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             checkpoint_data["last_part"] = part
                             save_checkpoint(checkpoint_data, checkpoint_path)
                         except Exception as cp_err:
-                            print(f"ΓÜá∩╕Å Checkpoint update failed: {cp_err}")
+                            print(f"⚠️ Checkpoint update failed: {cp_err}")
                 except Exception as e:
                     import logging
                     logging.error(f"CSV write failed: {e}. Using manual writer...")
@@ -3127,7 +3130,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                             writer.writerow([website, scraped_text, company_summary])
             except BaseException as write_err:
                 # CRITICAL: Never crash the writer - log and continue so progress is never lost
-                emit(f"ΓÜá∩╕Å Writer: Error writing chunk (skipping to prevent crash): {write_err}")
+                emit(f"⚠️ Writer: Error writing chunk (skipping to prevent crash): {write_err}")
                 import traceback
                 traceback.print_exc()
 
@@ -3139,7 +3142,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             if len(row) >= 2:
                 url = str(row[0]).strip() if row[0] else ""
                 scraped_text = str(row[1]).strip() if row[1] else ""
-                # Include rows with valid URL - keep error messages (they start with Γ¥î)
+                # Include rows with valid URL - keep error messages (they start with ❌)
                 # Only exclude rows where URL is empty
                 if url and url != "":
                     n_c = 4 if include_email_copy else 3
@@ -3192,7 +3195,7 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         try:
                             wb.save(excel_path)
                         except Exception as save_error:
-                            print(f"ΓÜá∩╕Å Excel save failed, attempting recovery: {save_error}")
+                            print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
                             wb_recovery = Workbook()
                             ws_recovery = wb_recovery.active
                             ws_recovery.title = "Scraped Data"
@@ -3203,25 +3206,25 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                         # Verify Excel file was written
                         if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
                             files_written.append(excel_path)
-                            print(f"Γ£à Writer: Successfully wrote Excel file: {excel_path} ({len(df)} rows)")
+                            print(f"✅ Writer: Successfully wrote Excel file: {excel_path} ({len(df)} rows)")
                         else:
-                            print(f"Γ¥î Writer: Excel file was not created or is empty: {excel_path}")
+                            print(f"❌ Writer: Excel file was not created or is empty: {excel_path}")
                     except Exception as e:
                         # If Excel fails, log but continue (CSV is more important)
-                        print(f"ΓÜá∩╕Å Writer: Excel export failed for part {part}: {e}")
+                        print(f"⚠️ Writer: Excel export failed for part {part}: {e}")
                         import traceback
                         traceback.print_exc()
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
-                emit(f"Γ¥î Writer: Failed to write output part {part}: {type(e).__name__}: {e}")
+                emit(f"❌ Writer: Failed to write output part {part}: {type(e).__name__}: {e}")
                 for line in tb.strip().split("\n"):
                     emit(line)
     
     # Final summary
-    emit(f"≡ƒôè Writer: Finished. Wrote {len(files_written)} files total.")
+    emit(f"📊 Writer: Finished. Wrote {len(files_written)} files total.")
     if files_written:
-        emit(f"≡ƒôü Writer: Files written: {', '.join([os.path.basename(f) for f in files_written])}")
+        emit(f"📁 Writer: Files written: {', '.join([os.path.basename(f) for f in files_written])}")
 
 # -------------------------
 # Test preview (no file write)
@@ -3279,7 +3282,7 @@ async def run_test_preview(urls: list, n: int, retries, timeout, depth, keywords
         for i in range(min(2, n))
     ]
 
-    emit(f"≡ƒº¬ Test run: scraping + AI on {n} URL(s)...")
+    emit(f"🧪 Test run: scraping + AI on {n} URL(s)...")
     try:
         await url_queue.join()
         for _ in workers:
@@ -3291,7 +3294,7 @@ async def run_test_preview(urls: list, n: int, retries, timeout, depth, keywords
         await result_queue.put(None)
         await asyncio.gather(collector_task)
     except Exception as e:
-        emit(f"ΓÜá∩╕Å Test error: {e}")
+        emit(f"⚠️ Test error: {e}")
     finally:
         await session.close()
 
@@ -3326,7 +3329,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                 pass
 
     if not urls:
-        emit("Γ¥î No URLs to process. Exiting.")
+        emit("❌ No URLs to process. Exiting.")
         return
 
     os.makedirs(output_dir, exist_ok=True)
@@ -3341,9 +3344,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         if set(stored_urls) == set(urls):
             remaining_with_idx = [(u, idx) for idx, u in enumerate(urls) if u not in completed_urls]
             if not remaining_with_idx:
-                emit("Γ£à All URLs already completed (resume found nothing to do)")
+                emit("✅ All URLs already completed (resume found nothing to do)")
                 return
-            emit(f"≡ƒôé Resuming: {len(completed_urls)} already done, {len(remaining_with_idx)} remaining")
+            emit(f"📂 Resuming: {len(completed_urls)} already done, {len(remaining_with_idx)} remaining")
         else:
             completed_urls = set()
             start_part = 0
@@ -3420,12 +3423,12 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt,
         email_copy_enabled, email_copy_api_key, email_copy_provider, email_copy_model, email_copy_prompt,
         lead_data_map, ai_status_callback, scrape_status_callback, fast_mode,
-        use_playwright_fallback, use_common_crawl_fallback)) for i in range(concurrency)]
+        use_playwright_fallback, use_common_crawl_fallback, total_urls=total_overall)) for i in range(concurrency)]
 
     # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
     max_queue_time = min(base_time + 600, 3 * 3600 + 600)  # +10 min for pause-and-wait recovery
-    emit(f"ΓÜÖ∩╕Å Run config: total={total_overall}, remaining={total_this_run}, queue_max={queue_max}, max_queue_time={int(max_queue_time)}s, fast_mode={fast_mode}, low_resource={low_resource}")
+    emit(f"⚙️ Run config: total={total_overall}, remaining={total_this_run}, queue_max={queue_max}, max_queue_time={int(max_queue_time)}s, fast_mode={fast_mode}, low_resource={low_resource}")
     
     recovery_wait_s = 300  # 5 minutes: wait for slow network/system before giving up
     recovery_chunk_s = 30  # Check progress every 30s during recovery
@@ -3434,7 +3437,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 
     async def force_completion_on_stall():
         """Detect stall and PAUSE for recovery (slow network/disconnect) before draining."""
-        stall_threshold = 240 if low_resource else 300  # 4ΓÇô5 min before considering stall
+        stall_threshold = 240 if low_resource else 300  # 4-5 min before considering stall
         while True:
             await asyncio.sleep(15)
             elapsed = time.time() - progress_state["last_time"]
@@ -3442,7 +3445,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             remaining = total_overall - last_count
             if remaining <= 0:
                 break
-            # Near completion (1ΓÇô5 URLs left): use shorter threshold so we don't wait hours for 1 stuck worker
+            # Near completion (1-5 URLs left): use shorter threshold so we don't wait hours for 1 stuck worker
             pct_done = last_count / max(total_overall, 1)
             use_shorter = remaining <= 5 and pct_done >= 0.99
             effective_threshold = min(stall_threshold, near_completion_recovery) if use_shorter else stall_threshold
@@ -3451,7 +3454,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             else:
                 effective_recovery = recovery_wait_s
             if elapsed > effective_threshold:
-                emit(f"ΓÅ╕∩╕Å Pausing: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Waiting up to {effective_recovery // 60} min for recovery...")
+                emit(f"⏸️ Pausing: no progress for {int(elapsed)}s ({last_count}/{total_overall} done). Waiting up to {effective_recovery // 60} min for recovery...")
                 waited = 0
                 recovered = False
                 while waited < effective_recovery:
@@ -3460,11 +3463,11 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                     new_count = progress_state["last_count"]
                     if new_count > last_count:
                         recovered = True
-                        emit(f"Γ£à Recovery: progress resumed ({new_count - last_count} completed). Continuing.")
+                        emit(f"✅ Recovery: progress resumed ({new_count - last_count} completed). Continuing.")
                         break
-                    emit(f"ΓÅ│ Still waiting... {waited}s / {effective_recovery}s (no progress yet)")
+                    emit(f"⏳ Still waiting... {waited}s / {effective_recovery}s (no progress yet)")
                 if not recovered:
-                    emit(f"ΓÜá∩╕Å No recovery. Stopping stuck workers (1 URL may be missing; will retry on resume).")
+                    emit(f"⚠️ No recovery. Stopping stuck workers (1 URL may be missing; will retry on resume).")
                     drained = 0
                     while drained < remaining + 100:
                         try:
@@ -3475,7 +3478,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                             url_queue.task_done()
                             continue
                         url, idx = (item[0], item[1]) if isinstance(item, tuple) else (item, None)
-                        err_result = (url, "Γ¥î Stall: worker stopped after recovery wait", "", "") if email_copy_enabled else (url, "Γ¥î Stall: worker stopped after recovery wait", "")
+                        err_result = (url, "❌ Stall: worker stopped after recovery wait", "", "") if email_copy_enabled else (url, "❌ Stall: worker stopped after recovery wait", "")
                         for _ in range(20):
                             try:
                                 result_queue.put_nowait(err_result)
@@ -3483,7 +3486,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                             except asyncio.QueueFull:
                                 await asyncio.sleep(0.3)
                         else:
-                            emit("ΓÜá∩╕Å Result queue full during stall drain")
+                            emit("⚠️ Result queue full during stall drain")
                         url_queue.task_done()
                         drained += 1
                     stall_complete_event.set()
@@ -3496,7 +3499,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             await asyncio.sleep(20)
             done = progress_state["last_count"]
             elapsed = int(time.time() - progress_state["last_time"])
-            emit(f"≡ƒÆô Heartbeat: {done}/{total_overall} done, idle_for={elapsed}s, url_q={url_queue.qsize()}, result_q={result_queue.qsize()}")
+            emit(f"💓 Heartbeat: {done}/{total_overall} done, idle_for={elapsed}s, url_q={url_queue.qsize()}, result_q={result_queue.qsize()}")
     heartbeat_task = asyncio.create_task(heartbeat())
     
     try:
@@ -3521,9 +3524,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             except asyncio.CancelledError:
                 pass
             if not stall_triggered:
-                emit(f"ΓÅ╕∩╕Å Queue join timed out. Pausing 3 min for recovery...")
+                emit(f"⏸️ Queue join timed out. Pausing 3 min for recovery...")
                 await asyncio.sleep(180)
-                emit(f"ΓÜá∩╕Å Draining remaining URLs...")
+                emit(f"⚠️ Draining remaining URLs...")
             drained = 0
             while drained < total_this_run + 50:
                 try:
@@ -3534,7 +3537,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                     url_queue.task_done()
                     continue
                 url = item[0] if isinstance(item, tuple) else item
-                err_msg = "Γ¥î Stall: worker stopped" if stall_triggered else f"Γ¥î Timeout: exceeded {max_queue_time}s"
+                err_msg = "❌ Stall: worker stopped" if stall_triggered else f"❌ Timeout: exceeded {max_queue_time}s"
                 err_result = (url, err_msg, "", "") if email_copy_enabled else (url, err_msg, "")
                 for _ in range(30):
                     try:
@@ -3543,7 +3546,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                     except asyncio.QueueFull:
                         await asyncio.sleep(0.3)
                 else:
-                    emit("ΓÜá∩╕Å Result queue full during drain")
+                    emit("⚠️ Result queue full during drain")
                 url_queue.task_done()
                 drained += 1
 
@@ -3554,13 +3557,13 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            emit(f"ΓÜá∩╕Å Stall monitor error: {e}")
+            emit(f"⚠️ Stall monitor error: {e}")
         try:
             await heartbeat_task
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            emit(f"ΓÜá∩╕Å Heartbeat monitor error: {e}")
+            emit(f"⚠️ Heartbeat monitor error: {e}")
 
         for _ in workers:
             try:
@@ -3583,22 +3586,22 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         try:
             await asyncio.wait_for(result_queue.join(), timeout=60)
         except asyncio.TimeoutError:
-            emit("ΓÜá∩╕Å Result queue join timed out. Proceeding anyway...")
+            emit("⚠️ Result queue join timed out. Proceeding anyway...")
         
         try:
             await asyncio.wait_for(writer_task, timeout=120)
         except asyncio.TimeoutError:
-            emit("ΓÜá∩╕Å Writer task timed out. Proceeding anyway...")
+            emit("⚠️ Writer task timed out. Proceeding anyway...")
             writer_task.cancel()
         except Exception as e:
-            emit(f"ΓÜá∩╕Å Error waiting for writer: {e}")
+            emit(f"⚠️ Error waiting for writer: {e}")
 
         await session.close()
         await asyncio.sleep(2)
     except BaseException as e:
         import traceback
         tb = traceback.format_exc()
-        emit(f"ΓÜá∩╕Å Scraper error (progress saved): {type(e).__name__}: {e}")
+        emit(f"⚠️ Scraper error (progress saved): {type(e).__name__}: {e}")
         emit("--- Full traceback ---")
         for line in tb.strip().split("\n"):
             emit(line)
@@ -3618,9 +3621,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             pass
         try:
             save_checkpoint(checkpoint_data, checkpoint_path)
-            emit("≡ƒÆ╛ Checkpoint saved.")
+            emit("⚠️ Checkpoint saved.")
         except BaseException as cp_err:
-            emit(f"ΓÜá∩╕Å Checkpoint save failed (progress may be in files): {cp_err}")
+            emit(f"⚠️ Checkpoint save failed (progress may be in files): {cp_err}")
 
 # -------------------------
 # Streamlit UI
@@ -3629,7 +3632,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
 st.set_page_config(
     page_title="Web Scraper", 
     layout="wide", 
-    page_icon="≡ƒîÉ",
+    page_icon="🌐",
     initial_sidebar_state="collapsed"
 )
 
@@ -3662,7 +3665,7 @@ st.markdown("""
     
     /* 2. Hero - handled in HTML below */
     
-    /* 3ΓÇô4. Section headers and typography */
+    /* 3-4. Section headers and typography */
     h1 {
         color: #f1f5f9 !important;
         font-weight: 700;
@@ -4032,7 +4035,7 @@ st.markdown("""
 st.markdown("""
 <div style="text-align: center; padding: 3rem 0 2rem; margin-bottom: 1rem;">
     <div style="display: inline-flex; align-items: center; justify-content: center; padding: 0.75rem; background: rgba(30, 41, 59, 0.6); border-radius: 1rem; border: 1px solid rgba(51, 65, 85, 0.5); margin-bottom: 1rem;">
-        <span style="font-size: 2rem;">≡ƒîÉ</span>
+        <span style="font-size: 2rem;">🌐</span>
     </div>
     <h1 style="background: linear-gradient(90deg, #22d3ee 0%, #3b82f6 50%, #6366f1 100%);
                -webkit-background-clip: text;
@@ -4064,7 +4067,7 @@ if os.path.isdir(outputs_dir):
         if not ck:
             continue
         total_urls = len(ck.get("urls", []))
-        # Use actual row count from files (source of truth) ΓÇö checkpoint can be wrong after crash
+        # Use actual row count from files (source of truth) — checkpoint can be wrong after crash
         actual_rows, _ = get_actual_completed_from_files(run_path)
         completed = actual_rows if actual_rows > 0 else len(ck.get("completed_urls", []))
         if completed > 0 and completed < total_urls:
@@ -4073,18 +4076,18 @@ if os.path.isdir(outputs_dir):
             incomplete_runs.append({"folder": run_folder, "completed": completed, "total": total_urls, "path": run_path, "done": True})
 
     if incomplete_runs:
-        with st.expander("≡ƒôé Resume or Download Partial Results", expanded=True):
+        with st.expander("📂 Resume or Download Partial Results", expanded=True):
             st.markdown('<div class="resume-runs">', unsafe_allow_html=True)
             st.markdown("**If the app crashed or stopped, you can:**")
             for run in incomplete_runs:
                 is_done = run.get("done", False)
-                label = f"Γ£à {run['folder']}: {run['completed']:,}/{run['total']:,} rows" if is_done else f"ΓÅ╕∩╕Å {run['folder']}: {run['completed']:,}/{run['total']:,} rows in files (partial)"
+                label = f"✅ {run['folder']}: {run['completed']:,}/{run['total']:,} rows" if is_done else f"⏸️ {run['folder']}: {run['completed']:,}/{run['total']:,} rows in files (partial)"
                 with st.container():
                     col_a, col_b = st.columns([2, 1])
                     with col_a:
                         st.markdown(f"**{label}**")
                         if not is_done:
-                            st.caption("To resume: Re-upload your CSV and click Start ΓÇö the app will auto-detect and continue.")
+                            st.caption("To resume: Re-upload your CSV and click Start — the app will auto-detect and continue.")
                         st.caption("ZIP includes combined_all_results.csv with all rows in one file.")
                     with col_b:
                         zip_path = os.path.join(run["path"], f"{run['folder']}.zip")
@@ -4119,14 +4122,14 @@ if os.path.isdir(outputs_dir):
                                     pass
                         if os.path.exists(zip_path):
                             with open(zip_path, "rb") as f:
-                                st.download_button("Γ¼ç∩╕Å Download", f.read(), file_name=f"{run['folder']}.zip", mime="application/zip", key=f"resume_dl_{run['folder']}")
+                                st.download_button("⬇️ Download", f.read(), file_name=f"{run['folder']}.zip", mime="application/zip", key=f"resume_dl_{run['folder']}")
             st.markdown('</div>', unsafe_allow_html=True)
 
 # Step 1: Upload CSV
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">≡ƒôü Step 1: Upload CSV</h3>
-    <div class="tip-box tip-box-cyan"><strong>≡ƒÆí Tip:</strong> Your CSV should have a column with website URLs (one per row)</div>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📁 Step 1: Upload CSV</h3>
+    <div class="tip-box tip-box-cyan"><strong>💡 Tip:</strong> Your CSV should have a column with website URLs (one per row)</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -4145,7 +4148,7 @@ df_preview = None
 if uploaded_file is not None:
     # CSV Configuration - Cleaner layout
     st.markdown("---")
-    st.markdown("### ≡ƒôï CSV Configuration")
+    st.markdown("### 📋 CSV Configuration")
 
     # Preview first few rows
     try:
@@ -4167,16 +4170,16 @@ if uploaded_file is not None:
             )
         
         with col_csv2:
-            st.caption("≡ƒÆí **Tip:** If yes, you'll see column names to choose from")
+            st.caption("💡 **Tip:** If yes, you'll see column names to choose from")
         
         # Read CSV based on header selection
         uploaded_file.seek(0)  # Reset file pointer
         if csv_has_headers == "Yes":
             df_preview = pd.read_csv(uploaded_file, nrows=10)
-            st.success(f"Γ£à Found {len(df_preview.columns)} columns: {', '.join(df_preview.columns.tolist()[:5])}{'...' if len(df_preview.columns) > 5 else ''}")
+            st.success(f"✅ Found {len(df_preview.columns)} columns: {', '.join(df_preview.columns.tolist()[:5])}{'...' if len(df_preview.columns) > 5 else ''}")
         else:
             df_preview = pd.read_csv(uploaded_file, header=None, nrows=10)
-            st.info(f"Γä╣∩╕Å Found {len(df_preview.columns)} columns (no headers)")
+            st.info(f"ℹ️ Found {len(df_preview.columns)} columns (no headers)")
         
         # Column selection
         st.markdown("#### Select Columns")
@@ -4201,7 +4204,7 @@ if uploaded_file is not None:
                 )
         
         with col_sel2:
-            st.caption("≡ƒôî **Required** - Must select this")
+            st.caption("⚠️ **Required** - Must select this")
         
         # All non-URL columns become variables for AI prompts (Step 3 & 4)
         st.markdown("---")
@@ -4213,20 +4216,20 @@ if uploaded_file is not None:
             key = _col_to_placeholder(col)
             if key:
                 lead_data_columns[key] = col
-        with st.expander("≡ƒôè Variables from your sheet", expanded=True):
-            st.caption("Every column (except the URL column) is available as a variable in Steps 3 & 4. E.g. column \"Website Name\" ΓåÆ {website_name} in your prompt.")
+        with st.expander("📊 Variables from your sheet", expanded=True):
+            st.caption("Every column (except the URL column) is available as a variable in Steps 3 & 4. E.g. column \"Website Name\" → {website_name} in your prompt.")
             if lead_data_columns:
-                st.code(" ΓÇó ".join(f"{{{k}}}" for k in sorted(lead_data_columns.keys())[:20]) + (" ΓÇª" if len(lead_data_columns) > 20 else ""), language=None)
+                st.code(" • ".join(f"{{{k}}}" for k in sorted(lead_data_columns.keys())[:20]) + (" …" if len(lead_data_columns) > 20 else ""), language=None)
         
         # Store in session state for use during scraping and token estimator
         num_cols_preview = len(df_preview.columns) if df_preview is not None else 0
         if num_cols_preview == 0:
-            st.error("Γ¥î No columns detected in CSV. Check the file has headers or at least one column.")
+            st.error("❌ No columns detected in CSV. Check the file has headers or at least one column.")
         else:
             try:
                 if csv_has_headers == "Yes":
                     if url_column not in (list(df_preview.columns) or []):
-                        st.warning("ΓÜá∩╕Å Selected URL column not found in preview. Using first column.")
+                        st.warning("⚠️ Selected URL column not found in preview. Using first column.")
                         url_col_idx = 0
                     else:
                         url_col_idx = list(df_preview.columns).index(url_column)
@@ -4254,7 +4257,7 @@ if uploaded_file is not None:
         url_like_count = sum(1 for u in sample_vals if _looks_like_url(u))
         if sample_vals and url_like_count < max(1, len(sample_vals) * 0.3):
             st.warning(
-                "ΓÜá∩╕Å **Selected column doesn't look like website URLs** (e.g. only names or text). "
+                "⚠️ **Selected column doesn't look like website URLs** (e.g. only names or text). "
                 "Output **Column A** will be exactly this column. If you want URLs in Column A, choose the column that contains website addresses in Step 1."
             )
         st.session_state['csv_config'] = {
@@ -4267,14 +4270,14 @@ if uploaded_file is not None:
         st.session_state['_csv_url_count'] = url_count
         
     except Exception as e:
-        st.error(f"Γ¥î Error reading CSV: {str(e)}")
+        st.error(f"❌ Error reading CSV: {str(e)}")
         st.info("Please check your CSV file format and try again.")
 
 # Step 2: Settings
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">ΓÜÖ∩╕Å Step 2: Settings</h3>
-    <div class="tip-box tip-box-emerald"><strong>≡ƒÆí Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).</div>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">⚙️ Step 2: Settings</h3>
+    <div class="tip-box tip-box-emerald"><strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -4294,9 +4297,9 @@ with col1:
     st.session_state['keywords'] = keywords
     
     if keywords:
-        st.caption(f"Γ£à Looking for: {', '.join(keywords)}")
+        st.caption(f"✅ Looking for: {', '.join(keywords)}")
     else:
-        st.caption("≡ƒÆí Leave empty to scrape homepage only")
+        st.caption("💡 Leave empty to scrape homepage only")
     
     concurrency_max = _get_concurrency_max()
     concurrency_default = min(st.session_state.get('concurrency', min(20, concurrency_max)), concurrency_max)
@@ -4341,11 +4344,11 @@ with col2:
         help="How long to wait per site. Unreachable sites fall back to archive.org / Playwright / Google cache.",
         key="timeout"
     )
-    with st.expander("Γä╣∩╕Å About Google cache & context", expanded=False):
+    with st.expander("ℹ️ About Google cache & context", expanded=False):
         st.caption(
             "**Context source:** The app only scrapes the URLs in your sheet (no separate Google search). "
             "When a URL is unreachable, it tries **Google cache** and **Archive.org** to get the page. "
-            "There is no feature that searches Google for extra company infoΓÇöonly the URL you provide is used."
+            "There is no feature that searches Google for extra company info—only the URL you provide is used."
         )
 
     # Max chars: default 10k, max 50k
@@ -4367,7 +4370,7 @@ with col2:
     )
     
     # User Agent - Hidden in expander
-    with st.expander("≡ƒöº User-Agent (Advanced)", expanded=False):
+    with st.expander("🔧 User-Agent (Advanced)", expanded=False):
         user_agent = st.text_input(
             "User-Agent", 
             value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
@@ -4378,8 +4381,8 @@ with col2:
 # Step 3: Company Summary Generator (optional)
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">≡ƒôï Step 3: Company Summary Generator (optional)</h3>
-    <div class="tip-box tip-box-fuchsia">Turn your web scrapes into structured company summaries ΓÇö clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.</div>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📋 Step 3: Company Summary Generator (optional)</h3>
+    <div class="tip-box tip-box-fuchsia">Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -4411,13 +4414,13 @@ if ai_enabled:
     elif ai_provider == "Gemini":
         st.caption("Create a key at [makersuite.google.com/app/apikey](https://makersuite.google.com/app/apikey)")
     else:
-        st.caption("Create a key at [openrouter.ai/keys](https://openrouter.ai/keys) ΓÇö one key for GPT, Claude, Gemini, and more")
+        st.caption("Create a key at [openrouter.ai/keys](https://openrouter.ai/keys) — one key for GPT, Claude, Gemini, and more")
     
     ai_api_key = st.text_input(
         f"{ai_provider} API key",
         value=stored_api_key,
         type="password",
-        help="Paste your API key. ItΓÇÖs stored in your session and never saved to disk.",
+        help="Paste your API key. It's stored in your session and never saved to disk.",
     )
     
     # Save API key
@@ -4464,7 +4467,7 @@ if ai_enabled:
                         )
                         st.session_state[models_cache_key] = cached_models
                 except Exception as e:
-                    st.warning("ΓÜá∩╕Å Could not load models. Using defaults.")
+                    st.warning("⚠️ Could not load models. Using defaults.")
                     cached_models = (
                         ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] if ai_provider == "OpenAI"
                         else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"] if ai_provider == "Gemini"
@@ -4518,7 +4521,7 @@ if ai_enabled:
         help="The default prompt is tuned for company summaries, facts, and hypotheses."
     )
     
-    default_prompt_template = """You are Hypothesis BotΓÇª an advanced commercial analysis agent.
+    default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
 INPUT
 You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
@@ -4533,11 +4536,11 @@ You are not writing outreach. You are building the intelligence layer that enabl
 
 NON NEGOTIABLE RULES
 1) Do not invent facts. If it is not explicitly supported by the webcopy, it is not a fact.
-2) Facts must be short and must include Evidence QuoteΓÇª an exact snippet from the webcopy.
+2) Facts must be short and must include Evidence Quote… an exact snippet from the webcopy.
 3) Hypotheses must be explicitly labeled as hypotheses and must include:
-   ΓÇó SignalΓÇª the specific wording or structural clue that triggered the inference
-   ΓÇó Commercial implicationΓÇª why it matters in a sales or growth context
-   ΓÇó Confidence: High, Medium, or Low
+   • Signal… the specific wording or structural clue that triggered the inference
+   • Commercial implication… why it matters in a sales or growth context
+   • Confidence: High, Medium, or Low
 4) Never mention any external tools or data sources (Apollo, LinkedIn, Crunchbase, funding, headcount, etc.). You only have webcopy.
 5) If the company name is unclear, write "Company: Not explicitly stated" and proceed.
 6) Avoid cringe adjectives like great, amazing, innovative. Be surgical.
@@ -4546,20 +4549,20 @@ NON NEGOTIABLE RULES
 
 ANALYSIS GUIDELINES
 When extracting facts, prioritize:
-ΓÇó What they do (offer categories, deliverables)
-ΓÇó Who they serve (industries, segments, buyer language)
-ΓÇó How they sell (engagement models, pricing mentions, process)
-ΓÇó Proof (case studies, client names, testimonials, quantified claims)
-ΓÇó Differentiators (positioning phrases, guarantees, compliance, security)
-ΓÇó Operational signals (hiring, support hours, global language, locations)
-ΓÇó Technology signals (stacks, platforms, integrations) only if stated
+• What they do (offer categories, deliverables)
+• Who they serve (industries, segments, buyer language)
+• How they sell (engagement models, pricing mentions, process)
+• Proof (case studies, client names, testimonials, quantified claims)
+• Differentiators (positioning phrases, guarantees, compliance, security)
+• Operational signals (hiring, support hours, global language, locations)
+• Technology signals (stacks, platforms, integrations) only if stated
 
 When generating hypotheses, prioritize:
-ΓÇó Likely buying triggers (growth, hiring, new initiatives, modernization)
-ΓÇó Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
-ΓÇó Likely maturity level (specialist vs generalist, product vs services)
-ΓÇó Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
-ΓÇó Contradictions or gaps between claims and proof
+• Likely buying triggers (growth, hiring, new initiatives, modernization)
+• Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
+• Likely maturity level (specialist vs generalist, product vs services)
+• Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
+• Contradictions or gaps between claims and proof
 Each hypothesis must connect to a commercial implication.
 
 LEAD INFORMATION:
@@ -4574,10 +4577,10 @@ Return exactly these 3 sections with EXACT headers:
 
 ===SUMMARY===
 Write 3 to 5 sentences in one paragraph describing:
-ΓÇó what the company appears to do
-ΓÇó who it appears to serve
-ΓÇó how it positions itself
-ΓÇó one notable proof element (only if present)
+• what the company appears to do
+• who it appears to serve
+• how it positions itself
+• one notable proof element (only if present)
 Mark inferences with (obs).
 Do NOT use markdown (**, __, #). Use plain text only.
 
@@ -4611,7 +4614,7 @@ CRITICAL:
         st.markdown("#### Prompt template (edit below)")
         vars_def = _get_variable_definitions()
         placeholders_line = ", ".join(p for (_, p, _) in vars_def)
-        st.caption(f"**Available variables:** {placeholders_line} ΓÇö type these in the template below.")
+        st.caption(f"**Available variables:** {placeholders_line} — type these in the template below.")
         ai_prompt = st.text_area(
             "Prompt template",
             value=st.session_state.get("master_prompt", default_prompt_template),
@@ -4625,7 +4628,7 @@ CRITICAL:
         ends_with_brace = prompt_cur.rstrip().endswith("{{") or prompt_cur.rstrip().endswith("{")
         if ends_with_brace:
             placeholders_comp = [p for (_, p, _) in vars_def]
-            st.caption("Complete your variable ΓÇö select one to insert:")
+            st.caption("Complete your variable — select one to insert:")
             complete_choice = st.selectbox(
                 "Variable to insert",
                 options=placeholders_comp,
@@ -4648,7 +4651,7 @@ CRITICAL:
         sample_s3 = _get_sample_lead_data_for_preview()
         sample_s3["scraped_content"] = sample_s3.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
         final_preview_s3 = build_company_summary_prompt(ai_prompt, sample_s3, sample_s3["scraped_content"])
-        st.text_area("", value=final_preview_s3[:14000] + ("ΓÇª" if len(final_preview_s3) > 14000 else ""), height=240, disabled=True, key="step3_final_preview", label_visibility="collapsed")
+        st.text_area("", value=final_preview_s3[:14000] + ("…" if len(final_preview_s3) > 14000 else ""), height=240, disabled=True, key="step3_final_preview", label_visibility="collapsed")
         csv_cfg_s3 = st.session_state.get("csv_config") or {}
         df_s3 = csv_cfg_s3.get("df_preview")
         n_rows_s3 = len(df_s3) if df_s3 is not None and not df_s3.empty else 1
@@ -4684,7 +4687,7 @@ else:
 st.markdown("---")
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">Γ£ë∩╕Å Step 4: Email Copy Writer (optional)</h3>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0;">✉️ Step 4: Email Copy Writer (optional)</h3>
     <div class="tip-box tip-box-emerald">Generate personalized email copy for each lead based on scraped content. Runs independently from company summaries. Same AI providers supported.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4762,7 +4765,7 @@ Requirements:
         st.session_state['email_copy_prompt'] = default_email_prompt
     vars_def_ec = _get_variable_definitions()
     placeholders_line_ec = ", ".join(p for (_, p, _) in vars_def_ec)
-    st.caption(f"**Available variables:** {placeholders_line_ec} ΓÇö type these in the template below.")
+    st.caption(f"**Available variables:** {placeholders_line_ec} — type these in the template below.")
     email_copy_prompt = st.text_area(
         "Prompt template",
         value=st.session_state.get('email_copy_prompt', default_email_prompt),
@@ -4776,7 +4779,7 @@ Requirements:
     ends_with_brace_ec = prompt_cur_ec.rstrip().endswith("{{") or prompt_cur_ec.rstrip().endswith("{")
     if ends_with_brace_ec:
         placeholders_comp_ec = [p for (_, p, _) in vars_def_ec]
-        st.caption("Complete your variable ΓÇö select one to insert:")
+        st.caption("Complete your variable — select one to insert:")
         complete_choice_ec = st.selectbox(
             "Variable to insert",
             options=placeholders_comp_ec,
@@ -4799,7 +4802,7 @@ Requirements:
     sample_ec = _get_sample_lead_data_for_preview()
     sample_ec["scraped_content"] = sample_ec.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
     final_preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec["scraped_content"])
-    st.text_area("", value=final_preview_ec[:10000] + ("ΓÇª" if len(final_preview_ec) > 10000 else ""), height=200, disabled=True, key="step4_final_preview", label_visibility="collapsed")
+    st.text_area("", value=final_preview_ec[:10000] + ("…" if len(final_preview_ec) > 10000 else ""), height=200, disabled=True, key="step4_final_preview", label_visibility="collapsed")
     csv_cfg_ec = st.session_state.get("csv_config") or {}
     df_ec = csv_cfg_ec.get("df_preview")
     n_rows_ec = len(df_ec) if df_ec is not None and not df_ec.empty else 1
@@ -4828,7 +4831,7 @@ else:
 
 # Token usage estimator (self-calculating from scraper settings + prompts)
 st.markdown("---")
-with st.expander("≡ƒÆ░ Token usage estimator", expanded=False):
+with st.expander("💡 Token usage estimator", expanded=False):
     st.markdown('<span class="token-estimator-anchor" style="display:none;"></span>', unsafe_allow_html=True)
     MODEL_PRICING = {
         "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00), "gpt-4-turbo": (10.00, 30.00),
@@ -4928,7 +4931,7 @@ with st.container():
         test_rows = st.number_input("Test with X rows", min_value=1, max_value=20, value=5, help="Preview scraping + AI on first X URLs before full run", key="test_rows_input")
     with test_col2:
         st.caption("Run a quick test to see scraped content and AI summary in the browser (no files created)")
-        test_clicked = st.button("≡ƒº¬ Test run", key="test_run_btn", help=f"Test scraping + AI on first {test_rows} row(s)")
+        test_clicked = st.button("🧪 Test run", key="test_run_btn", help=f"Test scraping + AI on first {test_rows} row(s)")
 
 # Main action area (CTA section) - Get variables from tabs first so button is in same container
 # Get variables from tabs - Use session_state (proper Streamlit way)
@@ -5000,14 +5003,14 @@ def _run_test_in_thread():
 if uploaded_file and test_clicked:
     csv_config = st.session_state.get('csv_config', {}) or {}
     if not csv_config:
-        st.error("Γ¥î Please configure your CSV above (select URL column) first.")
+        st.error("❌ Please configure your CSV above (select URL column) first.")
     else:
         uploaded_file.seek(0)
         has_headers = csv_config.get('has_headers', True)
         url_col = csv_config.get('url_column')
         lead_cols = csv_config.get('lead_data_columns', {}) or {}
         if not url_col:
-            st.error("Γ¥î URL column not configured. Select URL column in Step 1.")
+            st.error("❌ URL column not configured. Select URL column in Step 1.")
         else:
             try:
                 if has_headers:
@@ -5015,15 +5018,15 @@ if uploaded_file and test_clicked:
                 else:
                     df_in = pd.read_csv(uploaded_file, header=None)
             except Exception as e:
-                st.error(f"Γ¥î Failed to read CSV: {e}")
+                st.error(f"❌ Failed to read CSV: {e}")
                 df_in = pd.DataFrame()
             if df_in.empty:
-                st.error("Γ¥î CSV is empty or unreadable.")
+                st.error("❌ CSV is empty or unreadable.")
             else:
                 try:
                     url_col_idx = list(df_in.columns).index(url_col) if has_headers else int(str(url_col).replace("Column ", "")) - 1
                 except (ValueError, TypeError):
-                    st.error("Γ¥î Invalid URL column. Reconfigure CSV in Step 1.")
+                    st.error("❌ Invalid URL column. Reconfigure CSV in Step 1.")
                     url_col_idx = 0
                 url_series = df_in.iloc[:, url_col_idx].fillna("").astype(str)
                 url_list_with_idx = [(u.strip(), i) for i, u in enumerate(url_series) if u and str(u).strip()]
@@ -5045,7 +5048,7 @@ if uploaded_file and test_clicked:
                     lead_data_map[idx] = lead_data
 
                 if not urls:
-                    st.error("Γ¥î No valid URLs found in CSV. Check your URL column.")
+                    st.error("❌ No valid URLs found in CSV. Check your URL column.")
                 else:
                     ai_enabled_test = st.session_state.get("ai_enabled_checkbox", False)
                     ai_provider_test = st.session_state.get('ai_provider', None) if ai_enabled_test else None
@@ -5082,7 +5085,7 @@ if uploaded_file and test_clicked:
                     st.rerun()
 
 if st.session_state.get("_test_running"):
-    st.info("≡ƒº¬ **Test is running in the background** (scraping + AI may take 1ΓÇô3 min). You can keep scrolling or editing settings. Click below to check if results are ready.")
+    st.info("🧪 **Test is running in the background** (scraping + AI may take 1-3 min). You can keep scrolling or editing settings. Click below to check if results are ready.")
     if st.button("Check for results", key="test_check_results_btn"):
         st.rerun()
 
@@ -5092,12 +5095,12 @@ if st.session_state.get("_test_results") is not None and not st.session_state.ge
     test_error = st.session_state.pop("_test_error", None)
     test_tb = st.session_state.pop("_test_tb", None)
     if test_error:
-        st.error(f"Γ¥î Test failed: {test_error}")
+        st.error(f"❌ Test failed: {test_error}")
         if test_tb:
             st.code(test_tb, language=None)
     # Do not clear _test_results here so the UI stays visible; cleared when user starts a new test
 
-    st.markdown("### ≡ƒº¬ Test results")
+    st.markdown("### 🧪 Test results")
     if test_logs:
         with st.expander("Logs", expanded=False):
             st.code("\n".join(test_logs), language=None)
@@ -5107,9 +5110,9 @@ if st.session_state.get("_test_results") is not None and not st.session_state.ge
         scraped_text = row[1] if len(row) >= 2 else ""
         ai_summary = row[2] if len(row) >= 3 else ""
         email_copy_val = row[3] if len(row) >= 4 else ""
-        with st.expander(f"**{i+1}. {url[:60]}{'ΓÇª' if len(url) > 60 else ''}**", expanded=True):
+        with st.expander(f"**{i+1}. {url[:60]}{'…' if len(url) > 60 else ''}**", expanded=True):
             st.markdown("#### Scraped content")
-            scraped_display = scraped_text[:8000] + ("ΓÇª" if len(scraped_text) > 8000 else "") if scraped_text else "(empty)"
+            scraped_display = scraped_text[:8000] + ("…" if len(scraped_text) > 8000 else "") if scraped_text else "(empty)"
             st.text_area("", value=scraped_display, height=200, key=f"test_scraped_{i}", disabled=True, label_visibility="collapsed")
             if ai_summary:
                 st.markdown("#### Company summary")
@@ -5131,20 +5134,20 @@ with st.container():
     st.markdown("---")
     st.markdown("""
     <div class="cta-heading-block" style="text-align: center; padding: 2rem 0;">
-        <h2 style="color: #f1f5f9; margin-bottom: 1rem;">≡ƒÜÇ Ready to Start</h2>
+        <h2 style="color: #f1f5f9; margin-bottom: 1rem;">🚀 Ready to Start</h2>
         <p style="color: #94a3b8; font-size: 1rem; margin-bottom: 1.5rem;">
             Make sure you've uploaded your CSV and configured settings above.<br>
             Then click the button below to start scraping!
         </p>
     </div>
     """, unsafe_allow_html=True)
-    start_clicked = st.button("≡ƒÜÇ Start Scraping", use_container_width=True, key="start_scraping_btn")
+    start_clicked = st.button("🚀 Start Scraping", use_container_width=True, key="start_scraping_btn")
 if uploaded_file and start_clicked:
     # Get CSV configuration from session state
     csv_config = st.session_state.get('csv_config', {})
     
     if not csv_config:
-        st.error("Γ¥î Please configure your CSV file above (select columns)")
+        st.error("❌ Please configure your CSV file above (select columns)")
         st.stop()
     
     # Read CSV based on configuration
@@ -5152,7 +5155,7 @@ if uploaded_file and start_clicked:
     url_col = csv_config.get('url_column')
     lead_cols = csv_config.get('lead_data_columns', {}) or {}
     if url_col is None or (isinstance(url_col, str) and not url_col.strip()):
-        st.error("Γ¥î URL column not configured. Please select a URL column in Step 1.")
+        st.error("❌ URL column not configured. Please select a URL column in Step 1.")
         st.stop()
     # Reset file pointer
     uploaded_file.seek(0)
@@ -5162,25 +5165,25 @@ if uploaded_file and start_clicked:
         else:
             df_in = pd.read_csv(uploaded_file, header=None)
     except Exception as e:
-        st.error(f"Γ¥î Failed to read CSV: {e}")
+        st.error(f"❌ Failed to read CSV: {e}")
         st.stop()
     if df_in.empty or len(df_in) == 0:
-        st.error("Γ¥î CSV file is empty.")
+        st.error("❌ CSV file is empty.")
         st.stop()
     # Get URL column index
     try:
         if has_headers:
             if url_col not in df_in.columns:
-                st.error(f"Γ¥î URL column '{url_col}' not found in CSV. Columns: {list(df_in.columns)}")
+                st.error(f"❌ URL column '{url_col}' not found in CSV. Columns: {list(df_in.columns)}")
                 st.stop()
             url_col_idx = list(df_in.columns).index(url_col)
         else:
             url_col_idx = int(str(url_col).replace("Column ", "").strip()) - 1
             if url_col_idx < 0 or url_col_idx >= len(df_in.columns):
-                st.error(f"Γ¥î Invalid column index. Select Column 1 to {len(df_in.columns)}.")
+                st.error(f"❌ Invalid column index. Select Column 1 to {len(df_in.columns)}.")
                 st.stop()
     except (ValueError, TypeError) as e:
-        st.error(f"Γ¥î Invalid URL column selection: {e}")
+        st.error(f"❌ Invalid URL column selection: {e}")
         st.stop()
     
     # Extract URLs with original row indices (for lead columns)
@@ -5189,7 +5192,7 @@ if uploaded_file and start_clicked:
     urls = [u for u, _ in url_list_with_idx]
     total = len(urls)
     if total == 0:
-        st.error("Γ¥î No valid URLs found in the selected column. Check your CSV and URL column.")
+        st.error("❌ No valid URLs found in the selected column. Check your CSV and URL column.")
         st.stop()
     # Prepare lead data mapping (filtered index -> lead data dict)
     lead_data_map = {}
@@ -5213,16 +5216,16 @@ if uploaded_file and start_clicked:
     
     # Show warning and info for large files
     if total > 10000:
-        st.warning(f"ΓÜá∩╕Å **Large dataset detected:** {total:,} URLs. This may take a while and generate large files.")
-        with st.expander("≡ƒÆí Tips for Large Datasets", expanded=True):
+        st.warning(f"⚠️ **Large dataset detected:** {total:,} URLs. This may take a while and generate large files.")
+        with st.expander("💡 Tips for Large Datasets", expanded=True):
             st.markdown(f"""
             **Your dataset:** {total:,} URLs
             
             **Recommendations:**
-            - Γ£à **Max chars per site:** Use 20,000-50,000 to keep files manageable
-            - Γ£à **Rows per file:** Use 2,000-5,000 for easier handling
-            - Γ£à **Concurrency:** Start with 20-30, increase if stable
-            - Γ£à **Be patient:** Large datasets can take hours
+            - ✅ **Max chars per site:** Use 20,000-50,000 to keep files manageable
+            - ✅ **Rows per file:** Use 2,000-5,000 for easier handling
+            - ✅ **Concurrency:** Start with 20-30, increase if stable
+            - ✅ **Be patient:** Large datasets can take hours
             
             **Estimated output size:**
             - With 50k chars/site: ~{total * 50000 / (1024*1024):.0f} MB of text data
@@ -5230,15 +5233,15 @@ if uploaded_file and start_clicked:
             - Excel files may be large - CSV recommended for very large datasets
 
             **Crash recovery:** Progress is saved automatically every ~10 seconds. If the app crashes,
-            scroll to the top ΓåÆ "Resume or Download Partial Results" to download what you have, or
+            scroll to the top → "Resume or Download Partial Results" to download what you have, or
             re-upload your CSV and click Start to resume automatically (no run name needed).
             """)
     elif total > 5000:
-        st.info(f"Γä╣∩╕Å Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
+        st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
     
     # Show warning for large files
     if total > 10000:
-        st.warning(f"ΓÜá∩╕Å **Large dataset detected:** {total:,} URLs. This may take a while and generate large files. Consider:")
+        st.warning(f"⚠️ **Large dataset detected:** {total:,} URLs. This may take a while and generate large files. Consider:")
         st.info("""
         - **Reduce max_chars per site** to keep file sizes manageable
         - **Increase rows_per_file** to reduce number of output files
@@ -5246,7 +5249,7 @@ if uploaded_file and start_clicked:
         - **Be patient** - large datasets can take hours to complete
         """)
     elif total > 5000:
-        st.info(f"Γä╣∩╕Å Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
+        st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
 
     # AUTO-RESUME: Find existing run with same URLs before creating new folder
     output_dir = None
@@ -5277,7 +5280,7 @@ if uploaded_file and start_clicked:
             reconcile_checkpoint_with_files(output_dir)
             actual_rows, _ = get_actual_completed_from_files(output_dir)
             display_count = actual_rows if actual_rows > 0 else best_match[1]
-            st.success(f"≡ƒöä **Resuming:** Found existing run with {display_count:,}/{total:,} rows in files. Continuing from where you left off.")
+            st.success(f"🔄 **Resuming:** Found existing run with {display_count:,}/{total:,} rows in files. Continuing from where you left off.")
 
     if output_dir is None:
         run_folder = datetime.now().strftime("run_%Y%m%d_%H%M%S")
@@ -5295,11 +5298,11 @@ if uploaded_file and start_clicked:
     ai_status_messages = {}
 
     fun_messages = [
-        "≡ƒöì Scanning the web...",
-        "≡ƒ¢á∩╕Å Sharpening the scrapers...",
-        "≡ƒÜÇ Launching data rockets...",
-        "≡ƒôí Tuning into websites...",
-        "≡ƒº⌐ Piecing text together..."
+        "🔍 Scanning the web...",
+        "🛠️ Sharpening the scrapers...",
+        "🚀 Launching data rockets...",
+        "📡 Tuning into websites...",
+        "🧩 Piecing text together..."
     ]
     start_time = time.time()
     progress_state_ui = {"done": 0, "total": max(total, 1), "running": True}
@@ -5314,7 +5317,8 @@ if uploaded_file and start_clicked:
     
     scrape_in_progress = {}  # url -> {status, message}
     scrape_recent = deque(maxlen=30)  # [{url, status, message}, ...]
-    scrape_errors = deque(maxlen=20)  # [{url, message}, ...]
+    scrape_errors = deque(maxlen=100)  # [{url, message}, ...] - show more in live dashboard
+    all_failed_urls = []  # Unbounded list for full report and download
 
     def progress_cb(done_count, total_count):
         with progress_lock:
@@ -5331,7 +5335,9 @@ if uploaded_file and start_clicked:
                 entry = {"url": url, "status": status, "message": message}
                 scrape_recent.append(entry)
                 if status == "error":
-                    scrape_errors.append({"url": url, "message": message[:150]})
+                    err_entry = {"url": url, "message": message[:200]}
+                    scrape_errors.append(err_entry)
+                    all_failed_urls.append(err_entry)
 
     def ai_status_callback(url, message):
         with ai_status_lock:
@@ -5361,8 +5367,8 @@ if uploaded_file and start_clicked:
         email_copy_model_run = email_copy_model_ui
         email_copy_prompt_run = email_copy_prompt_ui
         if not (email_copy_api_key_run and email_copy_provider_run and email_copy_model_run):
-            st.warning("ΓÜá∩╕Å **Email copy** was checked but API key / provider / model is missing. This run will have **3 columns** (no Email Copy). Set Step 4 API key (or use same as Step 3) and run again for email copy.")
-            log_cb("ΓÜá∩╕Å Email copy disabled for this run: API key/provider/model missing.")
+            st.warning("⚠️ **Email copy** was checked but API key / provider / model is missing. This run will have **3 columns** (no Email Copy). Set Step 4 API key (or use same as Step 3) and run again for email copy.")
+            log_cb("⚠️ Email copy disabled for this run: API key/provider/model missing.")
             email_copy_enabled_for_run = False
             email_copy_api_key_run = email_copy_provider_run = email_copy_model_run = email_copy_prompt_run = None
 
@@ -5376,8 +5382,8 @@ if uploaded_file and start_clicked:
             if os.name == "nt":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             progress_state_ui["running"] = True
-            log_cb(f"≡ƒÜÇ Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
-            log_cb(f"≡ƒôº Email copy: {'enabled (output will have 4 columns)' if email_copy_enabled_for_run else 'disabled (output will have 3 columns)'}")
+            log_cb(f"🚀 Run started: urls={total:,}, workers={concurrency}, depth={depth}, retries={effective_retries}, timeout={effective_timeout}s")
+            log_cb(f"📧 Email copy: {'enabled (output will have 4 columns)' if email_copy_enabled_for_run else 'disabled (output will have 3 columns)'}")
             asyncio.run(
                 run_scraper(urls, concurrency, effective_retries, effective_timeout, depth, keywords, max_chars,
                             user_agent, rows_per_file, output_dir, progress_cb,
@@ -5389,12 +5395,14 @@ if uploaded_file and start_clicked:
                             run_folder=run_folder, fast_mode=fast_mode,
                             low_resource=low_resource, log_callback=log_cb,
                             use_playwright_fallback=True, use_common_crawl_fallback=True))
-            log_cb("Γ£à Run completed")
+            log_cb("✅ Run completed")
+            if all_failed_urls:
+                log_cb(f"⚠️ {len(all_failed_urls):,} URLs failed. See 'Failed URLs' section below for details and download.")
         except BaseException as e:
             scrape_error[0] = e
             import traceback
             tb = traceback.format_exc()
-            log_cb(f"Γ¥î Run crashed: {type(e).__name__}: {e}")
+            log_cb(f"❌ Run crashed: {type(e).__name__}: {e}")
             log_cb("--- Full traceback (send this for bug reports) ---")
             for line in tb.strip().split("\n"):
                 log_cb(line)
@@ -5407,15 +5415,15 @@ if uploaded_file and start_clicked:
                 crash_log_path = os.path.join(output_dir, f"crash_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
                 with open(crash_log_path, "w", encoding="utf-8") as f:
                     f.write(crash_log_content)
-                log_cb(f"≡ƒôä Crash log saved to: {crash_log_path}")
+                log_cb(f"📄 Crash log saved to: {crash_log_path}")
             except Exception:
                 pass
         finally:
             progress_state_ui["running"] = False
 
-    with st.spinner("Scraping ΓÇö runs in-page. Progress is saved; if you refresh or lose connection, re-upload the CSV and click Start to resume."):
+    with st.spinner("Scraping — runs in-page. Progress is saved; if you refresh or lose connection, re-upload the CSV and click Start to resume."):
         lead_data_map = st.session_state.get('lead_data_map', None)
-        with st.expander("≡ƒôï Detailed logs", expanded=False):
+        with st.expander("📋 Detailed logs", expanded=False):
             logs_placeholder = st.empty()
         
         thread = threading.Thread(target=run_async_scraper, daemon=False)
@@ -5442,18 +5450,18 @@ if uploaded_file and start_clicked:
             progress_bar.progress(min(pct, 1.0))
             idx = (d - 1) % len(fun_messages) if d > 0 else 0
             if remaining == float("inf"):
-                status_text.text(f"{fun_messages[idx]} ({d}/{t}) ΓÇö ETA: calculating...")
+                status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: calculating...")
             else:
-                status_text.text(f"{fun_messages[idx]} ({d}/{t}) ΓÇö ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+                status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
             if idle_for >= 30:
                 with scrape_status_lock:
                     n_active = len(scrape_in_progress)
                 if n_active > 0:
-                    eta_text.warning(f"No completed URLs for {idle_for}s ΓÇö {n_active} still in progress. Do not refresh.")
+                    eta_text.warning(f"No completed URLs for {idle_for}s — {n_active} still in progress. Do not refresh.")
                 else:
                     eta_text.warning(f"No progress for {idle_for}s. App will wait for recovery (slow network/system); do not refresh.")
             else:
-                eta_text.text(f"ΓÅ▒∩╕Å Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
+                eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
             with runtime_lock:
                 logs_text = "\n".join(runtime_logs)
             logs_placeholder.code(logs_text or "(no logs yet)", language=None)
@@ -5469,55 +5477,55 @@ if uploaded_file and start_clicked:
                 n_email = sum(1 for _, d in in_progress if d["status"] == "email_copy")
                 rate_per_min = rate * 60 if rate > 0 else 0
                 pct_done = (d / max(t, 1)) * 100
-                st.markdown("### ≡ƒôè Live activity")
+                st.markdown("### 📊 Live activity")
                 m1, m2, m3, m4, m5 = st.columns(5)
                 with m1:
                     st.metric("Progress", f"{d:,} / {t:,}", f"{pct_done:.1f}%")
                 with m2:
-                    st.metric("Rate", f"{rate_per_min:.1f}/min", "URLs" if rate_per_min else "ΓÇö")
+                    st.metric("Rate", f"{rate_per_min:.1f}/min", "URLs" if rate_per_min else "—")
                 with m3:
                     st.metric("Elapsed", f"{int(elapsed // 60)}m {int(elapsed % 60)}s", "")
                 with m4:
-                    st.metric("Errors", len(errors), f"of {d}" if d else "ΓÇö")
+                    st.metric("Errors", len(errors), f"of {d}" if d else "—")
                 with m5:
-                    phase_str = f"≡ƒöì {n_scraping}  ≡ƒñû {n_ai}  Γ£ë∩╕Å {n_email}" if in_progress else "Idle"
+                    phase_str = f"🔍 {n_scraping}  🤖 {n_ai}  ✉️ {n_email}" if in_progress else "Idle"
                     st.metric("Active", phase_str, "scrape | AI | email")
                 st.markdown("---")
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.markdown("#### ΓÅ│ In progress")
+                    st.markdown("#### ⏳ In progress")
                     if in_progress:
                         for url, data in in_progress[-10:]:
-                            short_url = escape((url[:42] + "ΓÇª") if len(url) > 42 else url)
+                            short_url = escape((url[:42] + "…") if len(url) > 42 else url)
                             status = data.get("status", "scraping")
                             msg = escape(str(data.get("message", ""))[:80])
-                            icon = "≡ƒöì" if status == "scraping" else ("≡ƒñû" if status == "ai_summarizing" else "Γ£ë∩╕Å")
+                            icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
                             badge = "scraping" if status == "scraping" else ("AI" if status == "ai_summarizing" else "email")
                             color = "#3b82f6" if status == "scraping" else ("#8b5cf6" if status == "ai_summarizing" else "#22c55e")
                             st.markdown(f"""<div class="dashboard-activity-row" style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid {color}; color:#e2e8f0;"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#94a3b8; font-size:0.8rem;">{msg}</span> <code style="background:rgba(51,65,85,0.8); color:#cbd5e1; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_Waiting for workers..._")
                 with col2:
-                    st.markdown("#### Γ£à Recently completed")
+                    st.markdown("#### ✅ Recently completed")
                     if recent:
                         for e in reversed(recent[-8:]):
                             u = e.get("url", "")
-                            short_url = escape((u[:38] + "ΓÇª") if len(u) > 38 else u)
+                            short_url = escape((u[:38] + "…") if len(u) > 38 else u)
                             if e.get("status") == "scraped":
                                 msg = escape(str(e.get("message", ""))[:50])
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#34d399;'>Γ£ô {short_url}</div><div style='font-size:0.75rem; color:#94a3b8; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#34d399;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#94a3b8; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
                             else:
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#f87171;'>Γ£ù {short_url}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#f87171;'>✗ {short_url}</div>", unsafe_allow_html=True)
                     else:
                         st.caption("_None yet_")
                 with col3:
-                    st.markdown("#### ΓÜá∩╕Å Issues")
+                    st.markdown("#### ⚠️ Issues")
                     if errors:
-                        for e in errors[-6:]:
+                        for e in errors[-15:]:
                             u = e.get("url", "")
                             m = e.get("message", "")
-                            short_url = escape((u[:35] + "ΓÇª") if len(u) > 35 else u)
-                            msg = escape((m[:70] + "ΓÇª") if len(m) > 70 else m)
+                            short_url = escape((u[:35] + "…") if len(u) > 35 else u)
+                            msg = escape((m[:70] + "…") if len(m) > 70 else m)
                             st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid #f87171; color:#e2e8f0;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#94a3b8;">{msg}</span></div>""", unsafe_allow_html=True)
                     else:
                         st.caption("_No issues_")
@@ -5531,7 +5539,7 @@ if uploaded_file and start_clicked:
         
         # Always show download logs button so users can share for bug reports
         st.download_button(
-            "≡ƒôÑ Download run logs",
+            "📥 Download run logs",
             logs_text,
             file_name=f"scraper_logs_{run_folder}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             mime="text/plain",
@@ -5540,9 +5548,9 @@ if uploaded_file and start_clicked:
         )
         
         if scrape_error[0]:
-            st.error(f"Γ¥î Scraper error: {scrape_error[0]}")
-            st.warning("≡ƒÆ╛ **Partial results may have been saved.** Scroll up to **'Resume or Download Partial Results'** at the top to download what you have or re-upload your CSV and click Start to resume automatically.")
-            st.info("≡ƒôï **Found a bug?** Click **Download run logs** above and send the file when reporting the issue.")
+            st.error(f"❌ Scraper error: {scrape_error[0]}")
+            st.warning("⚠️ **Partial results may have been saved.** Scroll up to **'Resume or Download Partial Results'** at the top to download what you have or re-upload your CSV and click Start to resume automatically.")
+            st.info("📋 **Found a bug?** Click **Download run logs** above and send the file when reporting the issue.")
 
     # Zip all parts at the end with custom name (CSV and Excel files)
     zip_name = f"{run_folder}.zip"
@@ -5557,9 +5565,9 @@ if uploaded_file and start_clicked:
     # List files in output directory
     try:
         output_files = os.listdir(output_dir)
-        st.info(f"≡ƒôü Found {len(output_files)} files in output directory: {', '.join(output_files[:5])}{'...' if len(output_files) > 5 else ''}")
+        st.info(f"📁 Found {len(output_files)} files in output directory: {', '.join(output_files[:5])}{'...' if len(output_files) > 5 else ''}")
     except Exception as e:
-        st.error(f"Γ¥î Error listing output directory: {e}")
+        st.error(f"❌ Error listing output directory: {e}")
         output_files = []
     
     # Create ZIP file
@@ -5573,21 +5581,21 @@ if uploaded_file and start_clicked:
                             zf.write(file_path, arcname=f)
                             csv_files.append(f)
                         except Exception as e:
-                            st.warning(f"ΓÜá∩╕Å Could not add {f} to ZIP: {e}")
+                            st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
                     elif f.endswith(".xlsx") and f != zip_name and "combined" not in f.lower():
                         try:
                             zf.write(file_path, arcname=f)
                             excel_files.append(f)
                         except Exception as e:
-                            st.warning(f"ΓÜá∩╕Å Could not add {f} to ZIP: {e}")
+                            st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
     except Exception as e:
-        st.error(f"Γ¥î Error creating ZIP file: {e}")
+        st.error(f"❌ Error creating ZIP file: {e}")
         import traceback
         st.error(f"Traceback: {traceback.format_exc()}")
     
     # CRITICAL: Verify files were actually created before proceeding
     if not csv_files and not excel_files:
-        st.error("ΓÜá∩╕Å **WARNING: No CSV or Excel files were generated!**")
+        st.error("⚠️ **WARNING: No CSV or Excel files were generated!**")
         st.error("This might indicate that the writer coroutine failed or no data was processed.")
         st.info("Check the output directory for any error messages or partial files.")
         # Try to list what's actually in the directory
@@ -5600,7 +5608,51 @@ if uploaded_file and start_clicked:
         except Exception as e:
             st.error(f"Could not list output directory: {e}")
     else:
-        st.success(f"Γ£à Scraping finished! Processed {total:,} website(s). Generated {len(csv_files)} CSV file(s) and {len(excel_files)} Excel file(s).")
+        st.success(f"✅ Scraping finished! Processed {total:,} website(s). Generated {len(csv_files)} CSV file(s) and {len(excel_files)} Excel file(s).")
+    
+    # Failed URLs report - full list with error details and download
+    if all_failed_urls:
+        n_failed = len(all_failed_urls)
+        # Group by error type for summary
+        from collections import Counter
+        def _error_type(msg):
+            m = (msg or "").lower()
+            if "timeout" in m or "exceeded" in m: return "Timeout"
+            if "challenge" in m or "cloudflare" in m or "verification" in m: return "Challenge/verification page"
+            if "rate limit" in m: return "Rate limit"
+            if "redirect" in m: return "Redirect"
+            if "insufficient" in m or "too short" in m: return "Insufficient content"
+            if "blocked" in m or "403" in m or "429" in m: return "Blocked/HTTP error"
+            if "ai" in m or "summary" in m or "email" in m: return "AI/email generation"
+            return "Other"
+        type_counts = Counter(_error_type(e.get("message", "")) for e in all_failed_urls)
+        with st.expander(f"⚠️ Failed URLs ({n_failed:,}) — details and download", expanded=True):
+            st.markdown(f"**Summary:** {n_failed:,} of {total:,} URLs failed.")
+            st.markdown("**By error type:** " + ", ".join(f"{t}: {c}" for t, c in type_counts.most_common()))
+            buf = StringIO()
+            w = csv.writer(buf, quoting=csv.QUOTE_ALL)
+            w.writerow(["Website", "Error"])
+            for e in all_failed_urls:
+                w.writerow([e.get("url", ""), (e.get("message", "") or "")[:500]])
+            failed_csv = buf.getvalue()
+            st.download_button(
+                "📥 Download failed URLs (CSV)",
+                failed_csv,
+                file_name=f"failed_urls_{run_folder}.csv",
+                mime="text/csv",
+                key="download_failed_urls"
+            )
+            timeout_count = type_counts.get("Timeout", 0)
+            if timeout_count > n_failed * 0.5:
+                st.warning(f"**Most failures are timeouts ({timeout_count}).** Try increasing **Wait time per site** in Step 2 Settings (e.g. 60–90s), or reduce **Parallel workers** to ease load.")
+            st.caption("Use this list to retry failed URLs separately or increase timeout in Settings.")
+            st.markdown("**Full list:**")
+            display_limit = 50
+            for i, e in enumerate(all_failed_urls[:display_limit]):
+                u, m = e.get("url", ""), e.get("message", "")
+                st.code(f"{u}\n  → {m}", language=None)
+            if n_failed > display_limit:
+                st.caption(f"_Showing first {display_limit} of {n_failed}. Download CSV above for full list._")
     
     # Store file paths and data in session_state for persistence across reruns
     st.session_state['scraping_complete'] = True
@@ -5618,27 +5670,27 @@ if uploaded_file and start_clicked:
             with open(zip_path, 'rb') as f:
                 st.session_state['zip_data'] = f.read()
         else:
-            st.warning(f"ΓÜá∩╕Å ZIP file not found at {zip_path}")
+            st.warning(f"⚠️ ZIP file not found at {zip_path}")
             st.session_state['zip_data'] = None
     except Exception as e:
-        st.error(f"Γ¥î Error reading ZIP file: {e}")
+        st.error(f"❌ Error reading ZIP file: {e}")
         st.session_state['zip_data'] = None
     
     # Show accuracy info for max_chars
     if total > 0:
-        st.info(f"≡ƒÆí **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website. Each website's content was limited to this exact amount.")
+        st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website. Each website's content was limited to this exact amount.")
     
     # Download section (anchor for dark-theme download card styling)
-    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">≡ƒôÑ Download Results</h2>""", unsafe_allow_html=True)
+    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
     with col_dl1:
-        st.subheader("≡ƒôª All Files (ZIP)")
+        st.subheader("📦 All Files (ZIP)")
         zip_data = st.session_state.get('zip_data')
         if zip_data:
             st.download_button(
-                label="Γ¼ç∩╕Å Download ZIP Archive",
+                label="⬇️ Download ZIP Archive",
                 data=zip_data,
                 file_name=zip_name,
                 mime="application/zip",
@@ -5652,7 +5704,7 @@ if uploaded_file and start_clicked:
                     zip_data = f.read()
                     st.session_state['zip_data'] = zip_data
                     st.download_button(
-                        label="Γ¼ç∩╕Å Download ZIP Archive",
+                        label="⬇️ Download ZIP Archive",
                         data=zip_data,
                         file_name=zip_name,
                         mime="application/zip",
@@ -5664,7 +5716,7 @@ if uploaded_file and start_clicked:
         st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
     
     with col_dl2:
-        st.subheader("≡ƒôè Excel Files")
+        st.subheader("📊 Excel Files")
         if excel_files:
             # Create a combined Excel file
             try:
@@ -5713,7 +5765,7 @@ if uploaded_file and start_clicked:
                                         col_indices['EmailCopy'] = 3
                                     
                                     if len(col_indices) < 3:
-                                        st.warning(f"ΓÜá∩╕Å CSV file {csv_file} missing columns. Found: {header_normalized}")
+                                        st.warning(f"⚠️ CSV file {csv_file} missing columns. Found: {header_normalized}")
                                         continue
                                     
                                     # Support 3 or 4 columns (EmailCopy when present)
@@ -5749,7 +5801,7 @@ if uploaded_file and start_clicked:
                                     df_csv = pd.DataFrame(rows_data, columns=use_cols)
                                     csv_all_data.append(df_csv)
                         except Exception as e:
-                            st.warning(f"ΓÜá∩╕Å Error reading CSV {csv_file} for Excel: {e}")
+                            st.warning(f"⚠️ Error reading CSV {csv_file} for Excel: {e}")
                             import traceback
                             st.error(f"Traceback: {traceback.format_exc()}")
                             continue
@@ -5757,17 +5809,17 @@ if uploaded_file and start_clicked:
                 # Fallback: Read from Excel files ONLY if CSV reading completely failed
                 all_data = []
                 if not csv_all_data:
-                    st.warning("ΓÜá∩╕Å No CSV data found, falling back to Excel files (may have wrong data)")
+                    st.warning("⚠️ No CSV data found, falling back to Excel files (may have wrong data)")
                     for excel_file in sorted(excel_files):
                         excel_path = os.path.join(output_dir, excel_file)
                         try:
                             # Check if file exists and has content
                             if not os.path.exists(excel_path):
-                                st.warning(f"ΓÜá∩╕Å Excel file not found: {excel_file}")
+                                st.warning(f"⚠️ Excel file not found: {excel_file}")
                                 continue
                             
                             if os.path.getsize(excel_path) == 0:
-                                st.warning(f"ΓÜá∩╕Å Excel file is empty: {excel_file}")
+                                st.warning(f"⚠️ Excel file is empty: {excel_file}")
                                 continue
                             
                             # Read Excel file with explicit column handling
@@ -5775,7 +5827,7 @@ if uploaded_file and start_clicked:
                             
                             # Check if DataFrame is empty
                             if df_part.empty:
-                                st.warning(f"ΓÜá∩╕Å Excel file {excel_file} contains no data")
+                                st.warning(f"⚠️ Excel file {excel_file} contains no data")
                                 continue
                             
                             # CRITICAL: Normalize column names - handle corrupted/merged headers
@@ -5811,7 +5863,7 @@ if uploaded_file and start_clicked:
                             
                             # Ensure all required columns exist
                             if "Website" not in df_part.columns:
-                                st.warning(f"ΓÜá∩╕Å Excel file {excel_file} missing Website column. Found columns: {list(df_part.columns)}")
+                                st.warning(f"⚠️ Excel file {excel_file} missing Website column. Found columns: {list(df_part.columns)}")
                                 continue
                             
                             if "ScrapedText" not in df_part.columns:
@@ -5837,9 +5889,9 @@ if uploaded_file and start_clicked:
                             if len(df_part) > 0:
                                 all_data.append(df_part)
                             else:
-                                st.warning(f"ΓÜá∩╕Å Excel file {excel_file} has no valid rows after processing")
+                                st.warning(f"⚠️ Excel file {excel_file} has no valid rows after processing")
                         except Exception as e:
-                            st.warning(f"ΓÜá∩╕Å Error reading Excel file {excel_file}: {e}")
+                            st.warning(f"⚠️ Error reading Excel file {excel_file}: {e}")
                             import traceback
                             st.error(f"Traceback: {traceback.format_exc()}")
                             continue
@@ -5853,7 +5905,7 @@ if uploaded_file and start_clicked:
                     combined_cols = EXCEL_COLS_4
                     combined_df = combined_df[combined_cols]
                 elif all_data:
-                    st.warning("ΓÜá∩╕Å CSV reading failed, using Excel files (may have incomplete data)")
+                    st.warning("⚠️ CSV reading failed, using Excel files (may have incomplete data)")
                     combined_df = pd.concat(all_data, ignore_index=True)
                     for c in EXCEL_COLS_4:
                         if c not in combined_df.columns:
@@ -5862,7 +5914,7 @@ if uploaded_file and start_clicked:
                     combined_cols = EXCEL_COLS_4
                     combined_df = combined_df[combined_cols]
                 else:
-                    st.error("Γ¥î No data available to combine")
+                    st.error("❌ No data available to combine")
                     raise ValueError("No data available to combine for Excel file")
                 
                 # Clean the combined DataFrame
@@ -5888,7 +5940,7 @@ if uploaded_file and start_clicked:
                 try:
                     wb.save(excel_buffer)
                 except Exception as save_error:
-                    st.error(f"Γ¥î Excel save failed: {save_error}")
+                    st.error(f"❌ Excel save failed: {save_error}")
                     import traceback
                     st.error(f"Traceback: {traceback.format_exc()}")
                     raise save_error
@@ -5902,7 +5954,7 @@ if uploaded_file and start_clicked:
                 st.session_state['combined_df'] = combined_df  # Store for CSV too
                 
                 st.download_button(
-                    label="Γ¼ç∩╕Å Download Combined Excel",
+                    label="⬇️ Download Combined Excel",
                     data=excel_data,
                     file_name=f"{run_folder}_combined.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5918,7 +5970,7 @@ if uploaded_file and start_clicked:
             st.info("No Excel files generated")
     
     with col_dl3:
-        st.subheader("≡ƒôä CSV Files")
+        st.subheader("📄 CSV Files")
         if csv_files:
             # Create a combined CSV file
             try:
@@ -5932,11 +5984,11 @@ if uploaded_file and start_clicked:
                     try:
                         # Check if file exists and has content
                         if not os.path.exists(csv_path):
-                            st.warning(f"ΓÜá∩╕Å CSV file not found: {csv_file}")
+                            st.warning(f"⚠️ CSV file not found: {csv_file}")
                             continue
                         
                         if os.path.getsize(csv_path) == 0:
-                            st.warning(f"ΓÜá∩╕Å CSV file is empty: {csv_file}")
+                            st.warning(f"⚠️ CSV file is empty: {csv_file}")
                             continue
                         
                         # CRITICAL: Read CSV using Python's csv.reader (not pandas) for perfect round-trip compatibility
@@ -5946,7 +5998,7 @@ if uploaded_file and start_clicked:
                             csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
                             header = next(csv_reader, None)
                             if not header:
-                                st.warning(f"ΓÜá∩╕Å CSV file {csv_file} has no header")
+                                st.warning(f"⚠️ CSV file {csv_file} has no header")
                                 continue
                             
                             # Normalize header - handle any variations
@@ -5976,7 +6028,7 @@ if uploaded_file and start_clicked:
                             if 'EmailCopy' not in col_indices and len(header_normalized) >= 4:
                                 col_indices['EmailCopy'] = 3
                             if len(col_indices) < 3:
-                                st.warning(f"ΓÜá∩╕Å CSV file {csv_file} column mapping incomplete: {col_indices}")
+                                st.warning(f"⚠️ CSV file {csv_file} column mapping incomplete: {col_indices}")
                                 continue
                             num_cols_csv = 4 if 'EmailCopy' in col_indices else 3
                             csv_cols = EXCEL_COLS_4 if 'EmailCopy' in col_indices else EXCEL_COLS_3
@@ -6003,7 +6055,7 @@ if uploaded_file and start_clicked:
                                     rows_data.append(row_dict)
                         
                         if not rows_data:
-                            st.warning(f"ΓÜá∩╕Å CSV file {csv_file} contains no valid data rows")
+                            st.warning(f"⚠️ CSV file {csv_file} contains no valid data rows")
                             continue
                         
                         df_part = pd.DataFrame(rows_data, columns=csv_cols)
@@ -6012,9 +6064,9 @@ if uploaded_file and start_clicked:
                         if len(df_part) > 0:
                             all_data.append(df_part)
                         else:
-                            st.warning(f"ΓÜá∩╕Å CSV file {csv_file} has no valid rows after processing")
+                            st.warning(f"⚠️ CSV file {csv_file} has no valid rows after processing")
                     except Exception as e:
-                        st.warning(f"ΓÜá∩╕Å Error reading CSV file {csv_file}: {e}")
+                        st.warning(f"⚠️ Error reading CSV file {csv_file}: {e}")
                         import traceback
                         st.error(f"Traceback: {traceback.format_exc()}")
                         continue
@@ -6103,12 +6155,12 @@ if uploaded_file and start_clicked:
                         if len(test_rows) > 0:
                             expected_cols = len(csv_cols)
                             if list(test_rows[0]) != csv_cols:
-                                st.warning(f"ΓÜá∩╕Å CSV header validation failed. Expected {csv_cols}, got: {test_rows[0]}")
+                                st.warning(f"⚠️ CSV header validation failed. Expected {csv_cols}, got: {test_rows[0]}")
                             for i, test_row in enumerate(test_rows[1:], start=2):
                                 if len(test_row) != expected_cols:
-                                    st.warning(f"ΓÜá∩╕Å CSV row {i} has {len(test_row)} columns instead of {expected_cols}")
+                                    st.warning(f"⚠️ CSV row {i} has {len(test_row)} columns instead of {expected_cols}")
                     except Exception as e:
-                        st.warning(f"ΓÜá∩╕Å CSV validation error: {e}")
+                        st.warning(f"⚠️ CSV validation error: {e}")
                     
                     # Store for persistence
                     st.session_state['combined_csv_data'] = csv_data
@@ -6116,7 +6168,7 @@ if uploaded_file and start_clicked:
                     st.session_state['combined_csv_filename'] = f"{run_folder}_combined.csv"
                     
                     st.download_button(
-                        label="Γ¼ç∩╕Å Download Combined CSV",
+                        label="⬇️ Download Combined CSV",
                         data=csv_data,
                         file_name=f"{run_folder}_combined.csv",
                         mime="text/csv",
@@ -6133,7 +6185,7 @@ if uploaded_file and start_clicked:
     
     
     # File list
-    with st.expander("≡ƒôï View Generated Files", expanded=False):
+    with st.expander("📋 View Generated Files", expanded=False):
         st.write("**CSV Files:**")
         for f in sorted(csv_files):
             st.code(f, language=None)
@@ -6142,7 +6194,7 @@ if uploaded_file and start_clicked:
             st.code(f, language=None)
         st.write(f"**Location:** `{output_dir}`")
     
-    st.info("≡ƒÆí **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
+    st.info("💡 **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
     
     # Store max_chars info for display
     st.session_state['max_chars_info'] = max_chars
@@ -6159,22 +6211,22 @@ if st.session_state.get('scraping_complete', False):
     total = st.session_state.get('total_processed', 0)
     max_chars = st.session_state.get('max_chars_info', 10000)
     
-    st.success(f"Γ£à Scraping completed! Processed {total:,} website(s).")
+    st.success(f"✅ Scraping completed! Processed {total:,} website(s).")
     
     if total > 0:
-        st.info(f"≡ƒÆí **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
+        st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
     
     # Download section (persistent, same anchor for styling)
-    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">≡ƒôÑ Download Results</h2>""", unsafe_allow_html=True)
+    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
     with col_dl1:
-        st.subheader("≡ƒôª All Files (ZIP)")
+        st.subheader("📦 All Files (ZIP)")
         zip_data = st.session_state.get('zip_data')
         if zip_data:
             st.download_button(
-                label="Γ¼ç∩╕Å Download ZIP Archive",
+                label="⬇️ Download ZIP Archive",
                 data=zip_data,
                 file_name=zip_name,
                 mime="application/zip",
@@ -6189,7 +6241,7 @@ if st.session_state.get('scraping_complete', False):
                         zip_data = f.read()
                         st.session_state['zip_data'] = zip_data
                         st.download_button(
-                            label="Γ¼ç∩╕Å Download ZIP Archive",
+                            label="⬇️ Download ZIP Archive",
                             data=zip_data,
                             file_name=zip_name,
                             mime="application/zip",
@@ -6203,14 +6255,14 @@ if st.session_state.get('scraping_complete', False):
         st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
     
     with col_dl2:
-        st.subheader("≡ƒôè Excel Files")
+        st.subheader("📊 Excel Files")
         excel_data = st.session_state.get('combined_excel_data')
         excel_filename = st.session_state.get('combined_excel_filename')
         combined_df = st.session_state.get('combined_df')
         
         if excel_data and excel_filename:
             st.download_button(
-                label="Γ¼ç∩╕Å Download Combined Excel",
+                label="⬇️ Download Combined Excel",
                 data=excel_data,
                 file_name=excel_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6225,11 +6277,11 @@ if st.session_state.get('scraping_complete', False):
                 # Try to get output_dir from session_state
                 output_dir = st.session_state.get('output_dir')
                 if not output_dir:
-                    st.warning("ΓÜá∩╕Å Output directory not found. Please restart scraping to regenerate Excel file.")
+                    st.warning("⚠️ Output directory not found. Please restart scraping to regenerate Excel file.")
                     output_dir = None
             
             if output_dir:
-                st.info("≡ƒöä Regenerating combined Excel file from existing files...")
+                st.info("🔄 Regenerating combined Excel file from existing files...")
                 try:
                     # CRITICAL: Read from CSV files first (source of truth), NOT Excel files
                     csv_all_data = []
@@ -6289,7 +6341,7 @@ if st.session_state.get('scraping_complete', False):
                                         df_csv = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
                                         csv_all_data.append(df_csv)
                             except Exception as e:
-                                st.warning(f"ΓÜá∩╕Å Error reading CSV {csv_file}: {e}")
+                                st.warning(f"⚠️ Error reading CSV {csv_file}: {e}")
                                 continue
                     
                     # Use CSV data if available, otherwise fall back to Excel files
@@ -6344,7 +6396,7 @@ if st.session_state.get('scraping_complete', False):
                                     if len(df_part) > 0:
                                         all_data.append(df_part)
                             except Exception as e:
-                                st.warning(f"ΓÜá∩╕Å Error reading Excel {excel_file}: {e}")
+                                st.warning(f"⚠️ Error reading Excel {excel_file}: {e}")
                                 continue
                         if all_data:
                             combined_df = pd.concat(all_data, ignore_index=True)
@@ -6356,10 +6408,10 @@ if st.session_state.get('scraping_complete', False):
                             combined_cols = EXCEL_COLS_4 if "EmailCopy" in combined_df.columns else EXCEL_COLS_3
                             combined_df = combined_df[combined_cols]
                         else:
-                            st.error("Γ¥î No data available to combine")
+                            st.error("❌ No data available to combine")
                             combined_df = None
                     else:
-                        st.error("Γ¥î No data available to combine")
+                        st.error("❌ No data available to combine")
                         combined_df = None
                     
                     if combined_df is not None and len(combined_df) > 0:
@@ -6387,7 +6439,7 @@ if st.session_state.get('scraping_complete', False):
                         try:
                             wb.save(excel_buffer)
                         except Exception as save_error:
-                            st.error(f"Γ¥î Excel save failed: {save_error}")
+                            st.error(f"❌ Excel save failed: {save_error}")
                             import traceback
                             st.error(f"Traceback: {traceback.format_exc()}")
                             raise save_error
@@ -6401,7 +6453,7 @@ if st.session_state.get('scraping_complete', False):
                         st.session_state['combined_df'] = combined_df
                         
                         st.download_button(
-                            label="Γ¼ç∩╕Å Download Combined Excel",
+                            label="⬇️ Download Combined Excel",
                             data=excel_data,
                             file_name=f"{run_folder}_combined.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6410,9 +6462,9 @@ if st.session_state.get('scraping_complete', False):
                         )
                         st.caption(f"{len(combined_df)} total rows")
                     else:
-                        st.warning("ΓÜá∩╕Å No data found in Excel files to combine")
+                        st.warning("⚠️ No data found in Excel files to combine")
                 except Exception as e:
-                    st.error(f"Γ¥î Error generating combined Excel file: {e}")
+                    st.error(f"❌ Error generating combined Excel file: {e}")
                     import traceback
                     st.error(f"Traceback: {traceback.format_exc()}")
                     st.info("Individual Excel files are available in the ZIP archive")
@@ -6421,19 +6473,19 @@ if st.session_state.get('scraping_complete', False):
                         st.info(f"Found {len(excel_files)} Excel file(s): {', '.join(excel_files[:3])}{'...' if len(excel_files) > 3 else ''}")
         elif excel_files:
             # Excel files exist but output_dir is missing - this shouldn't happen, but handle it
-            st.warning(f"ΓÜá∩╕Å Found {len(excel_files)} Excel file(s) but output directory is not set. Please restart scraping.")
+            st.warning(f"⚠️ Found {len(excel_files)} Excel file(s) but output directory is not set. Please restart scraping.")
         else:
             st.info("No Excel files generated")
     
     with col_dl3:
-        st.subheader("≡ƒôä CSV Files")
+        st.subheader("📄 CSV Files")
         csv_data = st.session_state.get('combined_csv_data')
         csv_filename = st.session_state.get('combined_csv_filename')
         combined_df = st.session_state.get('combined_df')
         
         if csv_data and csv_filename:
             st.download_button(
-                label="Γ¼ç∩╕Å Download Combined CSV",
+                label="⬇️ Download Combined CSV",
                 data=csv_data,
                 file_name=csv_filename,
                 mime="text/csv",
@@ -6449,7 +6501,7 @@ if st.session_state.get('scraping_complete', False):
     
     
     # File list
-    with st.expander("≡ƒôï View Generated Files", expanded=False):
+    with st.expander("📋 View Generated Files", expanded=False):
         st.write("**CSV Files:**")
         for f in sorted(csv_files):
             st.code(f, language=None)
@@ -6459,10 +6511,10 @@ if st.session_state.get('scraping_complete', False):
         if output_dir:
             st.write(f"**Location:** `{output_dir}`")
     
-    st.info("≡ƒÆí **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
+    st.info("💡 **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
     
     # Option to clear results
-    if st.button("≡ƒùæ∩╕Å Clear Results", help="Clear download buttons and start fresh", key="clear_results"):
+    if st.button("🗑️ Clear Results", help="Clear download buttons and start fresh", key="clear_results"):
         st.session_state['scraping_complete'] = False
         st.session_state.pop('output_dir', None)
         st.session_state.pop('zip_data', None)
