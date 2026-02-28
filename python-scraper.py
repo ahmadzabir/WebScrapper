@@ -14,6 +14,22 @@ import json
 import random
 import threading
 from collections import deque
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
+import hashlib
+
+# Phase 3: Extraction pipeline imports
+try:
+    from bs4 import BeautifulSoup
+    BEAUTIFULSOUP_AVAILABLE = True
+except ImportError:
+    BEAUTIFULSOUP_AVAILABLE = False
+
+try:
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+except ImportError:
+    TRAFILATURA_AVAILABLE = False
 
 # AI imports (optional - only if API keys provided)
 try:
@@ -53,6 +69,882 @@ def _get_concurrency_max() -> int:
 def _should_use_fast_mode(total_urls: int) -> bool:
     """Auto-enable fast mode for large runs (500+ URLs)."""
     return total_urls >= 500
+
+
+# -------------------------
+# Phase 0: Measurement Infrastructure
+# -------------------------
+
+@dataclass
+class ScrapeResult:
+    """Structured result object for tracking scrape outcomes."""
+    url: str
+    result_status: str = "unknown"  # success, failed, partial
+    http_status: Optional[int] = None
+    exception_type: Optional[str] = None
+    stage_failed: Optional[str] = None  # connect, read, parse, decode
+    html_bytes: int = 0
+    cleaned_chars: int = 0
+    detected_js_shell: bool = False
+    detected_block_page: bool = False
+    retries_used: int = 0
+    total_seconds: float = 0.0
+    content_type: Optional[str] = None
+    encoding_used: Optional[str] = None
+    error_message: Optional[str] = None
+    sample_html: Optional[str] = None  # First 2000 chars for debugging
+    extracted_method: str = "unknown"  # direct, cache, playwright, jsonld, head_only
+    
+    def to_dict(self) -> dict:
+        return {
+            'url': self.url,
+            'result_status': self.result_status,
+            'http_status': self.http_status,
+            'exception_type': self.exception_type,
+            'stage_failed': self.stage_failed,
+            'html_bytes': self.html_bytes,
+            'cleaned_chars': self.cleaned_chars,
+            'detected_js_shell': self.detected_js_shell,
+            'detected_block_page': self.detected_block_page,
+            'retries_used': self.retries_used,
+            'total_seconds': round(self.total_seconds, 2),
+            'content_type': self.content_type,
+            'encoding_used': self.encoding_used,
+            'error_message': self.error_message,
+            'extracted_method': self.extracted_method,
+        }
+
+
+class FailureTracker:
+    """Track and categorize failures for analysis."""
+    
+    def __init__(self):
+        self.results: List[ScrapeResult] = []
+        self.failure_buckets: Dict[str, List[ScrapeResult]] = {}
+        self.html_samples: Dict[str, str] = {}  # Store sample HTML per bucket
+        
+    def add_result(self, result: ScrapeResult):
+        self.results.append(result)
+        
+        if result.result_status != "success":
+            bucket_key = self._get_bucket_key(result)
+            if bucket_key not in self.failure_buckets:
+                self.failure_buckets[bucket_key] = []
+            self.failure_buckets[bucket_key].append(result)
+            
+            # Store one sample HTML per bucket (first 2000 chars)
+            if bucket_key not in self.html_samples and result.sample_html:
+                self.html_samples[bucket_key] = result.sample_html[:2000]
+    
+    def _get_bucket_key(self, result: ScrapeResult) -> str:
+        """Generate failure bucket key from result."""
+        if result.exception_type:
+            return f"{result.stage_failed}:{result.exception_type}"
+        elif result.http_status:
+            return f"http_{result.http_status}"
+        elif result.detected_block_page:
+            return "detected:block_page"
+        elif result.cleaned_chars < 200:
+            return "content:insufficient"
+        else:
+            return "unknown"
+    
+    def get_top_failures(self, n: int = 10) -> List[tuple]:
+        """Get top N failure buckets with counts."""
+        sorted_buckets = sorted(
+            self.failure_buckets.items(),
+            key=lambda x: len(x[1]),
+            reverse=True
+        )
+        return [(key, len(results)) for key, results in sorted_buckets[:n]]
+    
+    def get_failure_csv(self) -> str:
+        """Generate CSV of all failures."""
+        import csv
+        import io
+        output = io.StringIO()
+        if self.results:
+            fieldnames = ['url', 'result_status', 'http_status', 'exception_type', 
+                         'stage_failed', 'html_bytes', 'cleaned_chars', 'error_message']
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            for result in self.results:
+                if result.result_status != "success":
+                    writer.writerow(result.to_dict())
+        return output.getvalue()
+    
+    def get_summary_stats(self) -> dict:
+        """Get summary statistics."""
+        total = len(self.results)
+        successes = sum(1 for r in self.results if r.result_status == "success")
+        partials = sum(1 for r in self.results if r.result_status == "partial")
+        failures = total - successes - partials
+        
+        return {
+            'total': total,
+            'successes': successes,
+            'partials': partials,
+            'failures': failures,
+            'success_rate': round(successes / total * 100, 1) if total > 0 else 0,
+            'top_failures': self.get_top_failures(5),
+            'html_samples': self.html_samples
+        }
+
+
+# Global failure tracker (per session)
+_failure_tracker = None
+
+def get_failure_tracker() -> FailureTracker:
+    global _failure_tracker
+    if _failure_tracker is None:
+        _failure_tracker = FailureTracker()
+    return _failure_tracker
+
+def reset_failure_tracker():
+    global _failure_tracker
+    _failure_tracker = FailureTracker()
+
+
+# -------------------------
+# Phase 1: Cloud Mode & Compression Settings
+# -------------------------
+
+def is_cloud_mode() -> bool:
+    """Detect if running in cloud/limited environment."""
+    # Check for common cloud environment indicators
+    cloud_indicators = [
+        'STREAMLIT_SHARING_MODE',
+        'STREAMLIT_CLOUD',
+        'KUBERNETES_SERVICE_HOST',
+    ]
+    for indicator in cloud_indicators:
+        if os.environ.get(indicator):
+            return True
+    
+    # Check for Streamlit's own detection
+    try:
+        import streamlit as st
+        # If we can get this info from Streamlit's runtime
+        if hasattr(st, '_is_running_with_streamlit'):
+            return True
+    except:
+        pass
+    
+    # Default to True for safety in unknown environments
+    return True
+
+
+def get_safe_headers() -> dict:
+    """Get headers that work reliably in cloud mode."""
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        # Phase 1: Disable Brotli to avoid edge cases
+        "Accept-Encoding": "gzip, deflate",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    return base_headers
+
+
+def is_html_content(content_type: str) -> bool:
+    """Check if content type indicates HTML."""
+    if not content_type:
+        return False
+    content_type = content_type.lower()
+    html_indicators = ['text/html', 'application/xhtml', 'application/xhtml+xml']
+    return any(ind in content_type for ind in html_indicators)
+
+
+def is_likely_error_page(html: str) -> tuple[bool, str]:
+    """Detect if HTML is likely an error page."""
+    if not html or len(html) < 100:
+        return True, "too_short"
+    
+    html_lower = html.lower()
+    
+    # Check for block pages
+    block_indicators = [
+        "access denied", "forbidden", "blocked", "captcha", 
+        "challenge", "one moment", "checking your browser",
+        "please wait", "rate limit", "too many requests"
+    ]
+    for indicator in block_indicators:
+        if indicator in html_lower:
+            return True, f"block_page:{indicator}"
+    
+    # Check for error HTTP status codes in content
+    if "404 not found" in html_lower or "error 404" in html_lower:
+        return True, "error:404"
+    
+    if "500 internal server" in html_lower or "error 500" in html_lower:
+        return True, "error:500"
+    
+    return False, ""
+
+
+# -------------------------
+# Phase 3: 3-Layer Extraction Pipeline
+# -------------------------
+
+class ExtractionResult:
+    """Result from extraction pipeline."""
+    def __init__(self, text: str, method: str, confidence: float, metadata: dict = None):
+        self.text = text
+        self.method = method
+        self.confidence = confidence
+        self.metadata = metadata or {}
+        self.length = len(text) if text else 0
+
+
+def extract_head_content(html: str) -> dict:
+    """Extract content from head section (Layer 3)."""
+    result = {}
+    if not html:
+        return result
+    
+    try:
+        # Parse with BeautifulSoup if available
+        if BEAUTIFULSOUP_AVAILABLE:
+            soup = BeautifulSoup(html, 'html.parser')
+        else:
+            # Fallback to regex
+            result['title'] = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+            if result['title']:
+                result['title'] = result['title'].group(1).strip()
+            return result
+        
+        # Extract title
+        title = soup.find('title')
+        if title:
+            result['title'] = title.get_text().strip()
+        
+        # Extract meta description
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc:
+            result['description'] = meta_desc.get('content', '').strip()
+        
+        # Extract OpenGraph tags
+        og_tags = {}
+        for tag in soup.find_all('meta', property=re.compile(r'^og:')):
+            prop = tag.get('property', '').replace('og:', '')
+            content = tag.get('content', '').strip()
+            if prop and content:
+                og_tags[prop] = content
+        result['opengraph'] = og_tags
+        
+        # Extract JSON-LD
+        jsonld_scripts = []
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                data = json.loads(script.string)
+                jsonld_scripts.append(data)
+            except:
+                pass
+        result['jsonld'] = jsonld_scripts
+        
+        # Check for Next.js data
+        next_data = soup.find('script', id='__NEXT_DATA__')
+        if next_data:
+            try:
+                result['nextjs'] = json.loads(next_data.string)
+            except:
+                pass
+        
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+
+def layer1_dom_extraction(html: str) -> ExtractionResult:
+    """Layer 1: Basic DOM text extraction with BeautifulSoup."""
+    if not BEAUTIFULSOUP_AVAILABLE or not html:
+        # Fallback to regex-based cleanup
+        cleaned = cleanup_html(html) if html else ""
+        return ExtractionResult(
+            text=cleaned,
+            method="regex_fallback",
+            confidence=0.3 if cleaned else 0.0
+        )
+    
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Remove unwanted elements
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 
+                         'noscript', 'iframe', 'svg', 'canvas', 'form', 'button']):
+            tag.decompose()
+        
+        # Remove elements with noise classes/ids
+        noise_patterns = re.compile(r'(cookie|ad|popup|modal|banner|promo|newsletter|subscribe)')
+        for tag in soup.find_all(class_=noise_patterns):
+            tag.decompose()
+        for tag in soup.find_all(id=noise_patterns):
+            tag.decompose()
+        
+        # Extract text from meaningful elements
+        text_parts = []
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'li', 'article', 'section']):
+            text = tag.get_text().strip()
+            if text and len(text) > 10:
+                text_parts.append(text)
+        
+        # Also get body text
+        body = soup.find('body')
+        if body:
+            full_text = body.get_text(separator='\n', strip=True)
+            # Deduplicate
+            seen = set()
+            unique_parts = []
+            for part in text_parts:
+                if part not in seen:
+                    seen.add(part)
+                    unique_parts.append(part)
+            
+            result_text = '\n\n'.join(unique_parts) if unique_parts else full_text
+        else:
+            result_text = '\n\n'.join(text_parts)
+        
+        # Clean up excessive whitespace
+        result_text = re.sub(r'\n{3,}', '\n\n', result_text)
+        result_text = re.sub(r' {2,}', ' ', result_text)
+        
+        confidence = min(0.6, 0.3 + len(result_text) / 5000)
+        
+        return ExtractionResult(
+            text=result_text,
+            method="dom_extraction",
+            confidence=confidence
+        )
+        
+    except Exception as e:
+        return ExtractionResult(
+            text="",
+            method="dom_extraction_failed",
+            confidence=0.0,
+            metadata={'error': str(e)}
+        )
+
+
+def layer2_readability_extraction(html: str, url: str = "") -> ExtractionResult:
+    """Layer 2: Readability-style extraction."""
+    if TRAFILATURA_AVAILABLE:
+        try:
+            # Use trafilatura for content extraction
+            text = trafilatura.extract(
+                html,
+                url=url,
+                include_comments=False,
+                include_tables=False,
+                no_fallback=True
+            )
+            
+            if text and len(text) > 100:
+                return ExtractionResult(
+                    text=text,
+                    method="readability_trafilatura",
+                    confidence=0.85
+                )
+        except Exception as e:
+            pass
+    
+    # Fallback to layer 1
+    return layer1_dom_extraction(html)
+
+
+def layer3_head_signals(html: str) -> ExtractionResult:
+    """Layer 3: Extract from head section when body is thin."""
+    head_data = extract_head_content(html)
+    
+    parts = []
+    
+    if 'title' in head_data:
+        parts.append(f"Title: {head_data['title']}")
+    
+    if 'description' in head_data:
+        parts.append(f"Description: {head_data['description']}")
+    
+    if 'opengraph' in head_data:
+        og = head_data['opengraph']
+        if 'title' in og:
+            parts.append(f"OG Title: {og['title']}")
+        if 'description' in og:
+            parts.append(f"OG Description: {og['description']}")
+    
+    # Extract from JSON-LD
+    if 'jsonld' in head_data:
+        for item in head_data['jsonld']:
+            if isinstance(item, dict):
+                if 'description' in item:
+                    parts.append(f"JSON-LD: {item['description']}")
+                if 'name' in item:
+                    parts.append(f"Name: {item['name']}")
+    
+    result_text = '\n\n'.join(parts)
+    
+    confidence = min(0.5, 0.2 + len(result_text) / 1000)
+    
+    return ExtractionResult(
+        text=result_text,
+        method="head_signals",
+        confidence=confidence,
+        metadata=head_data
+    )
+
+
+def phase4_js_shell_detection(html: str) -> tuple[bool, dict]:
+    """Phase 4: Detect JavaScript shell patterns and extract embedded data."""
+    if not html:
+        return False, {}
+    
+    html_lower = html.lower()
+    indicators = {
+        'script_ratio': 0,
+        'visible_text_ratio': 0,
+        'has_framework_markers': False,
+        'has_next_data': False,
+        'has_jsonld': False
+    }
+    
+    # Check for framework markers
+    framework_markers = ['react', 'vue', 'angular', 'next.js', 'nuxt', 'gatsby']
+    indicators['has_framework_markers'] = any(marker in html_lower for marker in framework_markers)
+    
+    # Check for Next.js data
+    indicators['has_next_data'] = '__NEXT_DATA__' in html
+    
+    # Check for JSON-LD
+    indicators['has_jsonld'] = 'application/ld+json' in html
+    
+    # Calculate script ratio
+    script_tags = len(re.findall(r'<script', html_lower))
+    total_len = len(html)
+    indicators['script_ratio'] = script_tags / max(total_len / 1000, 1)
+    
+    # Check visible text
+    visible_text = re.sub(r'<[^>]+>', '', html)
+    visible_text = re.sub(r'\s+', ' ', visible_text).strip()
+    indicators['visible_text_ratio'] = len(visible_text) / max(total_len, 1)
+    
+    # JS shell: high script ratio, low visible text
+    is_js_shell = (
+        indicators['script_ratio'] > 0.1 and 
+        indicators['visible_text_ratio'] < 0.1
+    ) or indicators['has_framework_markers']
+    
+    return is_js_shell, indicators
+
+
+def extract_from_js_payloads(html: str) -> ExtractionResult:
+    """Phase 4: Extract content from JavaScript payloads."""
+    results = []
+    
+    # Try Next.js data
+    next_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if next_match:
+        try:
+            data = json.loads(next_match.group(1))
+            # Extract from props
+            if 'props' in data and 'pageProps' in data['props']:
+                page_props = data['props']['pageProps']
+                if isinstance(page_props, dict):
+                    # Look for content fields
+                    for key in ['content', 'description', 'body', 'text', 'data']:
+                        if key in page_props and isinstance(page_props[key], str):
+                            results.append(page_props[key])
+        except:
+            pass
+    
+    # Try to extract from JSON-LD
+    jsonld_pattern = re.compile(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', re.DOTALL)
+    for match in jsonld_pattern.finditer(html):
+        try:
+            data = json.loads(match.group(1))
+            if isinstance(data, dict):
+                for key in ['description', 'articleBody', 'text']:
+                    if key in data and isinstance(data[key], str):
+                        results.append(data[key])
+        except:
+            pass
+    
+    if results:
+        combined = '\n\n'.join(results)
+        return ExtractionResult(
+            text=combined,
+            method="js_payload_extraction",
+            confidence=0.6
+        )
+    
+    return ExtractionResult(
+        text="",
+        method="js_payload_extraction_failed",
+        confidence=0.0
+    )
+
+
+def run_extraction_pipeline(html: str, url: str = "", result_tracker: Optional[ScrapeResult] = None) -> tuple[str, str, float]:
+    """
+    Run the full 3-layer extraction pipeline.
+    Returns: (extracted_text, method_used, confidence_score)
+    """
+    if not html:
+        if result_tracker:
+            result_tracker.stage_failed = "parse"
+            result_tracker.exception_type = "empty_html"
+        return "", "no_content", 0.0
+    
+    # Phase 4: Check for JS shell
+    is_js_shell, js_indicators = phase4_js_shell_detection(html)
+    
+    if is_js_shell:
+        # Try to extract from JS payloads first
+        js_result = extract_from_js_payloads(html)
+        if js_result.length > 200:
+            if result_tracker:
+                result_tracker.extracted_method = "js_payload"
+                result_tracker.detected_js_shell = True
+            return js_result.text, js_result.method, js_result.confidence
+    
+    # Layer 2: Readability extraction
+    readability_result = layer2_readability_extraction(html, url)
+    if readability_result.length >= 200:
+        if result_tracker:
+            result_tracker.extracted_method = readability_result.method
+        return readability_result.text, readability_result.method, readability_result.confidence
+    
+    # Layer 1: DOM extraction (fallback)
+    dom_result = layer1_dom_extraction(html)
+    if dom_result.length >= 200:
+        if result_tracker:
+            result_tracker.extracted_method = dom_result.method
+        return dom_result.text, dom_result.method, dom_result.confidence
+    
+    # Layer 3: Head signals (when body is thin)
+    head_result = layer3_head_signals(html)
+    if head_result.length > 50:
+        if result_tracker:
+            result_tracker.extracted_method = head_result.method
+        # Mark as partial success
+        combined = head_result.text + "\n\n" + dom_result.text if dom_result.text else head_result.text
+        return combined, "head_plus_partial", 0.4
+    
+    # If all layers failed, return whatever we got from DOM
+    if result_tracker:
+        result_tracker.extracted_method = "dom_fallback"
+        result_tracker.stage_failed = "content_insufficient"
+    
+    return dom_result.text, "extraction_failed", min(0.2, dom_result.confidence)
+
+
+# -------------------------
+# Phase 5: Circuit Breaker & Smart Retries
+# -------------------------
+
+class DomainCircuitBreaker:
+    """Circuit breaker for per-domain rate limiting and backoff."""
+    
+    def __init__(self):
+        self.domain_states: Dict[str, dict] = {}
+        self.domain_identities: Dict[str, dict] = {}  # Phase 2: stable identity
+    
+    def get_domain_state(self, domain: str) -> dict:
+        if domain not in self.domain_states:
+            self.domain_states[domain] = {
+                'consecutive_errors': 0,
+                'last_error_time': 0,
+                'cooldown_until': 0,
+                'health_score': 100,
+                'requests_this_minute': 0,
+                'last_request_time': 0
+            }
+        return self.domain_states[domain]
+    
+    def get_identity(self, domain: str) -> dict:
+        """Phase 2: Get stable identity for domain."""
+        if domain not in self.domain_identities:
+            # Create consistent identity
+            import random
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
+            ]
+            accept_langs = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-US,en;q=0.9,fr;q=0.8"]
+            viewports = [(1920, 1080), (1366, 768), (1440, 900)]
+            
+            identity = {
+                'user_agent': random.choice(user_agents),
+                'accept_language': random.choice(accept_langs),
+                'viewport': random.choice(viewports),
+                'accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                'created_at': time.time()
+            }
+            self.domain_identities[domain] = identity
+        return self.domain_identities[domain]
+    
+    def can_request(self, domain: str) -> tuple[bool, float]:
+        """Check if request is allowed and return wait time if not."""
+        state = self.get_domain_state(domain)
+        now = time.time()
+        
+        # Check cooldown
+        if now < state['cooldown_until']:
+            wait = state['cooldown_until'] - now
+            return False, wait
+        
+        # Check per-minute rate
+        if now - state['last_request_time'] > 60:
+            state['requests_this_minute'] = 0
+        
+        if state['requests_this_minute'] >= 10:  # Max 10 per minute per domain
+            return False, 6.0  # Wait 6 seconds
+        
+        # Health-based rate limiting
+        if state['health_score'] < 50:
+            return False, 30.0  # Cool down for 30s
+        
+        return True, 0.0
+    
+    def record_result(self, domain: str, success: bool, http_status: int = None):
+        """Record request result and update health."""
+        state = self.get_domain_state(domain)
+        now = time.time()
+        
+        state['requests_this_minute'] += 1
+        state['last_request_time'] = now
+        
+        if success:
+            state['consecutive_errors'] = 0
+            state['health_score'] = min(100, state['health_score'] + 10)
+        else:
+            state['consecutive_errors'] += 1
+            state['health_score'] = max(0, state['health_score'] - 20)
+            
+            # Activate cooldown on repeated errors
+            if state['consecutive_errors'] >= 3:
+                if http_status in [429, 403]:
+                    state['cooldown_until'] = now + 60  # 1 minute cooldown
+                else:
+                    state['cooldown_until'] = now + 30  # 30s cooldown
+    
+    def get_headers_for_domain(self, domain: str, cloud_mode: bool = True) -> dict:
+        """Get stable headers for domain."""
+        identity = self.get_identity(domain)
+        
+        if cloud_mode:
+            # Safe headers for cloud
+            return {
+                "User-Agent": identity['user_agent'],
+                "Accept": identity['accept'],
+                "Accept-Language": identity['accept_language'],
+                "Accept-Encoding": "gzip, deflate",  # No Brotli
+                "DNT": "1",
+                "Connection": "keep-alive",
+            }
+        else:
+            # Full headers for local
+            return {
+                "User-Agent": identity['user_agent'],
+                "Accept": identity['accept'],
+                "Accept-Language": identity['accept_language'],
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+            }
+
+
+# Global circuit breaker instance
+_circuit_breaker = DomainCircuitBreaker()
+
+def get_circuit_breaker() -> DomainCircuitBreaker:
+    return _circuit_breaker
+
+
+# -------------------------
+# Phase 6: Intelligent Link Discovery
+# -------------------------
+
+LINK_PRIORITY_KEYWORDS = [
+    ('about', 10),
+    ('services', 9),
+    ('service', 9),
+    ('products', 8),
+    ('product', 8),
+    ('solutions', 8),
+    ('solution', 8),
+    ('pricing', 7),
+    ('features', 7),
+    ('feature', 7),
+    ('case-studies', 6),
+    ('casestudies', 6),
+    ('case-study', 6),
+    ('contact', 5),
+    ('team', 4),
+    ('company', 4),
+    ('industries', 3),
+    ('industry', 3),
+]
+
+def score_link(url: str, link_text: str = "", base_domain: str = "") -> int:
+    """Score a link based on priority keywords and path characteristics."""
+    score = 0
+    url_lower = url.lower()
+    text_lower = link_text.lower()
+    
+    # Check for priority keywords
+    for keyword, weight in LINK_PRIORITY_KEYWORDS:
+        if keyword in url_lower or keyword in text_lower:
+            score += weight
+    
+    # Prefer shorter paths
+    path_depth = url.count('/')
+    if path_depth <= 1:
+        score += 3
+    elif path_depth <= 2:
+        score += 1
+    
+    # Prefer same domain
+    if base_domain and base_domain in url:
+        score += 2
+    
+    # Penalize assets
+    asset_extensions = ['.pdf', '.jpg', '.png', '.gif', '.css', '.js', '.zip']
+    if any(url_lower.endswith(ext) for ext in asset_extensions):
+        score -= 10
+    
+    return max(0, score)
+
+
+def discover_links_intelligent(html: str, base_url: str, max_links: int = 5) -> List[str]:
+    """Phase 6: Score and return top N links."""
+    if not html or not BEAUTIFULSOUP_AVAILABLE:
+        # Fallback to simple regex
+        return extract_links_simple(html, base_url)[:max_links]
+    
+    try:
+        from urllib.parse import urljoin, urlparse
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        base_domain = urlparse(base_url).netloc
+        
+        scored_links = []
+        seen = set()
+        
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            link_text = a_tag.get_text().strip()
+            
+            # Resolve relative URLs
+            full_url = urljoin(base_url, href)
+            parsed = urlparse(full_url)
+            
+            # Skip non-HTTP, anchors, and external domains
+            if not parsed.scheme.startswith('http'):
+                continue
+            if href.startswith('#') or href.startswith('mailto:'):
+                continue
+            if parsed.netloc != base_domain and not parsed.netloc.endswith('.' + base_domain):
+                continue
+            
+            # Normalize and dedupe
+            normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            
+            # Score
+            link_score = score_link(normalized, link_text, base_domain)
+            scored_links.append((normalized, link_score))
+        
+        # Sort by score descending
+        scored_links.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top N
+        return [url for url, score in scored_links[:max_links]]
+        
+    except Exception as e:
+        # Fallback
+        return extract_links_simple(html, base_url)[:max_links]
+
+
+def extract_links_simple(html: str, base_url: str) -> List[str]:
+    """Simple regex-based link extraction as fallback."""
+    from urllib.parse import urljoin, urlparse
+    
+    if not html:
+        return []
+    
+    base_domain = urlparse(base_url).netloc
+    links = []
+    seen = set()
+    
+    # Simple href extraction
+    matches = re.findall(r'href=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    
+    for href in matches:
+        try:
+            full_url = urljoin(base_url, href)
+            parsed = urlparse(full_url)
+            
+            if parsed.netloc == base_domain or parsed.netloc.endswith('.' + base_domain):
+                normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if normalized not in seen:
+                    seen.add(normalized)
+                    links.append(normalized)
+        except:
+            continue
+    
+    return links
+
+
+# -------------------------
+# Phase 8: Ethics & Robots.txt
+# -------------------------
+
+def check_robots_txt(domain: str, user_agent: str = "*") -> tuple[bool, float]:
+    """
+    Phase 8: Optional robots.txt check.
+    Returns: (is_allowed, crawl_delay)
+    """
+    try:
+        robots_url = f"https://{domain}/robots.txt"
+        import urllib.request
+        
+        req = urllib.request.Request(
+            robots_url,
+            headers={'User-Agent': 'WebScraperBot/1.0'},
+            timeout=5
+        )
+        
+        with urllib.request.urlopen(req) as response:
+            robots_content = response.read().decode('utf-8', errors='ignore')
+        
+        # Simple parsing
+        lines = robots_content.split('\n')
+        current_ua = None
+        crawl_delay = 0
+        
+        for line in lines:
+            line = line.strip().lower()
+            if line.startswith('user-agent:'):
+                current_ua = line.split(':', 1)[1].strip()
+            elif line.startswith('crawl-delay:') and (current_ua == '*' or current_ua in user_agent.lower()):
+                try:
+                    crawl_delay = float(line.split(':', 1)[1].strip())
+                except:
+                    pass
+            elif line.startswith('disallow:') and (current_ua == '*' or current_ua in user_agent.lower()):
+                # Simplified check - actual path matching would be more complex
+                pass
+        
+        return True, crawl_delay
+        
+    except Exception as e:
+        # If robots.txt fails, assume allowed
+        return True, 0
 
 
 def normalize_url(url: str) -> str:
