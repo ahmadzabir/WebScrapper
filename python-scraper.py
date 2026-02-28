@@ -9,7 +9,7 @@ import zipfile
 from html import unescape, escape
 import streamlit as st
 from datetime import datetime
-from io import BytesIO, StringIO, StringIO
+from io import BytesIO, StringIO
 import json
 import random
 import threading
@@ -2833,10 +2833,13 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                            total_urls: int, progress_callback,
                            start_part: int = 0, checkpoint_data: dict | None = None,
                            checkpoint_path: str | None = None,
-                           log_callback=None, include_email_copy: bool = False):
+                           log_callback=None, include_email_copy: bool = False,
+                           original_df: pd.DataFrame = None, csv_config: dict = None):
     """
     Write results to disk. If checkpoint_data and checkpoint_path are provided,
     saves progress after each file write for crash recovery and resume.
+    
+    If original_df is provided, merges scraped data with original CSV columns.
     """
     def emit(msg: str):
         print(msg)
@@ -2855,6 +2858,23 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         import traceback
         traceback.print_exc()
         return  # Exit if we can't create directory
+    
+    # Prepare original DataFrame for merging if provided
+    has_original_df = original_df is not None and not original_df.empty
+    url_col = csv_config.get('url_column') if csv_config else None
+    has_headers = csv_config.get('has_headers', True) if csv_config else True
+    
+    if has_original_df:
+        # Make a copy to avoid modifying the original
+        enriched_df = original_df.copy()
+        # Add new columns for scraped data
+        enriched_df['ScrapedText'] = ''
+        enriched_df['CompanySummary'] = ''
+        if include_email_copy:
+            enriched_df['EmailCopy'] = ''
+        emit(f"📊 Writer: Will merge results with original CSV ({len(enriched_df)} rows, {len(enriched_df.columns)} columns)")
+    else:
+        enriched_df = None
     
     loop = asyncio.get_running_loop()
     buffer = []
@@ -2877,11 +2897,39 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         if progress_callback:
             progress_callback(processed, total_urls)
 
+        # Process results and update enriched_df if available
+        if has_original_df and buffer:
+            for row in buffer:
+                if len(row) >= 3:
+                    url = str(row[0]).strip() if row[0] else ""
+                    scraped_text = str(row[1]) if row[1] else ""
+                    ai_summary = str(row[2]) if row[2] else ""
+                    email_copy = str(row[3]) if include_email_copy and len(row) >= 4 else ""
+                    
+                    if url:
+                        # Find matching row in original DataFrame by URL
+                        try:
+                            # Match by URL column - normalize both for comparison
+                            url_col_values = enriched_df.iloc[:, url_col_idx if not has_headers else list(enriched_df.columns).index(url_col)].astype(str).str.strip()
+                            match_mask = url_col_values == url
+                            if match_mask.any():
+                                idx = match_mask.idxmax()
+                                enriched_df.at[idx, 'ScrapedText'] = scraped_text
+                                enriched_df.at[idx, 'CompanySummary'] = ai_summary
+                                if include_email_copy:
+                                    enriched_df.at[idx, 'EmailCopy'] = email_copy
+                        except Exception as e:
+                            emit(f"⚠️ Writer: Error merging row for {url[:50]}: {e}")
+            
+            # Clear buffer after processing (we've merged into enriched_df)
+            buffer = []
+        
         # Write chunks to disk when:
         # 1) regular threshold is reached, or
         # 2) enough time passed with partial buffer (prevents progress loss on sudden refresh/crash)
+        # NOTE: When using original_df, we don't chunk - we save at the end
         while len(buffer) >= rows_per_file or (
-            len(buffer) >= emergency_flush_min_rows and (time.time() - last_flush_ts) >= emergency_flush_every_s
+            len(buffer) >= emergency_flush_min_rows and (time.time() - last_flush_ts) >= emergency_flush_every_s and not has_original_df
         ):
             part += 1
             chunk_size = rows_per_file if len(buffer) >= rows_per_file else len(buffer)
@@ -3170,8 +3218,8 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 import traceback
                 traceback.print_exc()
 
-    # Write remaining buffer
-    if buffer:
+    # Write remaining buffer (only for non-merged mode)
+    if buffer and not has_original_df:
         # Filter out ONLY rows with empty URLs (keep error messages as they are valid data)
         filtered_buffer = []
         for row in buffer:
@@ -3256,6 +3304,48 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                 emit(f"❌ Writer: Failed to write output part {part}: {type(e).__name__}: {e}")
                 for line in tb.strip().split("\n"):
                     emit(line)
+    
+    # When using original_df, write the enriched DataFrame at the end
+    if has_original_df and enriched_df is not None:
+        try:
+            # Clean the enriched DataFrame
+            def clean_enriched_df(df):
+                import re
+                for col in df.columns:
+                    if df[col].dtype == 'object':
+                        df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                        df[col] = df[col].str.replace('\x00', '', regex=False)
+                        df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                        df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                        df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                        df[col] = df[col].str.strip()
+                return df
+            
+            enriched_df = clean_enriched_df(enriched_df)
+            
+            # Write enriched CSV
+            enriched_csv_path = os.path.join(output_dir, "enriched_output.csv")
+            enriched_df.to_csv(enriched_csv_path, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
+            files_written.append(enriched_csv_path)
+            emit(f"✅ Writer: Wrote enriched CSV: {os.path.basename(enriched_csv_path)} ({len(enriched_df)} rows, {len(enriched_df.columns)} columns)")
+            
+            # Write enriched Excel
+            enriched_excel_path = os.path.join(output_dir, "enriched_output.xlsx")
+            try:
+                from openpyxl import Workbook
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Enriched Data"
+                _write_excel_sheet(ws, list(enriched_df.columns), enriched_df)
+                wb.save(enriched_excel_path)
+                files_written.append(enriched_excel_path)
+                emit(f"✅ Writer: Wrote enriched Excel: {os.path.basename(enriched_excel_path)}")
+            except Exception as e:
+                emit(f"⚠️ Writer: Excel export failed for enriched data: {e}")
+        except Exception as e:
+            import traceback
+            emit(f"❌ Writer: Failed to write enriched output: {type(e).__name__}: {e}")
+            traceback.print_exc()
     
     # Final summary
     emit(f"📊 Writer: Finished. Wrote {len(files_written)} files total.")
@@ -3350,11 +3440,14 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                       lead_data_map=None, ai_status_callback=None, scrape_status_callback=None,
                       run_folder: str = "", fast_mode: bool = False,
                       low_resource: bool = False, log_callback=None,
-                      use_playwright_fallback: bool = True, use_common_crawl_fallback: bool = True):
+                      use_playwright_fallback: bool = True, use_common_crawl_fallback: bool = True,
+                      original_df: pd.DataFrame = None, csv_config: dict = None):
     """
     Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
     Uses backpressure on result_queue to prevent memory exhaustion with large datasets.
     Saves checkpoint on every file write and in finally block for crash recovery.
+    
+    If original_df is provided, merges scraped results with original CSV data.
     """
     def emit(msg: str):
         print(msg)
@@ -3452,7 +3545,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     writer_task = asyncio.create_task(writer_coroutine(
         result_queue, rows_per_file, output_dir, total_this_run, adapted_progress,
         start_part=start_part, checkpoint_data=checkpoint_data, checkpoint_path=checkpoint_path,
-        log_callback=log_callback, include_email_copy=email_copy_enabled))
+        log_callback=log_callback, include_email_copy=email_copy_enabled,
+        original_df=original_df, csv_config=csv_config))
 
     workers = [asyncio.create_task(worker_coroutine(
         f"worker-{i+1}", session, url_queue, result_queue, depth, keywords, max_chars, retries, timeout,
@@ -3672,21 +3766,65 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Initialize session state defaults
+SESSION_DEFAULTS = {
+    'keywords': [],
+    'keywords_input': 'about,service,product',
+    'concurrency': 20,
+    'force_max_workers': False,
+    'depth': 3,
+    'retries': 3,
+    'timeout': 35,
+    'max_chars': 10000,
+    'rows_per_file': 2000,
+    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'ai_enabled': False,
+    'ai_enabled_checkbox': False,
+    'ai_provider': None,
+    'ai_model': None,
+    'ai_api_key': None,
+    'ai_prompt': None,
+    'master_prompt': None,
+    'email_copy_enabled': False,
+    'email_copy_enabled_checkbox': False,
+    'email_copy_provider': None,
+    'email_copy_model': None,
+    'email_copy_api_key': None,
+    'email_copy_prompt': None,
+    'email_copy_use_step3': False,
+    'csv_config': None,
+    '_csv_url_count': 0,
+    'step3_preview_row': 0,
+    'step4_preview_row': 0,
+    'current_step': 1,
+    '_test_running': False,
+    '_test_results': None,
+    '_test_error': None,
+}
+
+for key, value in SESSION_DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
 # Dark theme UI styling (design alignment)
 st.markdown("""
 <style>
     /* 1. Global theme and layout */
     .stApp {
-        background: linear-gradient(180deg, #090b14 0%, #0f172a 50%, #090b14 100%);
+        background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(6, 182, 212, 0.15), transparent),
+                    radial-gradient(ellipse 60% 40% at 80% 50%, rgba(99, 102, 241, 0.08), transparent),
+                    linear-gradient(180deg, #050508 0%, #0c0f1a 30%, #0f172a 70%, #050508 100%);
     }
     .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1200px;
-        background: rgba(15, 23, 42, 0.7);
-        border-radius: 1rem;
-        border: 1px solid rgba(51, 65, 85, 0.5);
-        backdrop-filter: blur(12px);
+        padding-top: 2.5rem;
+        padding-bottom: 3rem;
+        max-width: 1100px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.5);
+        border-radius: 1.25rem;
+        border: 1px solid rgba(51, 65, 85, 0.4);
+        backdrop-filter: blur(20px);
+        box-shadow: 0 4px 24px rgba(0,0,0,0.25);
     }
     .main, .block-container {
         color: #e2e8f0;
@@ -3722,19 +3860,38 @@ st.markdown("""
         margin-bottom: 0.75rem;
     }
     
-    /* Step card class (for optional wrappers) */
+    /* Step card class - refined with step number badge */
     .step-card {
-        background: rgba(15, 23, 42, 0.6);
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.6) 100%);
         backdrop-filter: blur(16px);
         border: 1px solid rgba(51, 65, 85, 0.5);
         border-radius: 1rem;
-        padding: 1.5rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.36);
+        padding: 1.5rem 1.75rem;
+        margin-bottom: 1.75rem;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        transition: border-color 0.25s ease, box-shadow 0.25s ease;
+    }
+    .step-card:hover {
+        border-color: rgba(51, 65, 85, 0.8);
+        box-shadow: 0 8px 28px rgba(0,0,0,0.3);
     }
     .step-card.active {
-        box-shadow: 0 0 30px -5px rgba(6, 182, 212, 0.3);
-        border-color: rgba(6, 182, 212, 0.5);
+        box-shadow: 0 0 30px -5px rgba(6, 182, 212, 0.25);
+        border-color: rgba(6, 182, 212, 0.4);
+    }
+    .step-card .step-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        background: linear-gradient(135deg, #06b6d4, #0891b2);
+        border-radius: 8px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        color: white;
+        margin-right: 0.5rem;
+        vertical-align: middle;
     }
     
     /* Tip boxes inside step cards - dark with left accent */
@@ -3784,20 +3941,21 @@ st.markdown("""
         color: #fecaca !important;
     }
     
-    /* Primary CTA: button in same container as .cta-heading-block (Start Scraping) */
+    /* Primary CTA: Start Scraping button */
     .main [data-testid="stVerticalBlock"]:has(.cta-heading-block) .stButton > button {
-        background: linear-gradient(90deg, #06b6d4 0%, #4f46e5 100%) !important;
+        background: linear-gradient(135deg, #06b6d4 0%, #0891b2 40%, #4f46e5 100%) !important;
         color: white !important;
         font-weight: 700 !important;
-        padding: 0.875rem 2rem !important;
+        font-size: 1.05rem !important;
+        padding: 1rem 2.5rem !important;
         border-radius: 12px !important;
         border: none !important;
         transition: all 0.3s ease !important;
-        box-shadow: 0 0 20px rgba(6, 182, 212, 0.3) !important;
+        box-shadow: 0 4px 20px rgba(6, 182, 212, 0.35) !important;
     }
-    .cta-section .stButton > button:hover {
+    .main [data-testid="stVerticalBlock"]:has(.cta-heading-block) .stButton > button:hover {
         transform: translateY(-2px) !important;
-        box-shadow: 0 0 30px rgba(6, 182, 212, 0.5) !important;
+        box-shadow: 0 8px 28px rgba(6, 182, 212, 0.45) !important;
     }
     
     /* Secondary buttons (all other buttons) */
@@ -3867,67 +4025,83 @@ st.markdown("""
         border-radius: 8px !important;
     }
     
-    /* File uploader - greyish, no white */
-    [data-testid="stFileUploader"],
-    [data-testid="stFileUploader"] section,
-    [data-testid="stFileUploader"] div,
-    .stFileUploader,
-    .stFileUploader > div,
-    .stFileUploader section {
-        background: #334155 !important;
-        border-radius: 1rem !important;
-        color: #e2e8f0 !important;
+    /* File uploader - inviting drop zone with consistent dark theme */
+    [data-testid="stFileUploader"] {
+        width: 100% !important;
     }
-    .stFileUploader > div {
-        border: 2px dashed #475569 !important;
+    [data-testid="stFileUploader"] > section,
+    [data-testid="stFileUploader"] > div > div {
+        background: rgba(15, 23, 42, 0.5) !important;
+        border: 2px dashed rgba(71, 85, 105, 0.6) !important;
+        border-radius: 1rem !important;
         padding: 2rem !important;
         transition: all 0.3s ease !important;
     }
-    .stFileUploader > div:hover,
-    [data-testid="stFileUploader"]:hover section,
-    [data-testid="stFileUploader"]:hover > div {
-        border-color: rgba(6, 182, 212, 0.6) !important;
-        background: #475569 !important;
+    [data-testid="stFileUploader"] > section:hover,
+    [data-testid="stFileUploader"] > div > div:hover {
+        border-color: rgba(6, 182, 212, 0.5) !important;
+        background: rgba(6, 182, 212, 0.08) !important;
+        box-shadow: 0 0 20px rgba(6, 182, 212, 0.1);
     }
-    [data-testid="stFileUploader"] label,
-    [data-testid="stFileUploader"] p,
-    .stFileUploader label,
-    .stFileUploader p {
-        color: #cbd5e1 !important;
+    [data-testid="stFileUploader"] [data-testid="stMarkdownContainer"] p {
+        color: #94a3b8 !important;
+        font-size: 0.95rem !important;
+    }
+    [data-testid="stFileUploader"] button {
+        background: rgba(6, 182, 212, 0.15) !important;
+        border: 1px solid rgba(6, 182, 212, 0.4) !important;
+        color: #22d3ee !important;
+        border-radius: 8px !important;
+        padding: 0.5rem 1.25rem !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+    }
+    [data-testid="stFileUploader"] button:hover {
+        background: rgba(6, 182, 212, 0.25) !important;
+        border-color: rgba(6, 182, 212, 0.6) !important;
+        transform: translateY(-1px);
     }
     
-    /* Expanders - greyish header and content, readable text */
+    /* Expanders - refined dark styling */
     .streamlit-expanderHeader {
         font-weight: 600;
         color: #e2e8f0 !important;
-        background: #334155 !important;
-        border: 1px solid #475569 !important;
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(51, 65, 85, 0.7) 100%) !important;
+        border: 1px solid rgba(71, 85, 105, 0.6) !important;
         border-radius: 12px !important;
-        transition: background 0.2s ease, border-color 0.2s ease !important;
+        padding: 0.75rem 1rem !important;
+        transition: all 0.2s ease !important;
     }
     .streamlit-expanderHeader:hover {
-        background: #475569 !important;
-        border-color: #64748b !important;
+        background: linear-gradient(135deg, rgba(51, 65, 85, 0.9) 0%, rgba(71, 85, 105, 0.7) 100%) !important;
+        border-color: rgba(6, 182, 212, 0.4) !important;
     }
     [data-testid="stExpander"] {
-        border: 1px solid #475569 !important;
+        border: 1px solid rgba(71, 85, 105, 0.5) !important;
         border-radius: 12px !important;
-        margin-bottom: 0.5rem !important;
-        background: #334155 !important;
+        margin-bottom: 0.75rem !important;
+        background: rgba(15, 23, 42, 0.6) !important;
+        overflow: hidden;
     }
     [data-testid="stExpander"]:hover {
-        background: #374151 !important;
+        border-color: rgba(6, 182, 212, 0.3) !important;
     }
     .streamlit-expanderContent {
-        border-top: 1px solid #475569 !important;
-        padding-top: 1rem !important;
-        background: #1e293b !important;
+        border-top: 1px solid rgba(71, 85, 105, 0.4) !important;
+        padding: 1.25rem !important;
+        background: rgba(15, 23, 42, 0.4) !important;
         color: #e2e8f0 !important;
     }
     .streamlit-expanderContent .stMarkdown,
     .streamlit-expanderContent p,
-    .streamlit-expanderContent label {
+    .streamlit-expanderContent label,
+    .streamlit-expanderContent .stCaption {
         color: #cbd5e1 !important;
+    }
+    /* Expander icon color */
+    .streamlit-expanderHeader svg {
+        color: #22d3ee !important;
+        fill: #22d3ee !important;
     }
     
     /* Number input wrapper - grey, no white */
@@ -3948,7 +4122,13 @@ st.markdown("""
         margin: 2rem 0;
         border: none;
         height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.3), transparent);
+        background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.25), rgba(99, 102, 241, 0.2), transparent);
+    }
+    
+    /* Subheaders in sections */
+    .main h4, .main .stSubheader {
+        color: #e2e8f0 !important;
+        font-weight: 600;
     }
     
     /* Radio / checkbox labels */
@@ -3995,15 +4175,28 @@ st.markdown("""
         font-family: ui-monospace, monospace !important;
     }
     
-    /* Download buttons in download section (anchor in same block as header) */
+    /* Download section - card-style layout */
+    .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) {
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(30, 41, 59, 0.5) 100%) !important;
+        border: 1px solid rgba(51, 65, 85, 0.5) !important;
+        border-radius: 1rem !important;
+        padding: 1.5rem !important;
+        margin: 1rem 0 !important;
+    }
     .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton > button {
         background: rgba(30, 41, 59, 0.9) !important;
         border: 1px solid #475569 !important;
         color: #e2e8f0 !important;
+        transition: all 0.2s ease !important;
     }
     .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton > button:hover {
         border-color: #06b6d4 !important;
         color: #22d3ee !important;
+        background: rgba(6, 182, 212, 0.1) !important;
+    }
+    .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton:nth-of-type(1) > button {
+        border-color: rgba(6, 182, 212, 0.5) !important;
+        box-shadow: 0 0 20px rgba(6, 182, 212, 0.2) !important;
     }
     .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stDownloadButton:nth-of-type(2) > button,
     .main [data-testid="stVerticalBlock"]:has(.download-section-anchor) .stColumns > div:nth-child(2) .stDownloadButton > button {
@@ -4060,6 +4253,104 @@ st.markdown("""
         color: #cbd5e1 !important;
     }
 
+    /* Step indicator styles */
+    .step-indicator {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 1.5rem 0 2rem;
+        padding: 0.75rem;
+        background: rgba(15, 23, 42, 0.6);
+        border-radius: 1rem;
+        border: 1px solid rgba(51, 65, 85, 0.5);
+    }
+    .step-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        border-radius: 0.75rem;
+        transition: all 0.3s ease;
+        cursor: default;
+    }
+    .step-item.completed {
+        background: rgba(16, 185, 129, 0.15);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .step-item.active {
+        background: rgba(6, 182, 212, 0.15);
+        border: 1px solid rgba(6, 182, 212, 0.4);
+        box-shadow: 0 0 20px rgba(6, 182, 212, 0.15);
+    }
+    .step-item.pending {
+        background: rgba(51, 65, 85, 0.3);
+        border: 1px solid rgba(71, 85, 105, 0.3);
+        opacity: 0.7;
+    }
+    .step-number {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.8rem;
+    }
+    .step-item.completed .step-number {
+        background: #10b981;
+        color: white;
+    }
+    .step-item.active .step-number {
+        background: #06b6d4;
+        color: white;
+    }
+    .step-item.pending .step-number {
+        background: #475569;
+        color: #94a3b8;
+    }
+    .step-label {
+        font-size: 0.85rem;
+        font-weight: 500;
+        white-space: nowrap;
+    }
+    .step-item.completed .step-label {
+        color: #10b981 !important;
+    }
+    .step-item.active .step-label {
+        color: #22d3ee !important;
+    }
+    .step-item.pending .step-label {
+        color: #64748b !important;
+    }
+    .step-connector {
+        width: 24px;
+        height: 2px;
+        background: rgba(71, 85, 105, 0.5);
+        border-radius: 1px;
+    }
+    .step-connector.completed {
+        background: linear-gradient(90deg, #10b981, #06b6d4);
+    }
+
+    /* Required field indicator */
+    .required-field::after {
+        content: " *";
+        color: #ef4444;
+    }
+
+    /* Validation message styles */
+    .validation-message {
+        background: rgba(239, 68, 68, 0.1);
+        border-left: 3px solid #ef4444;
+        padding: 0.75rem 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0.5rem 0;
+        color: #fecaca;
+        font-size: 0.9rem;
+    }
+
     /* Remove default Streamlit branding */
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
@@ -4067,27 +4358,69 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Hero: icon badge + gradient title + subtitle
+# Hero: refined icon badge + gradient title + subtitle
 st.markdown("""
-<div style="text-align: center; padding: 3rem 0 2rem; margin-bottom: 1rem;">
-    <div style="display: inline-flex; align-items: center; justify-content: center; padding: 0.75rem; background: rgba(30, 41, 59, 0.6); border-radius: 1rem; border: 1px solid rgba(51, 65, 85, 0.5); margin-bottom: 1rem;">
-        <span style="font-size: 2rem;">🌐</span>
+<div class="hero-section" style="text-align: center; padding: 2.5rem 0 2rem; margin-bottom: 1.5rem;">
+    <div style="display: inline-flex; align-items: center; justify-content: center; padding: 1rem 1.25rem; 
+         background: linear-gradient(135deg, rgba(6, 182, 212, 0.15) 0%, rgba(99, 102, 241, 0.1) 100%); 
+         border-radius: 1.25rem; border: 1px solid rgba(6, 182, 212, 0.3); margin-bottom: 1.25rem;
+         box-shadow: 0 0 40px rgba(6, 182, 212, 0.1);">
+        <span style="font-size: 2.5rem;">🌐</span>
     </div>
-    <h1 style="background: linear-gradient(90deg, #22d3ee 0%, #3b82f6 50%, #6366f1 100%);
+    <h1 style="background: linear-gradient(90deg, #22d3ee 0%, #38bdf8 25%, #3b82f6 50%, #6366f1 75%, #8b5cf6 100%);
                -webkit-background-clip: text;
                -webkit-text-fill-color: transparent;
                background-clip: text;
                margin-bottom: 0.5rem;
-               font-size: 2.75rem;
+               font-size: 2.85rem;
                font-weight: 800;
-               letter-spacing: -0.02em;">
+               letter-spacing: -0.03em;
+               line-height: 1.2;">
         Website Scraper
     </h1>
-    <p style="color: #94a3b8; font-size: 1.1rem; margin-top: 0.5rem; max-width: 32rem; margin-left: auto; margin-right: auto;">
-        Scrape websites from your CSV file and get clean, structured text content
+    <p style="color: #94a3b8; font-size: 1.05rem; margin-top: 0.5rem; max-width: 36rem; margin-left: auto; margin-right: auto; line-height: 1.6;">
+        Scrape websites from your CSV file and get clean, structured text content — with optional AI summaries and email copy
     </p>
 </div>
 """, unsafe_allow_html=True)
+
+# Step indicator - shows progress through the workflow
+def render_step_indicator(current_step):
+    steps = [
+        (1, "📁 Upload"),
+        (2, "⚙️ Settings"),
+        (3, "🤖 AI Setup"),
+        (4, "🚀 Run")
+    ]
+    html = '<div class="step-indicator">'
+    for i, (num, label) in enumerate(steps):
+        if num < current_step:
+            status = "completed"
+            icon = "✓"
+        elif num == current_step:
+            status = "active"
+            icon = str(num)
+        else:
+            status = "pending"
+            icon = str(num)
+        
+        html += f'<div class="step-item {status}"><span class="step-number">{icon}</span><span class="step-label">{label}</span></div>'
+        if i < len(steps) - 1:
+            connector_status = "completed" if num < current_step else ""
+            html += f'<div class="step-connector {connector_status}"></div>'
+    html += '</div>'
+    return html
+
+# Determine current step based on session state
+current_step = 1
+if st.session_state.get('csv_config'):
+    current_step = 2
+if st.session_state.get('current_step', 1) >= 3:
+    current_step = 3
+if st.session_state.get('_test_running') or st.session_state.get('_last_run_complete'):
+    current_step = 4
+
+st.markdown(render_step_indicator(current_step), unsafe_allow_html=True)
 
 # -------- RESUME / PARTIAL RESULTS --------
 # Scan outputs/ for checkpoints - show runs that can be resumed or have partial data
@@ -4113,8 +4446,12 @@ if os.path.isdir(outputs_dir):
 
     if incomplete_runs:
         with st.expander("📂 Resume or Download Partial Results", expanded=True):
+            st.markdown("""
+            <div style="background: rgba(6, 182, 212, 0.08); border-left: 4px solid #06b6d4; padding: 0.75rem 1rem; border-radius: 0 8px 8px 0; margin-bottom: 1rem; color: #e2e8f0;">
+                <strong>If the app crashed or stopped</strong>, you can resume or download what was saved.
+            </div>
+            """, unsafe_allow_html=True)
             st.markdown('<div class="resume-runs">', unsafe_allow_html=True)
-            st.markdown("**If the app crashed or stopped, you can:**")
             for run in incomplete_runs:
                 is_done = run.get("done", False)
                 label = f"✅ {run['folder']}: {run['completed']:,}/{run['total']:,} rows" if is_done else f"⏸️ {run['folder']}: {run['completed']:,}/{run['total']:,} rows in files (partial)"
@@ -4164,7 +4501,9 @@ if os.path.isdir(outputs_dir):
 # Step 1: Upload CSV
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📁 Step 1: Upload CSV</h3>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0; display: flex; align-items: center;">
+        <span class="step-badge">1</span>📁 Upload CSV
+    </h3>
     <div class="tip-box tip-box-cyan"><strong>💡 Tip:</strong> Your CSV should have a column with website URLs (one per row)</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4312,7 +4651,9 @@ if uploaded_file is not None:
 # Step 2: Settings
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">⚙️ Step 2: Settings</h3>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0; display: flex; align-items: center;">
+        <span class="step-badge">2</span>⚙️ Settings
+    </h3>
     <div class="tip-box tip-box-emerald"><strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4417,8 +4758,10 @@ with col2:
 # Step 3: Company Summary Generator (optional)
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">📋 Step 3: Company Summary Generator (optional)</h3>
-    <div class="tip-box tip-box-fuchsia">Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Helps you quickly understand what each company does. Requires an API key.</div>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0; display: flex; align-items: center;">
+        <span class="step-badge">3</span>📋 Company Summary <span style="font-size: 0.75rem; font-weight: 500; color: #64748b; margin-left: 0.5rem;">(optional)</span>
+    </h3>
+    <div class="tip-box tip-box-fuchsia">Turn your web scrapes into structured company summaries — clear summaries, grounded facts, and commercial hypotheses. Requires an API key.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -4723,7 +5066,9 @@ else:
 st.markdown("---")
 st.markdown("""
 <div class="step-card">
-    <h3 style="color: #f1f5f9 !important; margin-top: 0;">✉️ Step 4: Email Copy Writer (optional)</h3>
+    <h3 style="color: #f1f5f9 !important; margin-top: 0; display: flex; align-items: center;">
+        <span class="step-badge">4</span>✉️ Email Copy Writer <span style="font-size: 0.75rem; font-weight: 500; color: #64748b; margin-left: 0.5rem;">(optional)</span>
+    </h3>
     <div class="tip-box tip-box-emerald">Generate personalized email copy for each lead based on scraped content. Runs independently from company summaries. Same AI providers supported.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -4865,10 +5210,9 @@ else:
     email_copy_model = None
     email_copy_prompt = None
 
-# Token usage estimator (self-calculating from scraper settings + prompts)
+# Token usage estimator - Always show current settings
 st.markdown("---")
-with st.expander("💡 Token usage estimator", expanded=False):
-    st.markdown('<span class="token-estimator-anchor" style="display:none;"></span>', unsafe_allow_html=True)
+with st.expander("💰 Cost Estimator", expanded=False):
     MODEL_PRICING = {
         "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00), "gpt-4-turbo": (10.00, 30.00),
         "gpt-3.5-turbo": (0.50, 1.50), "gemini-1.5-flash": (0.075, 0.30),
@@ -4881,93 +5225,92 @@ with st.expander("💡 Token usage estimator", expanded=False):
         return (1.0, 3.0)
     def chars_to_tokens(chars):
         return max(0, int(chars / 4))
-    # URLs: use CSV count if available, else number input
-    num_urls_csv = st.session_state.get("_csv_url_count") or st.session_state.get("csv_config", {}).get("url_count", 0) or 0
-    default_urls = num_urls_csv if num_urls_csv > 0 else 100
-    est_urls = st.number_input("Number of URLs", min_value=1, max_value=100000, value=default_urls, key="est_urls", help="Auto-filled from CSV if uploaded")
-    # Scraper settings - derive avg scraped content per site
-    max_chars_est = st.session_state.get("max_chars", 10000)
-    depth_est = max(1, int(st.session_state.get("depth", 3) or 3))
-    retries_est = max(0, int(st.session_state.get("retries", 2) or 2))
-    max_chars_est = max(100, min(int(max_chars_est or 10000), 50000))
-    base_chars = 4000 + (depth_est - 1) * 3500
-    avg_chars_per_site = min(max_chars_est, max(100, int(base_chars)))
-    # Error factor: ~5-12% scrape/AI failures (invalid URLs, timeouts, rate limits)
-    success_rate = 0.90 - (retries_est * 0.01)
-    effective_leads = max(1, int(est_urls * success_rate))
-    # Per-call overhead: system msg + template structure
+    
+    # Get current settings from session state (with defaults)
+    num_urls_csv = st.session_state.get("_csv_url_count", 0) or st.session_state.get("csv_config", {}).get("url_count", 0) or 0
+    default_urls = max(1, num_urls_csv) if num_urls_csv > 0 else 100
+    
+    # Settings
+    col1, col2 = st.columns(2)
+    with col1:
+        est_urls = st.number_input("URLs to process", min_value=1, max_value=100000, value=default_urls, key="est_urls")
+    with col2:
+        est_success_rate = st.slider("Expected success rate %", 80, 99, 90, key="est_success_rate") / 100
+    
+    # Current configuration
+    max_chars_est = max(100, min(st.session_state.get("max_chars", 10000), 50000))
+    depth_est = max(1, st.session_state.get("depth", 3))
+    
+    # Calculate content size estimate
+    base_chars = 3000 + (depth_est - 1) * 2500
+    avg_chars_per_site = min(max_chars_est, base_chars)
+    
+    effective_leads = max(1, int(est_urls * est_success_rate))
     base_overhead = 150
-    ai_prompt_est = st.session_state.get("ai_prompt", "") or ""
-    email_prompt_est = st.session_state.get("email_copy_prompt", "") or ""
+    
+    # Check what's enabled
     ai_enabled_est = st.session_state.get("ai_enabled_checkbox", False)
     email_enabled_est = st.session_state.get("email_copy_enabled_checkbox", False)
-    ai_model_est = st.session_state.get("ai_model", "gpt-4o-mini")
-    email_model_est = st.session_state.get("email_copy_model", "gpt-4o-mini")
-    total_input = 0
-    total_output = 0
-    costs = []
-    per_lead_input = 0
-    per_lead_output = 0
+    ai_model_est = st.session_state.get("ai_model", "gpt-4o-mini") or "gpt-4o-mini"
+    email_model_est = st.session_state.get("email_copy_model", "gpt-4o-mini") or "gpt-4o-mini"
+    ai_prompt_est = st.session_state.get("ai_prompt", "") or ""
+    email_prompt_est = st.session_state.get("email_copy_prompt", "") or ""
+    
+    # Calculate costs
+    total_cost = 0
+    cost_details = []
+    
     if ai_enabled_est:
-        prompt_len = len(ai_prompt_est) + 400  # template + url/company placeholders
-        prompt_tokens = chars_to_tokens(prompt_len) + base_overhead
+        prompt_tokens = chars_to_tokens(len(ai_prompt_est) + 300) + base_overhead
         content_tokens = chars_to_tokens(avg_chars_per_site)
         inp_per = prompt_tokens + content_tokens
-        out_per = chars_to_tokens(3500)  # ~SUMMARY + ~15 facts + ~8 hypotheses
-        total_input += inp_per * effective_leads
-        total_output += out_per * effective_leads
-        per_lead_input += inp_per
-        per_lead_output += out_per
+        out_per = chars_to_tokens(3000)
         in_p, out_p = get_model_pricing(ai_model_est)
-        cost = (inp_per * effective_leads / 1e6 * in_p) + (out_per * effective_leads / 1e6 * out_p)
-        costs.append(("Company summary", ai_model_est, cost))
+        cost = ((inp_per * effective_leads / 1e6) * in_p) + ((out_per * effective_leads / 1e6) * out_p)
+        total_cost += cost
+        cost_details.append(("Company Summary", ai_model_est, cost, effective_leads))
+    
     if email_enabled_est:
-        prompt_len = len(email_prompt_est) + 250
-        prompt_tokens = chars_to_tokens(prompt_len) + base_overhead
+        prompt_tokens = chars_to_tokens(len(email_prompt_est) + 200) + base_overhead
         content_tokens = chars_to_tokens(avg_chars_per_site)
         inp_per = prompt_tokens + content_tokens
-        out_per = chars_to_tokens(450)  # ~150 words
-        total_input += inp_per * effective_leads
-        total_output += out_per * effective_leads
-        per_lead_input += inp_per
-        per_lead_output += out_per
+        out_per = chars_to_tokens(400)
         in_p, out_p = get_model_pricing(email_model_est)
-        cost = (inp_per * effective_leads / 1e6 * in_p) + (out_per * effective_leads / 1e6 * out_p)
-        costs.append(("Email copy", email_model_est, cost))
-    if total_input == 0 and total_output == 0:
-        st.info("Enable Step 3 (Company Summary) or Step 4 (Email Copy) to see estimates.")
+        cost = ((inp_per * effective_leads / 1e6) * in_p) + ((out_per * effective_leads / 1e6) * out_p)
+        total_cost += cost
+        cost_details.append(("Email Copy", email_model_est, cost, effective_leads))
+    
+    # Display results
+    st.markdown("#### 💵 Estimated Cost")
+    
+    if cost_details:
+        for name, model, cost, leads in cost_details:
+            st.markdown(f"**{name}** ({model}): ~${cost:.2f} for ~{leads} leads")
+        st.markdown(f"### **Total: ~${total_cost:.2f}**")
+        st.caption(f"Based on ~{avg_chars_per_site:,} chars/site, {depth_est} page(s) per site. Prices in USD.")
     else:
-        st.markdown("**Totals**")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("Input tokens (total)", f"{total_input:,}")
-        with c2:
-            st.metric("Output tokens (total)", f"{total_output:,}")
-        with c3:
-            st.metric("Total tokens", f"{total_input + total_output:,}")
-        st.markdown(f"**Per lead** (effective leads: ~{effective_leads:,}, ~{success_rate * 100:.0f}% success rate)")
-        c4, c5 = st.columns(2)
-        with c4:
-            st.metric("Input tokens per lead", f"{per_lead_input:,}")
-        with c5:
-            st.metric("Output tokens per lead", f"{per_lead_output:,}")
-        st.markdown("**Estimated cost**")
-        for name, model, c in costs:
-            st.markdown(f"- {name} ({model}): ~${c:.3f}")
-        if costs:
-            st.markdown(f"- **Total: ~${sum(x[2] for x in costs):.3f}**")
-        st.caption("Based on max_chars={:,}, depth={}, retries={}. ~{:.0f}% of URLs assumed to succeed.".format(max_chars_est, depth_est, retries_est, success_rate * 100))
+        st.info("Enable Step 3 (Company Summary) or Step 4 (Email Copy) to see cost estimates.")
+        st.caption("Scraping alone doesn't use AI tokens — only the AI features do.")
 
-# Test run option (anchor for diagnostic card styling)
+# Test run section
 st.markdown("---")
 with st.container():
-    st.markdown('<div class="test-run-anchor" style="display:none;"></div>', unsafe_allow_html=True)
-    test_col1, test_col2 = st.columns([1, 2])
+    st.markdown("### 🧪 Test Run")
+    st.caption("Preview scraping and AI on a few URLs before running the full batch")
+    
+    test_col1, test_col2, test_col3 = st.columns([1, 1, 2])
     with test_col1:
-        test_rows = st.number_input("Test with X rows", min_value=1, max_value=20, value=5, help="Preview scraping + AI on first X URLs before full run", key="test_rows_input")
+        test_rows = st.number_input("URLs to test", min_value=1, max_value=20, value=3, help="Number of URLs to test", key="test_rows_input")
     with test_col2:
-        st.caption("Run a quick test to see scraped content and AI summary in the browser (no files created)")
-        test_clicked = st.button("🧪 Test run", key="test_run_btn", help=f"Test scraping + AI on first {test_rows} row(s)")
+        st.write("")
+        st.write("")
+        can_test = uploaded_file is not None and st.session_state.get('csv_config') is not None
+        test_clicked = st.button(
+            "🧪 Run Test" if can_test else "⚠️ Upload CSV First",
+            key="test_run_btn",
+            disabled=not can_test,
+            type="secondary"
+        )
 
 # Main action area (CTA section) - Get variables from tabs first so button is in same container
 # Get variables from tabs - Use session_state (proper Streamlit way)
@@ -5120,65 +5463,159 @@ if uploaded_file and test_clicked:
                     t.start()
                     st.rerun()
 
+# Test run status display
 if st.session_state.get("_test_running"):
-    st.info("🧪 **Test is running in the background** (scraping + AI may take 1-3 min). You can keep scrolling or editing settings. Click below to check if results are ready.")
-    if st.button("Check for results", key="test_check_results_btn"):
-        st.rerun()
+    st.markdown("---")
+    with st.container():
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info("🧪 **Test is running...** (scraping + AI may take 1-3 min). You can keep editing settings. The results will appear below when ready.")
+        with col2:
+            if st.button("🔄 Check Status", key="test_check_results_btn", use_container_width=True):
+                st.rerun()
 
+# Test results display
 if st.session_state.get("_test_results") is not None and not st.session_state.get("_test_running"):
+    st.markdown("---")
     results = st.session_state["_test_results"]
     test_logs = st.session_state.get("_test_logs", [])
     test_error = st.session_state.pop("_test_error", None)
     test_tb = st.session_state.pop("_test_tb", None)
+    
     if test_error:
         st.error(f"❌ Test failed: {test_error}")
         if test_tb:
-            st.code(test_tb, language=None)
-    # Do not clear _test_results here so the UI stays visible; cleared when user starts a new test
-
-    st.markdown("### 🧪 Test results")
-    if test_logs:
-        with st.expander("Logs", expanded=False):
+            with st.expander("Debug Info"):
+                st.code(test_tb, language=None)
+    elif results:
+        st.success(f"✅ Test completed — {len(results)} URL(s) processed")
+    
+    if test_logs and not results:
+        with st.expander("View Logs"):
             st.code("\n".join(test_logs), language=None)
+    
     email_copy_enabled_test = st.session_state.get("email_copy_enabled_checkbox", False)
+    
     for i, row in enumerate(results):
         url = row[0]
         scraped_text = row[1] if len(row) >= 2 else ""
         ai_summary = row[2] if len(row) >= 3 else ""
         email_copy_val = row[3] if len(row) >= 4 else ""
-        with st.expander(f"**{i+1}. {url[:60]}{'…' if len(url) > 60 else ''}**", expanded=True):
-            st.markdown("#### Scraped content")
-            scraped_display = scraped_text[:8000] + ("…" if len(scraped_text) > 8000 else "") if scraped_text else "(empty)"
-            st.text_area("", value=scraped_display, height=200, key=f"test_scraped_{i}", disabled=True, label_visibility="collapsed")
-            if ai_summary:
-                st.markdown("#### Company summary")
-                formatted = ai_summary.replace("===SUMMARY===", "\n### Summary\n").replace("===FACTS===", "\n### Facts\n").replace("===HYPOTHESES===", "\n### Hypotheses\n")
-                st.markdown(formatted)
+        
+        # Determine status icon
+        has_error = scraped_text.startswith("❌") if scraped_text else False
+        status_icon = "✅" if not has_error else "❌"
+        
+        with st.expander(f"{status_icon} {i+1}. {url[:55]}{'…' if len(url) > 55 else ''}", expanded=(i == 0)):
+            tabs = st.tabs(["📄 Scraped", "🤖 Summary", "✉️ Email"])
+            
+            with tabs[0]:
+                if scraped_text and not scraped_text.startswith("❌"):
+                    st.text_area("Content", value=scraped_text[:5000] + ("…" if len(scraped_text) > 5000 else ""), 
+                                height=250, key=f"test_scraped_{i}", disabled=True, label_visibility="collapsed")
+                    st.caption(f"{len(scraped_text):,} characters scraped")
+                else:
+                    st.error(scraped_text if scraped_text else "No content scraped")
+            
+            with tabs[1]:
+                if ai_summary and not ai_summary.startswith("❌"):
+                    formatted = ai_summary.replace("===SUMMARY===", "**Summary**").replace("===FACTS===", "**Facts**").replace("===HYPOTHESES===", "**Hypotheses**")
+                    st.markdown(formatted)
+                elif st.session_state.get('ai_enabled_checkbox', False):
+                    st.info("No AI summary generated — check scraped content or API settings")
+                else:
+                    st.caption("AI summary disabled (enable in Step 3)")
+            
+            with tabs[2]:
+                if email_copy_val and not email_copy_val.startswith("❌"):
+                    st.markdown(email_copy_val)
+                elif email_copy_enabled_test:
+                    st.info("No email copy generated — check settings")
+                else:
+                    st.caption("Email copy disabled (enable in Step 4)")
+    
+    if not results and not test_error:
+        st.warning("No results returned. Check your CSV and settings.")
+
+# Validation helper
+def get_validation_status():
+    """Check if all required fields are properly configured."""
+    errors = []
+    warnings = []
+    
+    if uploaded_file is None:
+        errors.append("Upload a CSV file in Step 1")
+    else:
+        csv_config = st.session_state.get('csv_config', {})
+        if not csv_config:
+            errors.append("Configure your CSV (select URL column) in Step 1")
+        elif not csv_config.get('url_column'):
+            errors.append("Select a URL column in Step 1")
+    
+    # Check AI configuration if enabled
+    if st.session_state.get('ai_enabled_checkbox', False):
+        ai_provider = st.session_state.get('ai_provider')
+        if not ai_provider:
+            warnings.append("AI Provider not selected (Step 3)")
+        else:
+            api_key = st.session_state.get(f"{ai_provider.lower()}_api_key") or st.session_state.get('ai_api_key')
+            if not api_key:
+                warnings.append(f"{ai_provider} API key not provided (Step 3)")
+        
+        if not st.session_state.get('ai_model'):
+            warnings.append("AI Model not selected (Step 3)")
+    
+    # Check Email configuration if enabled
+    if st.session_state.get('email_copy_enabled_checkbox', False):
+        use_step3 = st.session_state.get('email_copy_use_step3', False)
+        if not use_step3 or not st.session_state.get('ai_enabled_checkbox', False):
+            email_provider = st.session_state.get('email_copy_provider')
+            if not email_provider:
+                warnings.append("Email Copy Provider not selected (Step 4)")
             else:
-                st.caption("_No company summary (Step 3 disabled or error)_")
-            if email_copy_val:
-                st.markdown("#### Email copy")
-                st.markdown(email_copy_val)
-            elif email_copy_enabled_test:
-                st.caption("_No email copy (error or insufficient content)_")
-    if not results:
-        st.info("No results. Check logs above.")
-    # Clear results when user starts a new test (handled by test_clicked block)
+                api_key = st.session_state.get(f"{email_provider.lower()}_api_key")
+                if not api_key:
+                    warnings.append(f"{email_provider} API key not provided for Email Copy (Step 4)")
+    
+    return errors, warnings
 
 # -------- SCRAPE BUTTON (CTA section for primary button styling) --------
+validation_errors, validation_warnings = get_validation_status()
+can_start = uploaded_file is not None and not validation_errors
+
 with st.container():
     st.markdown("---")
     st.markdown("""
-    <div class="cta-heading-block" style="text-align: center; padding: 2rem 0;">
-        <h2 style="color: #f1f5f9; margin-bottom: 1rem;">🚀 Ready to Start</h2>
-        <p style="color: #94a3b8; font-size: 1rem; margin-bottom: 1.5rem;">
-            Make sure you've uploaded your CSV and configured settings above.<br>
-            Then click the button below to start scraping!
+    <div class="cta-heading-block" style="text-align: center; padding: 2.5rem 0;">
+        <h2 style="color: #f1f5f9; margin-bottom: 0.75rem; font-size: 1.6rem;">🚀 Ready to Start</h2>
+        <p style="color: #94a3b8; font-size: 1rem; margin-bottom: 1.75rem; line-height: 1.6;">
+            Upload your CSV, configure settings, and click below to scrape.
         </p>
     </div>
     """, unsafe_allow_html=True)
-    start_clicked = st.button("🚀 Start Scraping", use_container_width=True, key="start_scraping_btn")
-if uploaded_file and start_clicked:
+    
+    # Show validation messages
+    if validation_errors:
+        st.markdown('<div class="validation-message"><strong>⚠️ Please fix these issues before starting:</strong><ul>' + 
+                    ''.join(f'<li>{e}</li>' for e in validation_errors) + '</ul></div>', 
+                    unsafe_allow_html=True)
+    elif validation_warnings:
+        with st.expander("⚠️ Optional settings not configured (click to see)", expanded=False):
+            st.markdown("You can still run the scraper, but these optional features won't work:")
+            for w in validation_warnings:
+                st.markdown(f"- {w}")
+    
+    col_btn, _1, _2 = st.columns([1, 1, 1])
+    with col_btn:
+        start_clicked = st.button(
+            "🚀 Start Scraping" if can_start else "⚠️ Check Errors Above", 
+            use_container_width=True, 
+            key="start_scraping_btn",
+            disabled=not can_start,
+            type="primary" if can_start else "secondary"
+        )
+
+if uploaded_file and start_clicked and can_start:
     # Get CSV configuration from session state
     csv_config = st.session_state.get('csv_config', {})
     
@@ -5502,7 +5939,7 @@ if uploaded_file and start_clicked:
                 logs_text = "\n".join(runtime_logs)
             logs_placeholder.code(logs_text or "(no logs yet)", language=None)
             
-            # Real-time activity dashboard (enhanced data & visuals)
+            # Real-time activity dashboard - Compact view
             with dashboard_placeholder.container():
                 with scrape_status_lock:
                     in_progress = list(scrape_in_progress.items())
@@ -5513,58 +5950,40 @@ if uploaded_file and start_clicked:
                 n_email = sum(1 for _, d in in_progress if d["status"] == "email_copy")
                 rate_per_min = rate * 60 if rate > 0 else 0
                 pct_done = (d / max(t, 1)) * 100
-                st.markdown("### 📊 Live activity")
-                m1, m2, m3, m4, m5 = st.columns(5)
+                
+                # Compact metrics row
+                st.markdown("#### 📊 Progress")
+                m1, m2, m3, m4 = st.columns(4)
                 with m1:
-                    st.metric("Progress", f"{d:,} / {t:,}", f"{pct_done:.1f}%")
+                    st.metric("Done", f"{d:,}/{t:,}", f"{pct_done:.0f}%")
                 with m2:
-                    st.metric("Rate", f"{rate_per_min:.1f}/min", "URLs" if rate_per_min else "—")
+                    st.metric("Rate", f"{rate_per_min:.0f}/min")
                 with m3:
-                    st.metric("Elapsed", f"{int(elapsed // 60)}m {int(elapsed % 60)}s", "")
+                    active_text = f"🔍{n_scraping} 🤖{n_ai} ✉️{n_email}" if in_progress else "Idle"
+                    st.metric("Active", active_text)
                 with m4:
-                    st.metric("Errors", len(errors), f"of {d}" if d else "—")
-                with m5:
-                    phase_str = f"🔍 {n_scraping}  🤖 {n_ai}  ✉️ {n_email}" if in_progress else "Idle"
-                    st.metric("Active", phase_str, "scrape | AI | email")
-                st.markdown("---")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown("#### ⏳ In progress")
-                    if in_progress:
-                        for url, data in in_progress[-10:]:
-                            short_url = escape((url[:42] + "…") if len(url) > 42 else url)
+                    error_count = len(errors)
+                    st.metric("Errors", error_count, delta_color="inverse" if error_count > 0 else "normal")
+                
+                # Show in-progress items in an expander
+                if in_progress:
+                    with st.expander(f"⏳ Currently processing ({len(in_progress)})", expanded=False):
+                        for url, data in in_progress[-5:]:
+                            short_url = escape((url[:50] + "…") if len(url) > 50 else url)
                             status = data.get("status", "scraping")
-                            msg = escape(str(data.get("message", ""))[:80])
+                            msg = escape(str(data.get("message", ""))[:60])
                             icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
-                            badge = "scraping" if status == "scraping" else ("AI" if status == "ai_summarizing" else "email")
-                            color = "#3b82f6" if status == "scraping" else ("#8b5cf6" if status == "ai_summarizing" else "#22c55e")
-                            st.markdown(f"""<div class="dashboard-activity-row" style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid {color}; color:#e2e8f0;"><span style="font-weight:600;">{icon} {short_url}</span><br><span style="color:#94a3b8; font-size:0.8rem;">{msg}</span> <code style="background:rgba(51,65,85,0.8); color:#cbd5e1; padding:0.1rem 0.4rem; border-radius:4px; font-size:0.75rem;">{badge}</code></div>""", unsafe_allow_html=True)
-                    else:
-                        st.caption("_Waiting for workers..._")
-                with col2:
-                    st.markdown("#### ✅ Recently completed")
-                    if recent:
-                        for e in reversed(recent[-8:]):
-                            u = e.get("url", "")
-                            short_url = escape((u[:38] + "…") if len(u) > 38 else u)
-                            if e.get("status") == "scraped":
-                                msg = escape(str(e.get("message", ""))[:50])
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#34d399;'>✓ {short_url}</div><div style='font-size:0.75rem; color:#94a3b8; margin-bottom:0.4rem;'>{msg}</div>", unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"<div style='font-size:0.85rem; margin:0.2rem 0; color:#f87171;'>✗ {short_url}</div>", unsafe_allow_html=True)
-                    else:
-                        st.caption("_None yet_")
-                with col3:
-                    st.markdown("#### ⚠️ Issues")
-                    if errors:
-                        for e in errors[-15:]:
+                            st.caption(f"{icon} {short_url} — {msg}")
+                
+                # Show errors in a separate expander if any
+                if errors:
+                    with st.expander(f"⚠️ Issues ({len(errors)})", expanded=False):
+                        for e in errors[-5:]:
                             u = e.get("url", "")
                             m = e.get("message", "")
-                            short_url = escape((u[:35] + "…") if len(u) > 35 else u)
-                            msg = escape((m[:70] + "…") if len(m) > 70 else m)
-                            st.markdown(f"""<div style="font-size:0.85rem; margin:0.3rem 0; padding:0.5rem; background:rgba(30,41,59,0.6); border-radius:6px; border-left:3px solid #f87171; color:#e2e8f0;"><strong>{short_url}</strong><br><span style="font-size:0.75rem; color:#94a3b8;">{msg}</span></div>""", unsafe_allow_html=True)
-                    else:
-                        st.caption("_No issues_")
+                            short_url = escape((u[:40] + "…") if len(u) > 40 else u)
+                            msg = escape((m[:60] + "…") if len(m) > 60 else m)
+                            st.markdown(f"<span style='color:#f87171;'>✗</span> {short_url}<br><span style='color:#94a3b8; font-size:0.8rem;'>{msg}</span>", unsafe_allow_html=True)
             
             # Yield so Streamlit can send UI updates and the scraper thread can run (avoid tight loop)
             time.sleep(1.0)
@@ -5717,7 +6136,12 @@ if uploaded_file and start_clicked:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website. Each website's content was limited to this exact amount.")
     
     # Download section (anchor for dark-theme download card styling)
-    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
+    st.markdown("""
+    <div class="download-section-anchor" style="margin: 2rem 0 1.5rem;">
+        <h2 style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 0.5rem;">📥 Download Results</h2>
+        <p style="color: #64748b; font-size: 0.9rem;">CSV, Excel, and ZIP archive</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     

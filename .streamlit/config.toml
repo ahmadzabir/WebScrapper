@@ -9,11 +9,11 @@ disconnectedSessionTTL = 3600
 fileWatcherType = "none"
 
 [theme]
-primaryColor = "#06b6d4"
-backgroundColor = "#000000"
-secondaryBackgroundColor = "#000000"
-textColor = "#ffffff"
-font = "sans serif"
+primaryColor = "#22d3ee"
+backgroundColor = "#0a0a0f"
+secondaryBackgroundColor = "#0f172a"
+textColor = "#f1f5f9"
+font = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
 
 [logger]
 level = "info"
