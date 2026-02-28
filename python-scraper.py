@@ -5385,9 +5385,40 @@ if os.path.isdir(outputs_dir):
                                                 zf.write(os.path.join(run["path"], f), arcname=f)
                                 except Exception:
                                     pass
+                        
+                        # Store in session state for cloud persistence
                         if os.path.exists(zip_path):
-                            with open(zip_path, "rb") as f:
-                                st.download_button("⬇️ Download", f.read(), file_name=f"{run['folder']}.zip", mime="application/zip", key=f"resume_dl_{run['folder']}")
+                            try:
+                                with open(zip_path, "rb") as f:
+                                    zip_data = f.read()
+                                    # Store in session state with unique key
+                                    session_key = f"resume_zip_{run['folder']}"
+                                    st.session_state[session_key] = zip_data
+                            except Exception:
+                                zip_data = None
+                        
+                        # Try session state first, then disk
+                        session_key = f"resume_zip_{run['folder']}"
+                        zip_data = st.session_state.get(session_key)
+                        
+                        if not zip_data and os.path.exists(zip_path):
+                            try:
+                                with open(zip_path, "rb") as f:
+                                    zip_data = f.read()
+                                    st.session_state[session_key] = zip_data
+                            except Exception:
+                                zip_data = None
+                        
+                        if zip_data:
+                            st.download_button(
+                                "⬇️ Download Results",
+                                zip_data,
+                                file_name=f"{run['folder']}.zip",
+                                mime="application/zip",
+                                key=f"resume_dl_{run['folder']}"
+                            )
+                        else:
+                            st.caption("Results expired - please re-upload CSV and run again")
             st.markdown('</div>', unsafe_allow_html=True)
 
 # Step 1: Upload CSV
@@ -7613,6 +7644,10 @@ if st.session_state.get('scraping_complete', False):
     if total > 0:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
     
+    # Cloud mode warning - downloads may expire
+    if is_cloud_mode():
+        st.warning("⚠️ **Important:** Downloads are stored temporarily. If you refresh or leave this page, files may be lost. Download NOW to save your results.")
+    
     # Download section (persistent, same anchor for styling)
     st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
     
@@ -7646,7 +7681,10 @@ if st.session_state.get('scraping_complete', False):
                             key="download_zip_persistent2"
                         )
                 else:
-                    st.info("ZIP file not available")
+                    if is_cloud_mode():
+                        st.error("❌ Files expired. In cloud mode, files are temporary. Please re-upload your CSV and run the scraper again.")
+                    else:
+                        st.info("ZIP file not available on disk")
             except Exception as e:
                 st.error(f"Could not read ZIP file: {e}")
         st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
