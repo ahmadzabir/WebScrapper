@@ -7626,9 +7626,18 @@ if uploaded_file and start_clicked and can_start:
     
     # Store max_chars info for display
     st.session_state['max_chars_info'] = max_chars
+    
+    # IMPORTANT: Set flag that scraping is complete for download section
+    st.session_state['scraping_complete'] = True
 
-# Show download section even after rerun (if scraping was completed)
-if st.session_state.get('scraping_complete', False):
+# Show download section if scraping was completed OR if we have download data
+has_download_data = (
+    st.session_state.get('zip_data') or 
+    st.session_state.get('combined_excel_data') or 
+    st.session_state.get('combined_csv_data')
+)
+
+if st.session_state.get('scraping_complete', False) or has_download_data:
     # Retrieve data from session_state
     output_dir = st.session_state.get('output_dir')
     run_folder = st.session_state.get('run_folder')
@@ -7660,10 +7669,10 @@ if st.session_state.get('scraping_complete', False):
             st.download_button(
                 label="⬇️ Download ZIP Archive",
                 data=zip_data,
-                file_name=zip_name,
+                file_name=zip_name or "results.zip",
                 mime="application/zip",
                 help="Download all CSV and Excel files in a ZIP archive",
-                key="download_zip_persistent"
+                key="download_zip_main"
             )
         else:
             # Fallback: read from file
@@ -7675,10 +7684,10 @@ if st.session_state.get('scraping_complete', False):
                         st.download_button(
                             label="⬇️ Download ZIP Archive",
                             data=zip_data,
-                            file_name=zip_name,
+                            file_name=zip_name or "results.zip",
                             mime="application/zip",
                             help="Download all CSV and Excel files in a ZIP archive",
-                            key="download_zip_persistent2"
+                            key="download_zip_fallback"
                         )
                 else:
                     if is_cloud_mode():
@@ -7702,7 +7711,7 @@ if st.session_state.get('scraping_complete', False):
                 file_name=excel_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 help="Download all data in a single Excel file",
-                key="download_excel_persistent"
+                key="download_excel_main"
             )
             if combined_df is not None:
                 st.caption(f"{len(combined_df)} total rows")
@@ -7893,7 +7902,7 @@ if st.session_state.get('scraping_complete', False):
                             file_name=f"{run_folder}_combined.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             help="Download all data in a single Excel file",
-                            key="download_excel_persistent"
+                            key="download_excel_regen"
                         )
                         st.caption(f"{len(combined_df)} total rows")
                     else:
@@ -7925,7 +7934,7 @@ if st.session_state.get('scraping_complete', False):
                 file_name=csv_filename,
                 mime="text/csv",
                 help="Download all data in a single CSV file (Excel/Google Sheets compatible)",
-                key="download_csv_persistent"
+                key="download_csv_main"
             )
             if combined_df is not None:
                 st.caption(f"{len(combined_df)} total rows")
