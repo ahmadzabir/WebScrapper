@@ -5227,7 +5227,8 @@ with st.expander("💰 Cost Estimator", expanded=False):
         return max(0, int(chars / 4))
     
     # Get current settings from session state (with defaults)
-    num_urls_csv = st.session_state.get("_csv_url_count", 0) or st.session_state.get("csv_config", {}).get("url_count", 0) or 0
+    csv_cfg = st.session_state.get("csv_config") or {}
+    num_urls_csv = st.session_state.get("_csv_url_count", 0) or csv_cfg.get("url_count", 0) or 0
     default_urls = max(1, num_urls_csv) if num_urls_csv > 0 else 100
     
     # Settings
