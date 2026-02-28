@@ -5003,7 +5003,7 @@ CRITICAL:
             label_visibility="collapsed"
         )
         st.session_state["master_prompt"] = ai_prompt
-        prompt_cur = ai_prompt
+        prompt_cur = ai_prompt or ""
         ends_with_brace = prompt_cur.rstrip().endswith("{{") or prompt_cur.rstrip().endswith("{")
         if ends_with_brace:
             placeholders_comp = [p for (_, p, _) in vars_def]
