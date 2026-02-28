@@ -1348,17 +1348,42 @@ def _write_excel_sheet(ws, cols: list, df: "pd.DataFrame", sheet_title: str = "S
     """Write DataFrame to Excel sheet with proper formatting, column widths, frozen header."""
     ws.title = sheet_title
     ws.append(cols)
+    
+    # Write data rows
     for idx in range(len(df)):
         row = df.iloc[idx]
         row_data = [_clean_excel_value(row[c] if c in df.columns else "") for c in cols]
         row_num = idx + 2
         for col_idx, val in enumerate(row_data, start=1):
-            ws.cell(row=row_num, column=col_idx, value=str(val) if val is not None else "")
-    # Column widths (Website: 45, others: 80)
-    widths = [45, 80, 80, 80][:len(cols)]
-    for i, w in enumerate(widths, start=1):
-        from openpyxl.utils import get_column_letter
-        ws.column_dimensions[get_column_letter(i)].width = min(w, 100)
+            cell = ws.cell(row=row_num, column=col_idx)
+            cell.value = str(val) if val is not None else ""
+            # Enable text wrapping for long content
+            cell.alignment = cell.alignment.copy(wrapText=True)
+    
+    # Column widths - smart defaults based on content type
+    from openpyxl.utils import get_column_letter
+    
+    for i, col_name in enumerate(cols, start=1):
+        col_letter = get_column_letter(i)
+        
+        # Determine width based on column name
+        col_lower = col_name.lower()
+        if 'url' in col_lower or 'website' in col_lower:
+            width = 50  # URLs need moderate width
+        elif 'scraped' in col_lower or 'content' in col_lower or 'summary' in col_lower or 'email' in col_lower:
+            width = 100  # Long text columns need more space
+        elif 'name' in col_lower or 'title' in col_lower or 'company' in col_lower:
+            width = 40  # Names
+        elif 'id' in col_lower or 'phone' in col_lower:
+            width = 20  # IDs, phone numbers
+        elif any(date_word in col_lower for date_word in ['date', 'time', 'created', 'updated']):
+            width = 25  # Dates
+        else:
+            width = 35  # Default for other columns
+        
+        ws.column_dimensions[col_letter].width = min(width, 120)
+    
+    # Freeze header row
     ws.freeze_panes = "A2"
 
 
