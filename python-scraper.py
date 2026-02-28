@@ -6430,6 +6430,40 @@ if st.session_state.get("_test_results") is not None and not st.session_state.ge
     if not results and not test_error:
         st.warning("No results returned. Check your CSV and settings.")
 
+# Phase 0: Measurement Panel - Show failure buckets and stats
+if st.session_state.get('_test_results') or st.session_state.get('_last_run_stats'):
+    st.markdown("---")
+    with st.expander("📊 Scrape Analysis & Failure Buckets", expanded=False):
+        stats = st.session_state.get('_last_run_stats', {})
+        
+        if stats:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total URLs", stats.get('total', 0))
+            with col2:
+                st.metric("Success", stats.get('successes', 0), f"{stats.get('success_rate', 0)}%")
+            with col3:
+                st.metric("Partial", stats.get('partials', 0))
+            with col4:
+                st.metric("Failed", stats.get('failures', 0))
+            
+            # Top failure buckets
+            top_failures = stats.get('top_failures', [])
+            if top_failures:
+                st.markdown("#### Top Failure Reasons")
+                for bucket, count in top_failures:
+                    st.markdown(f"- **{bucket}**: {count} URLs")
+            
+            # Download failures CSV
+            failure_csv = st.session_state.get('_failure_csv', '')
+            if failure_csv:
+                st.download_button(
+                    "📥 Download Failures CSV",
+                    failure_csv,
+                    file_name=f"scrape_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+
 # Validation helper
 def get_validation_status():
     """Check if all required fields are properly configured."""
@@ -6560,6 +6594,16 @@ if uploaded_file and start_clicked and can_start:
     if total == 0:
         st.error("❌ No valid URLs found in the selected column. Check your CSV and URL column.")
         st.stop()
+    
+    # Phase 7: Cloud Mode - Enforce batch size limits
+    CLOUD_MODE_MAX_URLS = 300  # Maximum URLs per run in cloud mode
+    if is_cloud_mode() and total > CLOUD_MODE_MAX_URLS:
+        st.warning(f"⚠️ **Cloud Mode:** Your CSV has {total:,} URLs. Limiting to first {CLOUD_MODE_MAX_URLS:,} URLs.")
+        st.info("For larger batches, download and run the scraper locally.")
+        urls = urls[:CLOUD_MODE_MAX_URLS]
+        url_list_with_idx = url_list_with_idx[:CLOUD_MODE_MAX_URLS]
+        total = len(urls)
+    
     # Prepare lead data mapping (filtered index -> lead data dict)
     lead_data_map = {}
     for idx, (url, orig_row) in enumerate(url_list_with_idx):
