@@ -5156,7 +5156,7 @@ Requirements:
         label_visibility="collapsed"
     )
     st.session_state['email_copy_prompt'] = email_copy_prompt
-    prompt_cur_ec = email_copy_prompt
+    prompt_cur_ec = email_copy_prompt or ""
     ends_with_brace_ec = prompt_cur_ec.rstrip().endswith("{{") or prompt_cur_ec.rstrip().endswith("{")
     if ends_with_brace_ec:
         placeholders_comp_ec = [p for (_, p, _) in vars_def_ec]
