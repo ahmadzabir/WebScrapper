@@ -17,6 +17,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 import hashlib
+import sqlite3
+import tempfile
 
 # Phase 3: Extraction pipeline imports
 try:
@@ -203,6 +205,195 @@ def get_failure_tracker() -> FailureTracker:
 def reset_failure_tracker():
     global _failure_tracker
     _failure_tracker = FailureTracker()
+
+
+# -------------------------
+# Large Dataset Support: SQLite Persistence for 150k+ leads
+# -------------------------
+
+class ScrapeDatabase:
+    """SQLite database for persisting scrape results - handles 150k+ leads."""
+    
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            # Use temp directory for cloud compatibility
+            db_path = os.path.join(tempfile.gettempdir(), f"scrape_{int(time.time())}.db")
+        self.db_path = db_path
+        self._init_db()
+    
+    def _init_db(self):
+        """Initialize database tables."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scrape_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT NOT NULL,
+                    row_index INTEGER,
+                    scraped_text TEXT,
+                    company_summary TEXT,
+                    email_copy TEXT,
+                    result_status TEXT DEFAULT 'pending',
+                    http_status INTEGER,
+                    error_message TEXT,
+                    extracted_method TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scrape_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT UNIQUE NOT NULL,
+                    total_urls INTEGER,
+                    processed_urls INTEGER DEFAULT 0,
+                    failed_urls INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'running',
+                    config_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_results_url ON scrape_results(url)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_results_status ON scrape_results(result_status)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_results_row ON scrape_results(row_index)
+            """)
+    
+    def insert_result(self, url: str, row_index: int, scraped_text: str = "", 
+                     company_summary: str = "", email_copy: str = "",
+                     result_status: str = "pending", http_status: Optional[int] = None,
+                     error_message: str = "", extracted_method: str = ""):
+        """Insert a scrape result."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO scrape_results 
+                (url, row_index, scraped_text, company_summary, email_copy, 
+                 result_status, http_status, error_message, extracted_method)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (url, row_index, scraped_text, company_summary, email_copy,
+                 result_status, http_status, error_message, extracted_method))
+    
+    def get_results(self, status: Optional[str] = None, limit: int = 1000, offset: int = 0) -> pd.DataFrame:
+        """Get results as DataFrame."""
+        with sqlite3.connect(self.db_path) as conn:
+            if status:
+                query = """
+                    SELECT url, row_index, scraped_text, company_summary, email_copy,
+                           result_status, http_status, error_message, extracted_method
+                    FROM scrape_results 
+                    WHERE result_status = ?
+                    ORDER BY row_index
+                    LIMIT ? OFFSET ?
+                """
+                return pd.read_sql_query(query, conn, params=(status, limit, offset))
+            else:
+                query = """
+                    SELECT url, row_index, scraped_text, company_summary, email_copy,
+                           result_status, http_status, error_message, extracted_method
+                    FROM scrape_results 
+                    ORDER BY row_index
+                    LIMIT ? OFFSET ?
+                """
+                return pd.read_sql_query(query, conn, params=(limit, offset))
+    
+    def get_count(self, status: Optional[str] = None) -> int:
+        """Get count of results."""
+        with sqlite3.connect(self.db_path) as conn:
+            if status:
+                cursor = conn.execute("SELECT COUNT(*) FROM scrape_results WHERE result_status = ?", (status,))
+            else:
+                cursor = conn.execute("SELECT COUNT(*) FROM scrape_results")
+            return cursor.fetchone()[0]
+    
+    def get_stats(self) -> dict:
+        """Get scrape statistics."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN result_status = 'success' THEN 1 ELSE 0 END) as successes,
+                    SUM(CASE WHEN result_status = 'partial' THEN 1 ELSE 0 END) as partials,
+                    SUM(CASE WHEN result_status = 'failed' THEN 1 ELSE 0 END) as failures
+                FROM scrape_results
+            """)
+            row = cursor.fetchone()
+            return {
+                'total': row[0],
+                'successes': row[1] or 0,
+                'partials': row[2] or 0,
+                'failures': row[3] or 0
+            }
+    
+    def export_to_csv(self, output, chunk_size: int = 5000):
+        """Export all results to CSV in chunks (memory efficient).
+        
+        Args:
+            output: Either a file path (str) or a file-like object (StringIO/BytesIO)
+            chunk_size: Number of rows per chunk
+        """
+        offset = 0
+        first_chunk = True
+        csv_buffer = None
+        
+        # Check if output is a file path or file-like object
+        is_file_path = isinstance(output, str)
+        
+        while True:
+            df = self.get_results(limit=chunk_size, offset=offset)
+            if df.empty:
+                break
+            
+            if first_chunk:
+                if is_file_path:
+                    df.to_csv(output, index=False, encoding='utf-8-sig')
+                else:
+                    # For StringIO, accumulate in buffer
+                    csv_buffer = df.to_csv(index=False, encoding='utf-8-sig')
+                first_chunk = False
+            else:
+                if is_file_path:
+                    df.to_csv(output, index=False, encoding='utf-8-sig', mode='a', header=False)
+                else:
+                    # For StringIO, append without header
+                    csv_buffer += df.to_csv(index=False, encoding='utf-8-sig', header=False)
+            
+            offset += chunk_size
+        
+        # If using StringIO, write accumulated buffer
+        if not is_file_path and csv_buffer:
+            output.write(csv_buffer)
+    
+    def close(self):
+        """Clean up database file."""
+        try:
+            if os.path.exists(self.db_path):
+                os.remove(self.db_path)
+        except:
+            pass
+
+
+# Global database instance (per session)
+_scrape_db = None
+
+def get_scrape_db() -> Optional[ScrapeDatabase]:
+    global _scrape_db
+    return _scrape_db
+
+def init_scrape_db() -> ScrapeDatabase:
+    global _scrape_db
+    _scrape_db = ScrapeDatabase()
+    return _scrape_db
+
+def reset_scrape_db():
+    global _scrape_db
+    if _scrape_db:
+        _scrape_db.close()
+    _scrape_db = None
 
 
 # -------------------------
@@ -3695,11 +3886,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             cleaned_scraped_text = clean_csv_field(scraped_text)
             cleaned_ai_summary = clean_csv_field(ai_for_csv)
             cleaned_email_copy = clean_csv_field(email_for_csv) if email_copy_enabled else ""
-            # Output: 4 columns when email copy enabled, else 3
+            # Output: 5 columns with row_index when email copy enabled, else 4 (includes url_index)
+            # Format: (url, scraped_text, ai_summary, email_copy, url_index)
+            row_idx = url_index if url_index is not None else -1
             if email_copy_enabled:
-                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy)
+                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy, row_idx)
             else:
-                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
+                out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, row_idx)
             await result_queue.put(out)
         except Exception as e:
             # If anything goes wrong, still output an error row
@@ -3723,22 +3916,24 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     return field_str
                 
                 original_url_val = original_url if 'original_url' in locals() else "unknown URL"
+                row_idx = url_index if 'url_index' in locals() and url_index is not None else -1
                 error_msg = f"❌ Worker error processing {original_url_val}: {str(e)}"
                 cleaned_url = clean_csv_field(original_url_val)
                 cleaned_scraped_text = clean_csv_field(error_msg)
                 cleaned_ai_summary = clean_csv_field("")
                 cleaned_email_copy = clean_csv_field("")
                 if email_copy_enabled:
-                    out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy)
+                    out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy, row_idx)
                 else:
-                    out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary)
+                    out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, row_idx)
                 await result_queue.put(out)
             except:
                 try:
+                    row_idx = url_index if 'url_index' in locals() and url_index is not None else -1
                     if email_copy_enabled:
-                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", ""))
+                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", "", row_idx))
                     else:
-                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", ""))
+                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", row_idx))
                 except:
                     pass  # If even this fails, just continue
         finally:
@@ -3751,12 +3946,16 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                            start_part: int = 0, checkpoint_data: dict | None = None,
                            checkpoint_path: str | None = None,
                            log_callback=None, include_email_copy: bool = False,
-                           original_df: pd.DataFrame = None, csv_config: dict = None):
+                           original_df: pd.DataFrame = None, csv_config: dict = None,
+                           use_database: bool = True):
     """
-    Write results to disk. If checkpoint_data and checkpoint_path are provided,
+    Write results to disk and/or database. If checkpoint_data and checkpoint_path are provided,
     saves progress after each file write for crash recovery and resume.
     
     If original_df is provided, merges scraped data with original CSV columns.
+    
+    For large datasets (150k+ leads), use_database=True enables SQLite persistence
+    which handles results in memory-efficient chunks.
     """
     def emit(msg: str):
         print(msg)
@@ -3775,6 +3974,15 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         import traceback
         traceback.print_exc()
         return  # Exit if we can't create directory
+    
+    # Initialize database for large dataset support
+    db = None
+    if use_database and total_urls > 1000:  # Use database for large datasets
+        try:
+            db = init_scrape_db()
+            emit(f"🗄️ Writer: Initialized SQLite database for {total_urls:,} URLs")
+        except Exception as e:
+            emit(f"⚠️ Writer: Could not initialize database: {e}")
     
     # Prepare original DataFrame for merging if provided
     has_original_df = original_df is not None and not original_df.empty
@@ -3813,6 +4021,33 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         result_queue.task_done()  # CRITICAL: one per item (join() counts these)
         if progress_callback:
             progress_callback(processed, total_urls)
+
+        # Save to database for large datasets (memory-efficient)
+        if db and buffer:
+            for row in buffer:
+                if len(row) >= 2:
+                    url = str(row[0]).strip() if row[0] else ""
+                    scraped_text = str(row[1]) if row[1] else ""
+                    ai_summary = str(row[2]) if len(row) >= 3 and row[2] else ""
+                    email_copy = str(row[3]) if include_email_copy and len(row) >= 4 and row[3] else ""
+                    row_index = row[4] if len(row) >= 5 and row[4] is not None else processed - 1
+                    
+                    # Determine result status
+                    result_status = 'success' if scraped_text and not scraped_text.startswith('❌') else 'failed'
+                    if scraped_text and (scraped_text.startswith('⚠️') or scraped_text.startswith('No relevant content')):
+                        result_status = 'partial'
+                    
+                    try:
+                        db.insert_result(
+                            url=url,
+                            row_index=row_index,
+                            scraped_text=scraped_text,
+                            company_summary=ai_summary,
+                            email_copy=email_copy,
+                            result_status=result_status
+                        )
+                    except Exception as e:
+                        emit(f"⚠️ Database: Error saving result for {url[:50]}: {e}")
 
         # Process results and update enriched_df if available
         if has_original_df and buffer:
@@ -4378,6 +4613,21 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         emit("❌ No URLs to process. Exiting.")
         return
 
+    # Auto-adjust concurrency for large datasets to avoid overwhelming resources
+    total_urls_count = len(urls)
+    if total_urls_count > 50000:
+        # For 50k+ URLs, reduce concurrency to prevent memory exhaustion
+        original_concurrency = concurrency
+        concurrency = min(concurrency, 10)  # Cap at 10 workers for very large datasets
+        if concurrency != original_concurrency:
+            emit(f"🔧 Large dataset detected ({total_urls_count:,} URLs). Reduced concurrency from {original_concurrency} to {concurrency} for stability.")
+    elif total_urls_count > 20000:
+        # For 20k+ URLs, moderate concurrency
+        original_concurrency = concurrency
+        concurrency = min(concurrency, 15)
+        if concurrency != original_concurrency:
+            emit(f"🔧 Large dataset detected ({total_urls_count:,} URLs). Reduced concurrency from {original_concurrency} to {concurrency} for stability.")
+
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_path = get_checkpoint_path(output_dir)
     checkpoint_data = load_checkpoint(checkpoint_path)
@@ -4525,7 +4775,11 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                             url_queue.task_done()
                             continue
                         url, idx = (item[0], item[1]) if isinstance(item, tuple) else (item, None)
-                        err_result = (url, "❌ Stall: worker stopped after recovery wait", "", "") if email_copy_enabled else (url, "❌ Stall: worker stopped after recovery wait", "")
+                        row_idx = idx if idx is not None else -1
+                        if email_copy_enabled:
+                            err_result = (url, "❌ Stall: worker stopped after recovery wait", "", "", row_idx)
+                        else:
+                            err_result = (url, "❌ Stall: worker stopped after recovery wait", "", row_idx)
                         for _ in range(20):
                             try:
                                 result_queue.put_nowait(err_result)
@@ -4584,8 +4838,13 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                     url_queue.task_done()
                     continue
                 url = item[0] if isinstance(item, tuple) else item
+                idx = item[1] if isinstance(item, tuple) and len(item) > 1 else None
+                row_idx = idx if idx is not None else -1
                 err_msg = "❌ Stall: worker stopped" if stall_triggered else f"❌ Timeout: exceeded {max_queue_time}s"
-                err_result = (url, err_msg, "", "") if email_copy_enabled else (url, err_msg, "")
+                if email_copy_enabled:
+                    err_result = (url, err_msg, "", "", row_idx)
+                else:
+                    err_result = (url, err_msg, "", row_idx)
                 for _ in range(30):
                     try:
                         result_queue.put_nowait(err_result)
@@ -6652,13 +6911,19 @@ if uploaded_file and start_clicked and can_start:
         st.stop()
     
     # Phase 7: Cloud Mode - Enforce batch size limits
-    CLOUD_MODE_MAX_URLS = 300  # Maximum URLs per run in cloud mode
+    # With SQLite persistence and memory-efficient processing, we can handle much larger datasets
+    CLOUD_MODE_MAX_URLS = 100000  # Maximum URLs per run in cloud mode (150k recommended for paid tiers)
+    MAX_RECOMMENDED_URLS = 150000  # Soft limit with warning
+    
     if is_cloud_mode() and total > CLOUD_MODE_MAX_URLS:
-        st.warning(f"⚠️ **Cloud Mode:** Your CSV has {total:,} URLs. Limiting to first {CLOUD_MODE_MAX_URLS:,} URLs.")
-        st.info("For larger batches, download and run the scraper locally.")
+        st.warning(f"⚠️ **Cloud Mode Limit:** Your CSV has {total:,} URLs. Maximum is {CLOUD_MODE_MAX_URLS:,} URLs per run.")
+        st.info("💡 **Tip:** For 150k+ leads, consider splitting into multiple CSV files and running them sequentially.")
         urls = urls[:CLOUD_MODE_MAX_URLS]
         url_list_with_idx = url_list_with_idx[:CLOUD_MODE_MAX_URLS]
         total = len(urls)
+    elif total > MAX_RECOMMENDED_URLS:
+        st.info(f"ℹ️ Your CSV has {total:,} URLs. For best performance with {MAX_RECOMMENDED_URLS:,}+ leads, the app uses database persistence and memory-efficient streaming.")
+        st.caption("Large dataset mode: Results are saved incrementally to prevent memory issues.")
     
     # Prepare lead data mapping (filtered index -> lead data dict)
     lead_data_map = {}
@@ -7678,6 +7943,26 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
     if total > 0:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website.")
     
+    # Large Dataset: Offer database-backed download option
+    db = get_scrape_db()
+    if db and total > 5000:
+        st.info(f"📊 **Large Dataset Mode:** Results are stored in database. You can download partial results at any time.")
+        
+        # Get stats from database
+        try:
+            stats = db.get_stats()
+            col_db1, col_db2, col_db3, col_db4 = st.columns(4)
+            with col_db1:
+                st.metric("Total", f"{stats['total']:,}")
+            with col_db2:
+                st.metric("Success", f"{stats['successes']:,}", f"{stats['successes']/stats['total']*100:.1f}%" if stats['total'] > 0 else "0%")
+            with col_db3:
+                st.metric("Partial", f"{stats['partials']:,}")
+            with col_db4:
+                st.metric("Failed", f"{stats['failures']:,}")
+        except Exception:
+            pass
+    
     # Cloud mode warning - downloads may expire
     if is_cloud_mode():
         st.warning("⚠️ **Important:** Downloads are stored temporarily. If you refresh or leave this page, files may be lost. Download NOW to save your results.")
@@ -7951,6 +8236,28 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
         csv_data = st.session_state.get('combined_csv_data')
         csv_filename = st.session_state.get('combined_csv_filename')
         combined_df = st.session_state.get('combined_df')
+        
+        # Check for database-backed large dataset download
+        db = get_scrape_db()
+        if db and st.session_state.get('total_processed', 0) > 5000:
+            # Offer database export for large datasets
+            if st.button("📊 Export from Database (Large Dataset)", key="export_db_csv", type="secondary"):
+                with st.spinner("Exporting from database..."):
+                    try:
+                        import io
+                        csv_buffer = io.StringIO()
+                        db.export_to_csv(csv_buffer, chunk_size=5000)
+                        csv_data = csv_buffer.getvalue().encode('utf-8-sig')
+                        st.download_button(
+                            label="⬇️ Download Database Export",
+                            data=csv_data,
+                            file_name=f"{run_folder or 'results'}_database_export.csv",
+                            mime="text/csv",
+                            help="Direct export from database for large datasets",
+                            key="download_db_export"
+                        )
+                    except Exception as e:
+                        st.error(f"Database export failed: {e}")
         
         if csv_data and csv_filename:
             st.download_button(
