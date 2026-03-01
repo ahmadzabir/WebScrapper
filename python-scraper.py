@@ -5560,14 +5560,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Desktop app download - direct download link (setup file downloads when release exists)
-RELEASES_URL = "https://github.com/ahmadzabir/WebScrapper/releases/latest"
-WIN_SETUP_URL = f"{RELEASES_URL}/download/WebScrapperDesktop-Setup.exe"
+# Desktop app download - releases page (never 404s)
+RELEASES_URL = "https://github.com/ahmadzabir/WebScrapper/releases"
 
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
-    st.link_button("⬇️ Download for Windows", WIN_SETUP_URL, type="primary", use_container_width=True)
-st.caption("Runs locally — no limits. [Mac/Linux](https://github.com/ahmadzabir/WebScrapper/releases/latest)")
+    st.link_button("⬇️ Download for Windows", RELEASES_URL, type="primary", use_container_width=True)
+st.caption("Opens the releases page — click **WebScrapperDesktop-Setup.exe** to download. No release yet? Run the [Build workflow](https://github.com/ahmadzabir/WebScrapper/actions/workflows/desktop-build.yml) first.")
 
 # Step indicator - shows progress through the workflow
 def render_step_indicator(current_step):
