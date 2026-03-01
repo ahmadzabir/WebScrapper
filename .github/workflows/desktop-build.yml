@@ -1,7 +1,15 @@
 name: Build Desktop App (Windows, Mac, Linux)
 
+permissions:
+  contents: write  # needed to create releases and upload assets
+
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for release (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
   push:
     tags:
       - "desktop-v*"
@@ -18,8 +26,9 @@ jobs:
         shell: pwsh
       - shell: pwsh
         run: |
-          $v = "${{ github.ref_name }}"
-          if ($v -like "desktop-v*") { $v = $v.Replace("desktop-v", "") } else { $v = "0.0.0-dev" }
+          $v = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ github.event.inputs.version }}" } else { "${{ github.ref_name }}" }
+          if ($v -like "desktop-v*") { $v = $v.Replace("desktop-v", "") }
+          if (-not $v) { $v = "1.0.0" }
           ./desktop_app/build_windows.ps1 -Clean -Version $v
       - uses: actions/upload-artifact@v4
         with:
@@ -37,8 +46,9 @@ jobs:
           python-version: "3.11"
       - run: chmod +x desktop_app/build_mac.sh
       - run: |
-          v="${{ github.ref_name }}"
-          [ "${v#desktop-v}" != "$v" ] && v="${v#desktop-v}" || v="0.0.0-dev"
+          v="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}"
+          [ "${v#desktop-v}" != "$v" ] && v="${v#desktop-v}"
+          [ -z "$v" ] && v="1.0.0"
           ./desktop_app/build_mac.sh "$v"
       - uses: actions/upload-artifact@v4
         with:
@@ -54,8 +64,9 @@ jobs:
           python-version: "3.11"
       - run: chmod +x desktop_app/build_linux.sh
       - run: |
-          v="${{ github.ref_name }}"
-          [ "${v#desktop-v}" != "$v" ] && v="${v#desktop-v}" || v="0.0.0-dev"
+          v="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}"
+          [ "${v#desktop-v}" != "$v" ] && v="${v#desktop-v}"
+          [ -z "$v" ] && v="1.0.0"
           ./desktop_app/build_linux.sh "$v"
       - uses: actions/upload-artifact@v4
         with:
@@ -63,7 +74,7 @@ jobs:
           path: dist/WebScrapperDesktop-Linux.zip
 
   release:
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
     needs: [build-windows, build-mac, build-linux]
     runs-on: ubuntu-latest
     steps:
@@ -72,6 +83,8 @@ jobs:
           path: artifacts
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('desktop-v{0}', github.event.inputs.version) || github.ref_name }}
+          generate_release_notes: true
           files: |
             artifacts/windows/WebScrapperDesktop-Windows.zip
             artifacts/windows/WebScrapperDesktop-Setup.exe

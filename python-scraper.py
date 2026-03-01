@@ -5560,22 +5560,14 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Desktop app download section - OS-specific buttons + fallback
+# Desktop app download - direct download link (setup file downloads when release exists)
 RELEASES_URL = "https://github.com/ahmadzabir/WebScrapper/releases/latest"
 WIN_SETUP_URL = f"{RELEASES_URL}/download/WebScrapperDesktop-Setup.exe"
-MAC_ZIP_URL = f"{RELEASES_URL}/download/WebScrapperDesktop-macOS.zip"
-LINUX_ZIP_URL = f"{RELEASES_URL}/download/WebScrapperDesktop-Linux.zip"
 
-dl1, dl2, dl3, dl4 = st.columns(4)
-with dl1:
-    st.link_button("⬇️ Windows", WIN_SETUP_URL, type="primary", use_container_width=True)
-with dl2:
-    st.link_button("⬇️ Mac", MAC_ZIP_URL, type="secondary", use_container_width=True)
-with dl3:
-    st.link_button("⬇️ Linux", LINUX_ZIP_URL, type="secondary", use_container_width=True)
-with dl4:
-    st.link_button("View all releases", RELEASES_URL, type="secondary", use_container_width=True)
-st.caption("If a download fails (e.g. no release yet), use **View all releases**.")
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    st.link_button("⬇️ Download for Windows", WIN_SETUP_URL, type="primary", use_container_width=True)
+st.caption("Runs locally — no limits. [Mac/Linux](https://github.com/ahmadzabir/WebScrapper/releases/latest)")
 
 # Step indicator - shows progress through the workflow
 def render_step_indicator(current_step):
