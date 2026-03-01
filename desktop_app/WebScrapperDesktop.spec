@@ -8,7 +8,8 @@ project_root = Path.cwd()
 desktop_dir = project_root / "desktop_app"
 
 hiddenimports = []
-hiddenimports += collect_submodules("streamlit")
+# Exclude optional langchain integration to avoid PyInstaller warning when langchain is not installed
+hiddenimports += [m for m in collect_submodules("streamlit") if "streamlit.external.langchain" not in m]
 hiddenimports += [
     "aiohttp",
     "pandas",

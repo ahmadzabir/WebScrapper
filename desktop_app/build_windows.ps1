@@ -70,10 +70,17 @@ if (-not $isccExe) {
 
 if ($isccExe) {
     Write-Host "==> Inno Setup compiler found at: $isccExe"
-    # Run ISCC from desktop_app so .iss relative paths (installer_before.txt, ..\dist) resolve correctly
+    $issPath = Join-Path $ProjectRoot "desktop_app\WebScrapperDesktop.iss"
+    if (-not (Test-Path $issPath)) {
+        throw "Inno Setup script not found: $issPath"
+    }
+    # Run ISCC from desktop_app so .iss relative paths (..\dist, etc.) resolve correctly
     Push-Location (Join-Path $ProjectRoot "desktop_app")
     try {
         & $isccExe "/DMyAppVersion=$Version" "WebScrapperDesktop.iss"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+        }
     }
     finally {
         Pop-Location
