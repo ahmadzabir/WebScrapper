@@ -70,9 +70,10 @@ if (-not $isccExe) {
 
 if ($isccExe) {
     Write-Host "==> Inno Setup compiler found at: $isccExe"
-    Push-Location $ProjectRoot
+    # Run ISCC from desktop_app so .iss relative paths (installer_before.txt, ..\dist) resolve correctly
+    Push-Location (Join-Path $ProjectRoot "desktop_app")
     try {
-        & $isccExe "/DMyAppVersion=$Version" (Join-Path $ProjectRoot "desktop_app\WebScrapperDesktop.iss")
+        & $isccExe "/DMyAppVersion=$Version" "WebScrapperDesktop.iss"
     }
     finally {
         Pop-Location

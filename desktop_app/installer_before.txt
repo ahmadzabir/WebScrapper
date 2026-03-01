@@ -1,13 +1,1 @@
-Windows SmartScreen / Antivirus Notice
-=====================================
-
-This app is not code-signed. Windows may show a "Windows protected your PC" or SmartScreen warning when you first run it.
-
-What to do:
-1. Click "More info" on the warning
-2. Click "Run anyway"
-
-Or: Right-click the shortcut > Properties > check "Unblock" at the bottom > OK
-
-The app is open-source. You can inspect the code at:
-https://github.com/ahmadzabir/WebScrapper
+This installer will guide you through the installation of WebScrapper Desktop.

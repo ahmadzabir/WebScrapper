@@ -13,15 +13,13 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\WebScrapper Desktop
 DefaultGroupName=WebScrapper Desktop
 AllowNoIcons=yes
-LicenseFile=
 InfoBeforeFile=installer_before.txt
-InfoAfterFile=
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-OutputDir=dist
+OutputDir=..\dist
 OutputBaseFilename=WebScrapperDesktop-Setup
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -33,7 +31,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "dist\WebScrapperDesktop.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\WebScrapperDesktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\WebScrapper Desktop"; Filename: "{app}\{#MyAppExeName}"
