@@ -21,7 +21,13 @@ if ($Clean) {
 
 if (-not (Test-Path $VenvPath)) {
     Write-Host "==> Creating virtual environment"
-    py -3.11 -m venv $VenvPath
+    # Use 'python' from PATH when available (e.g. GitHub Actions setup-python); else py -3.11
+    $pythonCmd = Get-Command "python" -ErrorAction SilentlyContinue
+    if ($pythonCmd) {
+        & python -m venv $VenvPath
+    } else {
+        & py -3.11 -m venv $VenvPath
+    }
 }
 
 $PythonExe = Join-Path $VenvPath "Scripts\python.exe"

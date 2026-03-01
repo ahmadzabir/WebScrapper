@@ -13,7 +13,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\WebScrapper Desktop
 DefaultGroupName=WebScrapper Desktop
 AllowNoIcons=yes
-InfoBeforeFile=installer_before.txt
+; InfoBeforeFile omitted: relative paths cause desktop_app\desktop_app resolution in CI
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma

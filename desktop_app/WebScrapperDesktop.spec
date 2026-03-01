@@ -29,9 +29,9 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(project_root / "python-scraper.py"), "."),
-        (str(project_root / ".streamlit" / "config.toml"), ".streamlit"),
-        (str(project_root / "VERSION"), ".") if (project_root / "VERSION").exists() else (str(desktop_dir / "VERSION.default"), "VERSION"),
-    ],
+    ]
+    + ([(str(project_root / ".streamlit" / "config.toml"), ".streamlit")] if (project_root / ".streamlit" / "config.toml").exists() else [])
+    + [(str(project_root / "VERSION"), ".") if (project_root / "VERSION").exists() else (str(desktop_dir / "VERSION.default"), "VERSION")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

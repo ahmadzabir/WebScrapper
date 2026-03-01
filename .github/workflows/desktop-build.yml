@@ -36,6 +36,7 @@ jobs:
           path: |
             dist/WebScrapperDesktop-Windows.zip
             dist/WebScrapperDesktop-Setup.exe
+          if-no-files-found: warn
 
   build-mac:
     runs-on: macos-latest
@@ -54,6 +55,7 @@ jobs:
         with:
           name: macos
           path: dist/WebScrapperDesktop-macOS.zip
+          if-no-files-found: warn
 
   build-linux:
     runs-on: ubuntu-latest
@@ -72,6 +74,7 @@ jobs:
         with:
           name: linux
           path: dist/WebScrapperDesktop-Linux.zip
+          if-no-files-found: warn
 
   release:
     if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
