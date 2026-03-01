@@ -5560,13 +5560,16 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Desktop app download - releases page (never 404s)
+# Desktop app download
 RELEASES_URL = "https://github.com/ahmadzabir/WebScrapper/releases"
+RUN_BUILD_URL = "https://github.com/ahmadzabir/WebScrapper/actions/workflows/desktop-build.yml"
 
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
+dl_col1, dl_col2 = st.columns(2)
+with dl_col1:
     st.link_button("⬇️ Download for Windows", RELEASES_URL, type="primary", use_container_width=True)
-st.caption("Opens the releases page — click **WebScrapperDesktop-Setup.exe** to download. No release yet? Run the [Build workflow](https://github.com/ahmadzabir/WebScrapper/actions/workflows/desktop-build.yml) first.")
+with dl_col2:
+    st.link_button("🔧 Create first release", RUN_BUILD_URL, type="secondary", use_container_width=True)
+st.caption("**Download:** Opens releases → click WebScrapperDesktop-Setup.exe. **Create first release:** Run the build workflow (takes ~15 min), then the download will work.")
 
 # Step indicator - shows progress through the workflow
 def render_step_indicator(current_step):
