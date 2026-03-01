@@ -36,7 +36,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["langchain"],
+    excludes=["langchain", "streamlit.external.langchain"],
     noarchive=False,
 )
 

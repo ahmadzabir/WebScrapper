@@ -13,7 +13,6 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\WebScrapper Desktop
 DefaultGroupName=WebScrapper Desktop
 AllowNoIcons=yes
-InfoBeforeFile=installer_before.txt
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma
