@@ -31,3 +31,12 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Desktop build artifacts
+build/
+dist/
+*.spec.bak
+.venv-desktop/
+.venv-desktop-mac/
+.venv-desktop-linux/
+VERSION

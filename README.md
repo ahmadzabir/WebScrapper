@@ -102,6 +102,32 @@ This app is ready to deploy! See **[DEPLOYMENT.md](DEPLOYMENT.md)** for detailed
 ### ⚠️ Not Supported:
 - **Vercel** - Does not support Streamlit apps (see `VERCEL_DEPLOYMENT.md` for details)
 
+## 🖥️ Windows Desktop App
+
+You can now package this as a downloadable Windows desktop app while keeping the same scraper logic.
+
+- Desktop launcher source: `desktop_app/launcher.py`
+- Windows build script: `desktop_app/build_windows.ps1`
+- Build instructions: `desktop_app/README.md`
+- Download landing page: `landing-page/index.html`
+- CI build workflow: `.github/workflows/windows-desktop-build.yml`
+- Landing page deploy workflow: `.github/workflows/deploy-landing-page.yml`
+
+### Build Windows executable + installer
+
+```powershell
+./desktop_app/build_windows.ps1 -Clean
+```
+
+Output package:
+
+- `dist/WebScrapperDesktop-Windows.zip`
+- `dist/WebScrapperDesktop-Setup.exe`
+
+### Release flow (GitHub Actions)
+
+Push a tag that starts with `desktop-v` (example: `desktop-v1.0.0`) to trigger a Windows build and publish both ZIP + installer to GitHub Releases.
+
 ## ⚙️ Configuration
 
 Inside the UI you can adjust:

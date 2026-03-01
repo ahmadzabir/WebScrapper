@@ -1,0 +1,79 @@
+name: Build Desktop App (Windows, Mac, Linux)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: choco install innosetup --no-progress -y
+        shell: pwsh
+      - shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          if ($v -like "desktop-v*") { $v = $v.Replace("desktop-v", "") } else { $v = "0.0.0-dev" }
+          ./desktop_app/build_windows.ps1 -Clean -Version $v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/WebScrapperDesktop-Windows.zip
+            dist/WebScrapperDesktop-Setup.exe
+
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: chmod +x desktop_app/build_mac.sh
+      - run: |
+          v="${{ github.ref_name }}"
+          [ "${v#desktop-v}" != "$v" ] && v="${v#desktop-v}" || v="0.0.0-dev"
+          ./desktop_app/build_mac.sh "$v"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/WebScrapperDesktop-macOS.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: chmod +x desktop_app/build_linux.sh
+      - run: |
+          v="${{ github.ref_name }}"
+          [ "${v#desktop-v}" != "$v" ] && v="${v#desktop-v}" || v="0.0.0-dev"
+          ./desktop_app/build_linux.sh "$v"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/WebScrapperDesktop-Linux.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: [build-windows, build-mac, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/windows/WebScrapperDesktop-Windows.zip
+            artifacts/windows/WebScrapperDesktop-Setup.exe
+            artifacts/macos/WebScrapperDesktop-macOS.zip
+            artifacts/linux/WebScrapperDesktop-Linux.zip

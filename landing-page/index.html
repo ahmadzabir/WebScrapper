@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Download WebScrapper Desktop</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #111a2b;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #22d3ee;
+      --accent2: #0ea5e9;
+      --border: #23324a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: linear-gradient(180deg, #0b1220 0%, #0a1020 100%);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 700px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      text-align: center;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(1.6rem, 4vw, 2.3rem);
+    }
+    p {
+      margin: 0 auto 22px;
+      color: var(--muted);
+      max-width: 560px;
+    }
+    .download-btn {
+      display: inline-block;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 1rem;
+      color: #022935;
+      background: linear-gradient(135deg, var(--accent2), var(--accent));
+      padding: 14px 24px;
+      border-radius: 12px;
+      margin-bottom: 14px;
+    }
+    .small {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    ol {
+      text-align: left;
+      color: var(--muted);
+      max-width: 470px;
+      margin: 22px auto 0;
+    }
+    code {
+      background: #0d1729;
+      border: 1px solid #2a3d5e;
+      border-radius: 6px;
+      padding: 2px 6px;
+      color: #bae6fd;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>WebScrapper Desktop</h1>
+    <p>Click download, run setup, and launch the app from your Start menu like a normal Windows app.</p>
+
+    <a
+      class="download-btn"
+      href="https://github.com/ahmadzabir/WebScrapper/releases/latest/download/WebScrapperDesktop-Setup.exe"
+      rel="noopener noreferrer"
+    >
+      Download for Windows
+    </a>
+    <div class="small">If download does not start, open <a href="https://github.com/ahmadzabir/WebScrapper/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a>.</div>
+
+    <ol>
+      <li>Open <code>WebScrapperDesktop-Setup.exe</code>.</li>
+      <li>Follow installer prompts.</li>
+      <li>Launch <strong>WebScrapper Desktop</strong> from Start menu.</li>
+    </ol>
+  </main>
+</body>
+</html>
