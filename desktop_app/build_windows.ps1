@@ -80,6 +80,13 @@ if ($isccExe) {
     if (-not (Test-Path $issPath)) {
         throw "Inno Setup script not found: $issPath"
     }
+    # Fix InfoBeforeFile: wrong path causes desktop_app\desktop_app\installer_before.txt in CI — comment it out
+    $issContent = Get-Content -Path $issPath -Raw -Encoding UTF8
+    if ($issContent -match 'InfoBeforeFile=desktop_app\\installer_before\.txt') {
+        $issContent = $issContent -replace 'InfoBeforeFile=desktop_app\\installer_before\.txt', ';InfoBeforeFile=desktop_app\installer_before.txt (disabled: wrong path in CI)'
+        Set-Content -Path $issPath -Value $issContent -NoNewline -Encoding UTF8
+        Write-Host "==> Disabled incorrect InfoBeforeFile path in WebScrapperDesktop.iss"
+    }
     # Run ISCC from desktop_app so .iss relative paths (..\dist, etc.) resolve correctly
     Push-Location (Join-Path $ProjectRoot "desktop_app")
     try {
