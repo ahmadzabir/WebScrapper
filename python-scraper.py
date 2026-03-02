@@ -7523,8 +7523,6 @@ if uploaded_file and start_clicked and can_start:
     # When run used enriched mode (original CSV + new columns), writer only writes enriched_output.* — no part files. Populate session so download buttons work.
     if (has_enriched_csv or has_enriched_xlsx) and (not csv_files and not excel_files):
         try:
-            EXCEL_COLS_4 = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"]
-            EXCEL_COLS_3 = ["Website", "ScrapedText", "CompanySummary"]
             if has_enriched_csv:
                 with open(enriched_csv_path, 'rb') as f:
                     st.session_state['combined_csv_data'] = f.read()
@@ -7740,6 +7738,24 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
             )
             if combined_df is not None:
                 st.caption(f"{len(combined_df)} total rows")
+        elif output_dir and os.path.isfile(os.path.join(output_dir, "enriched_output.xlsx")) and os.path.getsize(os.path.join(output_dir, "enriched_output.xlsx")) > 0:
+            # Enriched-only run (no part files): load from disk so download works after refresh
+            try:
+                _excel_path = os.path.join(output_dir, "enriched_output.xlsx")
+                with open(_excel_path, 'rb') as f:
+                    _data = f.read()
+                st.session_state['combined_excel_data'] = _data
+                st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
+                st.download_button(
+                    label="⬇️ Download Combined Excel",
+                    data=_data,
+                    file_name=f"{run_folder}_combined.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Website URL, scraped content, company summary, and email copy only (4 columns)",
+                    key="download_excel_enriched"
+                )
+            except Exception as e:
+                st.warning(f"Could not load Excel: {e}")
         elif excel_files:
             # Regenerate combined Excel file from existing Excel files
             if not output_dir:
@@ -8041,8 +8057,8 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
             )
             if combined_df is not None:
                 st.caption(f"{len(combined_df)} total rows")
-        elif csv_files and output_dir and os.path.isdir(output_dir):
-            # Restore combined CSV from disk so download stays after refresh
+        elif output_dir and os.path.isdir(output_dir):
+            # Restore combined CSV from disk (enriched_output.csv or part files) so download works after refresh
             try:
                 enriched_path = os.path.join(output_dir, "enriched_output.csv")
                 if os.path.isfile(enriched_path) and os.path.getsize(enriched_path) > 0:
@@ -8097,13 +8113,22 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
             st.info("No CSV files generated")
     
     
-    # File list
+    # File list (include enriched_output.* when present, since enriched-only runs have no part files)
     with st.expander("📋 View Generated Files", expanded=False):
+        csv_to_show = list(csv_files)
+        excel_to_show = list(excel_files)
+        if output_dir:
+            if os.path.isfile(os.path.join(output_dir, "enriched_output.csv")):
+                if "enriched_output.csv" not in csv_to_show:
+                    csv_to_show.append("enriched_output.csv")
+            if os.path.isfile(os.path.join(output_dir, "enriched_output.xlsx")):
+                if "enriched_output.xlsx" not in excel_to_show:
+                    excel_to_show.append("enriched_output.xlsx")
         st.write("**CSV Files:**")
-        for f in sorted(csv_files):
+        for f in sorted(csv_to_show):
             st.code(f, language=None)
         st.write("**Excel Files:**")
-        for f in sorted(excel_files):
+        for f in sorted(excel_to_show):
             st.code(f, language=None)
         if output_dir:
             st.write(f"**Location:** `{output_dir}`")
