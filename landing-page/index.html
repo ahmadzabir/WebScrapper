@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Download WebScrapper Desktop</title>
+  <title>Web Scraper — Streamlit</title>
   <style>
     :root {
       --bg: #0b1220;
@@ -27,7 +27,7 @@
     }
     .card {
       width: 100%;
-      max-width: 700px;
+      max-width: 640px;
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -35,16 +35,9 @@
       text-align: center;
       box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
     }
-    h1 {
-      margin: 0 0 10px;
-      font-size: clamp(1.6rem, 4vw, 2.3rem);
-    }
-    p {
-      margin: 0 auto 22px;
-      color: var(--muted);
-      max-width: 560px;
-    }
-    .download-btn {
+    h1 { margin: 0 0 10px; font-size: clamp(1.6rem, 4vw, 2.3rem); }
+    p { margin: 0 auto 16px; color: var(--muted); max-width: 520px; }
+    .btn {
       display: inline-block;
       text-decoration: none;
       font-weight: 700;
@@ -53,47 +46,47 @@
       background: linear-gradient(135deg, var(--accent2), var(--accent));
       padding: 14px 24px;
       border-radius: 12px;
-      margin-bottom: 14px;
+      margin: 8px;
     }
-    .small {
-      font-size: 0.9rem;
-      color: var(--muted);
-      margin-top: 4px;
+    .btn.secondary {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--border);
     }
-    ol {
-      text-align: left;
-      color: var(--muted);
-      max-width: 470px;
-      margin: 22px auto 0;
-    }
+    .small { font-size: 0.9rem; color: var(--muted); margin-top: 8px; }
+    section { text-align: left; max-width: 480px; margin: 24px auto 0; color: var(--muted); }
+    section h2 { font-size: 1rem; color: var(--text); margin-bottom: 8px; }
     code {
       background: #0d1729;
       border: 1px solid #2a3d5e;
       border-radius: 6px;
       padding: 2px 6px;
       color: #bae6fd;
+      font-size: 0.9em;
     }
+    pre { background: #0d1729; border: 1px solid #2a3d5e; border-radius: 8px; padding: 12px; overflow-x: auto; text-align: left; }
+    pre code { border: none; padding: 0; }
   </style>
 </head>
 <body>
   <main class="card">
-    <h1>WebScrapper Desktop</h1>
-    <p>Click download, run setup, and launch the app from your Start menu like a normal Windows app.</p>
+    <h1>🌐 Web Scraper</h1>
+    <p>Upload a CSV of URLs and scrape clean text (and optional AI summaries). No installers—use in the browser or run locally with two commands.</p>
 
-    <a
-      class="download-btn"
-      href="https://github.com/ahmadzabir/WebScrapper/releases/latest/download/WebScrapperDesktop-Setup.exe"
-      rel="noopener noreferrer"
-    >
-      Download for Windows
-    </a>
-    <div class="small">If download does not start, open <a href="https://github.com/ahmadzabir/WebScrapper/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a>.</div>
+    <a class="btn" href="https://github.com/ahmadzabir/WebScrapper" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+    <a class="btn secondary" href="https://github.com/ahmadzabir/WebScrapper#-how-to-use-the-app" target="_blank" rel="noopener noreferrer">How to run</a>
 
-    <ol>
-      <li>Open <code>WebScrapperDesktop-Setup.exe</code>.</li>
-      <li>Follow installer prompts.</li>
-      <li>Launch <strong>WebScrapper Desktop</strong> from Start menu.</li>
-    </ol>
+    <section>
+      <h2>Use online</h2>
+      <p>Deploy to <a href="https://share.streamlit.io" target="_blank" rel="noopener noreferrer">Streamlit Cloud</a> (free), connect your GitHub repo, and use the app in the browser. See the repo README for deploy steps.</p>
+    </section>
+    <section>
+      <h2>Run locally</h2>
+      <p>You need Python 3.10+. In the project folder run:</p>
+      <pre><code>pip install -r requirements.txt
+streamlit run python-scraper.py</code></pre>
+      <p class="small">Then open the URL shown (e.g. <code>http://localhost:8501</code>) and upload your CSV.</p>
+    </section>
   </main>
 </body>
 </html>

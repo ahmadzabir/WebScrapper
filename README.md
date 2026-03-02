@@ -1,6 +1,6 @@
 # 🌐 Async Web Scraper
 
-A high-performance asynchronous web scraper built with Python, aiohttp, asyncio, pandas, and Streamlit. It fetches website content, cleans HTML, follows internal links, and saves results in chunked CSV files for easy download.
+A high-performance asynchronous web scraper built with Python and **Streamlit**. Upload a CSV of URLs, run in the browser (or on Streamlit Cloud), and get cleaned text plus optional AI summaries. No installers—just Python and two commands to run locally.
 
 ## ✨ Features
 
@@ -45,88 +45,43 @@ Each file contains two columns:
 
 All CSV files are automatically zipped into a single archive for easy download.
 
-## 🚀 Quick Start (Local)
+## 🚀 How to use the app
 
-1. **Clone or download this repository**
-   ```bash
-   cd WebScrapper
-   ```
+### Option 1: Use online (easiest)
 
-2. **Create a virtual environment** (recommended)
-   ```bash
-   python -m venv venv
-   
-   # Windows
-   .\venv\Scripts\activate
-   
-   # macOS/Linux
-   source venv/bin/activate
-   ```
+Deploy to **Streamlit Cloud** (free) and use it in the browser—no local setup.
 
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+1. Push this repo to GitHub.
+2. Go to [share.streamlit.io](https://share.streamlit.io), sign in with GitHub, and deploy this repo.
+3. Open the app URL and upload your CSV.
 
-4. **Run the application**
-   ```bash
-   streamlit run python-scraper.py
-   ```
+See **[STREAMLIT_DEPLOY.md](STREAMLIT_DEPLOY.md)** or **[DEPLOYMENT.md](DEPLOYMENT.md)** for step-by-step deploy instructions.
 
-5. **Open in browser**
-   - The app will automatically open at `http://localhost:8501`
-   - Or manually navigate to the URL shown in the terminal
+### Option 2: Run locally (simple)
 
-## 🌐 Deploy Online (Free Options)
+**You need:** Python 3.10+ from [python.org](https://www.python.org/downloads/).
 
-This app is ready to deploy! See **[DEPLOYMENT.md](DEPLOYMENT.md)** for detailed instructions.
+1. **Open a terminal** in the project folder (where `python-scraper.py` and `requirements.txt` are).
+2. **Install dependencies** (one time): `pip install -r requirements.txt`
+3. **Start the app:** `streamlit run python-scraper.py`
+4. **Open the URL** shown in the terminal (usually `http://localhost:8501`). Upload your CSV and run.
 
-### Quick Deploy Options:
+**Optional — virtual environment:**
 
-1. **Streamlit Cloud** ⭐ (Recommended - Easiest)
-   - Push to GitHub
-   - Deploy at [share.streamlit.io](https://share.streamlit.io)
-   - Zero configuration needed!
-   - 📖 See: `STREAMLIT_DEPLOY.md` for step-by-step guide
-
-2. **Render** (Free tier available)
-   - Push to GitHub
-   - Deploy at [render.com](https://render.com)
-   - Uses included `render.yaml`
-
-3. **Railway** (Free trial)
-   - Push to GitHub
-   - Deploy at [railway.app](https://railway.app)
-   - Uses included `railway.json`
-
-### ⚠️ Not Supported:
-- **Vercel** - Does not support Streamlit apps (see `VERCEL_DEPLOYMENT.md` for details)
-
-## 🖥️ Windows Desktop App
-
-You can now package this as a downloadable Windows desktop app while keeping the same scraper logic.
-
-- Desktop launcher source: `desktop_app/launcher.py`
-- Windows build script: `desktop_app/build_windows.ps1`
-- Build instructions: `desktop_app/README.md`
-- Download landing page: `landing-page/index.html`
-- CI build workflow: `.github/workflows/windows-desktop-build.yml`
-- Landing page deploy workflow: `.github/workflows/deploy-landing-page.yml`
-
-### Build Windows executable + installer
-
-```powershell
-./desktop_app/build_windows.ps1 -Clean
+```bash
+python -m venv venv
+# Windows:  .\venv\Scripts\activate   |   macOS/Linux:  source venv/bin/activate
+pip install -r requirements.txt
+streamlit run python-scraper.py
 ```
 
-Output package:
+No installer, no packaging—just Python and these two commands.
 
-- `dist/WebScrapperDesktop-Windows.zip`
-- `dist/WebScrapperDesktop-Setup.exe`
+## 🌐 Deploy online
 
-### Release flow (GitHub Actions)
-
-Push a tag that starts with `desktop-v` (example: `desktop-v1.0.0`) to trigger a Windows build and publish both ZIP + installer to GitHub Releases.
+- **Streamlit Cloud** — recommended; see [STREAMLIT_DEPLOY.md](STREAMLIT_DEPLOY.md).
+- **Render / Railway** — see [DEPLOYMENT.md](DEPLOYMENT.md).
+- **Vercel** does not support Streamlit; see [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md).
 
 ## ⚙️ Configuration
 
@@ -187,22 +142,16 @@ Inside the UI you can adjust:
 - Lower max_chars per site
 - Reduce rows_per_file
 
-## 📁 Project Structure
+## 📁 Project structure
 
 ```
 WebScrapper/
-├── python-scraper.py      # Main application file
-├── requirements.txt        # Python dependencies
-├── README.md              # This file
-├── DEPLOYMENT.md          # Deployment guide
-├── .streamlit/
-│   └── config.toml        # Streamlit configuration
-├── Procfile               # For Heroku/Render
-├── render.yaml            # Render.com config
-├── railway.json           # Railway.app config
-├── runtime.txt            # Python version
-├── .gitignore             # Git ignore rules
-└── outputs/               # Generated output files (gitignored)
+├── python-scraper.py      # Main Streamlit app
+├── requirements.txt      # Python dependencies
+├── README.md             # This file
+├── .streamlit/config.toml
+├── DEPLOYMENT.md, STREAMLIT_DEPLOY.md
+└── outputs/              # Generated files (gitignored)
 ```
 
 ## 🔒 Security Notes
