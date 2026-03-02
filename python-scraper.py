@@ -1545,8 +1545,8 @@ def _replace_prompt_variables(template: str, data: dict) -> str:
     Replace {key} and {{key}} placeholders with actual values. Both brace styles get the full value.
     Longest keys first so e.g. {company_name} is not broken by {company}. Formatting preserved.
     """
-    if not template:
-        return template
+    if template is None or not template:
+        return "" if template is None else template
     keys_sorted = sorted(data.keys(), key=len, reverse=True)
     out = template
     for k in keys_sorted:
@@ -2572,6 +2572,7 @@ async def generate_ai_summary(
 
 def build_email_copy_prompt(prompt_template: str, lead_data: dict | None, scraped_content: str | None) -> str:
     """Build the complete prompt for email copy. Replaces {key} and {{key}} with formatted values."""
+    template = (prompt_template or "").strip()
     lead_data = dict(lead_data or {})
     url = _format_var_value(lead_data.get("url")) or ""
     company_name = _format_var_value(lead_data.get("company_name")) or ""
@@ -2580,7 +2581,8 @@ def build_email_copy_prompt(prompt_template: str, lead_data: dict | None, scrape
     lead_data["url"] = url
     lead_data["company_name"] = company_name
     lead_data["scraped_content"] = str(scraped_content or "")
-    return _replace_prompt_variables(prompt_template, lead_data)
+    result = _replace_prompt_variables(template, lead_data)
+    return result if result is not None else ""
 
 
 def _is_ai_refusal(text: str) -> bool:
@@ -6042,10 +6044,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader(
-    "Choose CSV file", 
+    "Choose CSV file",
     type=["csv"],
-    help="Upload a CSV file with website URLs"
+    help="Upload a CSV file with website URLs. If you had a file before, the session may have reset — re-upload here."
 )
+
+# If we had config or a completed run but the file is now missing, session was reset (rerun/refresh/long run).
+_had_session = bool(
+    st.session_state.get("csv_config")
+    or st.session_state.get("scraping_complete")
+    or st.session_state.get("output_dir")
+)
+if uploaded_file is None and _had_session:
+    st.info(
+        "**Session was reset** (e.g. after a long run, reconnection, or page refresh). "
+        "Re-upload your CSV above to run again. You’ll need to select the URL column in Step 1. "
+        "If you had results, check **Resume or Download Partial Results** above or the download section below."
+    )
 
 # CSV Configuration (shown after file upload)
 csv_has_headers = None
@@ -6649,8 +6664,9 @@ Requirements:
     st.caption("This is the exact prompt sent to the AI for each lead (variables filled with sample data).")
     sample_ec = _get_sample_lead_data_for_preview()
     sample_ec["scraped_content"] = sample_ec.get("scraped_content") or EXAMPLE_SCRAPED_CONTENT
-    final_preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec["scraped_content"])
-    st.text_area("", value=final_preview_ec[:10000] + ("…" if len(final_preview_ec) > 10000 else ""), height=200, disabled=True, key="step4_final_preview", label_visibility="collapsed")
+    final_preview_ec = build_email_copy_prompt(email_copy_prompt, sample_ec, sample_ec.get("scraped_content")) or ""
+    preview_text = final_preview_ec[:10000] + ("…" if len(final_preview_ec) > 10000 else "")
+    st.text_area("Prompt preview", value=preview_text, height=200, disabled=True, key="step4_final_preview", label_visibility="collapsed")
     csv_cfg_ec = st.session_state.get("csv_config") or {}
     df_ec = csv_cfg_ec.get("df_preview")
     n_rows_ec = len(df_ec) if df_ec is not None and not df_ec.empty else 1
@@ -7039,7 +7055,7 @@ def get_validation_status():
     warnings = []
     
     if uploaded_file is None:
-        errors.append("Upload a CSV file in Step 1")
+        errors.append("Upload a CSV file in Step 1 (if you had one before, the session may have reset — re-upload above)")
     else:
         csv_config = st.session_state.get('csv_config', {})
         if not csv_config:
@@ -7103,11 +7119,12 @@ with st.container():
     col_btn, _1, _2 = st.columns([1, 1, 1])
     with col_btn:
         start_clicked = st.button(
-            "🚀 Start Scraping" if can_start else "⚠️ Check Errors Above", 
-            use_container_width=True, 
+            "🚀 Start Scraping" if can_start else "⚠️ Check Errors Above",
+            use_container_width=True,
             key="start_scraping_btn",
             disabled=not can_start,
-            type="primary" if can_start else "secondary"
+            type="primary" if can_start else "secondary",
+            help="Upload a CSV in Step 1 and configure the URL column to enable." if not can_start else "Start the scraper run."
         )
 
 if uploaded_file and start_clicked and can_start:
