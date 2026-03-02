@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
-# If requirements.txt is not here, use parent folder (app root)
-if [ ! -f "requirements.txt" ]; then
-    cd ..
-fi
-if [ ! -f "requirements.txt" ]; then
-    echo "ERROR: requirements.txt not found. Run this from the app folder that contains python-scraper.py and requirements.txt."
-    exit 1
-fi
 
 if ! command -v python3 &>/dev/null && ! command -v python &>/dev/null; then
     echo "Python not found. Install Python 3.10+ from https://www.python.org/downloads/"

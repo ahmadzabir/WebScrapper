@@ -1,13 +1,6 @@
 @echo off
 title Web Scraper
 cd /d "%~dp0"
-REM If requirements.txt is not here, use parent folder (app root)
-if not exist "requirements.txt" cd ..
-if not exist "requirements.txt" (
-    echo ERROR: requirements.txt not found. Run this from the app folder that contains python-scraper.py and requirements.txt.
-    pause
-    exit /b 1
-)
 
 where python >nul 2>nul
 if errorlevel 1 (

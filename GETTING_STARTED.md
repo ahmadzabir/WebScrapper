@@ -87,6 +87,7 @@ Running in the cloud (e.g. Streamlit Cloud) uses gentler, fixed settings so it s
 
 ## Need help?
 
+- **Project layout (Git, Streamlit, local):** [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)  
 - **Setup details:** [SETUP.md](SETUP.md)  
 - **Deploying online:** [DEPLOYMENT.md](DEPLOYMENT.md)  
 - **Full docs:** [README.md](README.md)

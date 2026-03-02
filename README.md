@@ -61,11 +61,13 @@ See **[STREAMLIT_DEPLOY.md](STREAMLIT_DEPLOY.md)** or **[DEPLOYMENT.md](DEPLOYME
 
 **You need:** Python 3.10+ from [python.org](https://www.python.org/downloads/) (check **"Add Python to PATH"** when installing).
 
-1. **Download or clone** this repo and open its folder.
+1. **Download or clone** this repo and open the folder that contains `python-scraper.py` and `requirements.txt` (the repo root).
 2. **Run the app:**
    - **Windows:** Double-click `run.bat` (or in a terminal: `run.bat`).
    - **Mac / Linux:** In a terminal run: `chmod +x run.sh` then `./run.sh`.
 3. **Open the URL** that appears (usually `http://localhost:8501`) in your browser. Upload your CSV and go.
+
+See **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)** for folder layout and Git/Streamlit notes.
 
 The script creates a virtual environment and installs dependencies the first time; after that it just starts the app. When you run locally, the app automatically uses more of your machine (more parallel workers, more RAM) so scraping is faster than in the cloud.
 
@@ -144,14 +146,18 @@ Inside the UI you can adjust:
 ## 📁 Project structure
 
 ```
-WebScrapper/
-├── python-scraper.py      # Main Streamlit app
-├── requirements.txt      # Python dependencies
-├── README.md             # This file
+(repo root)
+├── python-scraper.py     # Main Streamlit app
+├── requirements.txt     # Python dependencies
+├── run.bat, run.sh      # Local launchers (run from this folder)
 ├── .streamlit/config.toml
+├── README.md, GETTING_STARTED.md, PROJECT_STRUCTURE.md
 ├── DEPLOYMENT.md, STREAMLIT_DEPLOY.md
-└── outputs/              # Generated files (gitignored)
+├── WebScrapper/         # Fallback launcher scripts (see WebScrapper/README.md)
+└── outputs/             # Generated files (gitignored)
 ```
+
+Full layout and Git/Streamlit notes: **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)**.
 
 ## 🔒 Security Notes
 
