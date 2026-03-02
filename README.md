@@ -57,25 +57,24 @@ Deploy to **Streamlit Cloud** (free) and use it in the browser—no local setup.
 
 See **[STREAMLIT_DEPLOY.md](STREAMLIT_DEPLOY.md)** or **[DEPLOYMENT.md](DEPLOYMENT.md)** for step-by-step deploy instructions.
 
-### Option 2: Run locally (simple)
+### Option 2: Run locally (easiest)
 
-**You need:** Python 3.10+ from [python.org](https://www.python.org/downloads/).
+**You need:** Python 3.10+ from [python.org](https://www.python.org/downloads/) (check **"Add Python to PATH"** when installing).
 
-1. **Open a terminal** in the project folder (where `python-scraper.py` and `requirements.txt` are).
-2. **Install dependencies** (one time): `pip install -r requirements.txt`
-3. **Start the app:** `streamlit run python-scraper.py`
-4. **Open the URL** shown in the terminal (usually `http://localhost:8501`). Upload your CSV and run.
+1. **Download or clone** this repo and open its folder.
+2. **Run the app:**
+   - **Windows:** Double-click `run.bat` (or in a terminal: `run.bat`).
+   - **Mac / Linux:** In a terminal run: `chmod +x run.sh` then `./run.sh`.
+3. **Open the URL** that appears (usually `http://localhost:8501`) in your browser. Upload your CSV and go.
 
-**Optional — virtual environment:**
+The script creates a virtual environment and installs dependencies the first time; after that it just starts the app. When you run locally, the app automatically uses more of your machine (more parallel workers, more RAM) so scraping is faster than in the cloud.
+
+**Manual run (if you prefer):**
 
 ```bash
-python -m venv venv
-# Windows:  .\venv\Scripts\activate   |   macOS/Linux:  source venv/bin/activate
 pip install -r requirements.txt
 streamlit run python-scraper.py
 ```
-
-No installer, no packaging—just Python and these two commands.
 
 ## 🌐 Deploy online
 

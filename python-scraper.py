@@ -69,20 +69,55 @@ def _get_concurrency_max() -> int:
 
 
 def _should_use_fast_mode(total_urls: int) -> bool:
-    """Auto-enable fast mode for large runs (500+ URLs). Disabled in cloud for reliability."""
-    if is_cloud_mode():
-        return False  # Cloud: prioritize reliability over speed
-    return total_urls >= 500
+    """Auto-enable fast mode for 500+ URLs. In cloud, only use for small/medium runs (<5k) so big runs stay stable."""
+    if total_urls < 500:
+        return False
+    if is_cloud_mode() and total_urls >= 5000:
+        return False  # Cloud large run: keep gentle
+    return True
 
 
 def _cloud_concurrency_max() -> int:
-    """Max parallel workers in cloud (free tier): keep low for stability."""
-    return 8
+    """Max parallel workers in cloud. Small runs (<5k) can use up to 20; large runs are capped lower in run_scraper."""
+    return 20
 
 
 def _cloud_concurrency_default() -> int:
-    """Default workers in cloud: conservative for 150k runs."""
-    return 4
+    """Default workers in cloud: balanced for typical runs (e.g. hundreds to a few thousand URLs)."""
+    return 12
+
+
+def get_auto_run_settings(total_urls: int) -> dict:
+    """All speed/reliability settings from URL count and environment. Local = use more RAM/CPU; cloud = gentle."""
+    cloud = is_cloud_mode()
+    if cloud:
+        if total_urls < 5000:
+            concurrency = 20
+        elif total_urls < 20000:
+            concurrency = 12
+        else:
+            concurrency = 8
+        timeout = 45
+        rows_per_file = 1000 if total_urls >= 5000 else 2000
+    else:
+        # Local: use more workers and resources (faster, app uses more RAM/CPU safely)
+        max_workers = _get_concurrency_max()
+        if total_urls < 5000:
+            concurrency = min(40, max_workers)
+        elif total_urls < 20000:
+            concurrency = min(32, max_workers)
+        else:
+            concurrency = min(24, max_workers)
+        timeout = 35
+        rows_per_file = 2000
+    return {
+        "concurrency": concurrency,
+        "timeout": timeout,
+        "retries": 3,
+        "depth": 3,
+        "rows_per_file": rows_per_file,
+        "max_chars": 10000,
+    }
 
 
 # -------------------------
@@ -4627,14 +4662,20 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         emit("❌ No URLs to process. Exiting.")
         return
 
-    # Cloud mode: prioritize reliability over speed (Streamlit Cloud free tier)
+    total_urls_count = len(urls)
+
+    # Cloud: tiered by run size — small/medium runs get normal speed; large runs stay gentle
     if is_cloud_mode():
-        low_resource = True
-        concurrency = min(concurrency, _cloud_concurrency_max())
-        emit(f"☁️ Cloud mode: using gentle settings (concurrency={concurrency}) for reliability.")
+        if total_urls_count < 5000:
+            low_resource = False
+            concurrency = min(concurrency, 20)
+            emit(f"☁️ Cloud: balanced settings for {total_urls_count:,} URLs (concurrency={concurrency}).")
+        else:
+            low_resource = True
+            concurrency = min(concurrency, _cloud_concurrency_max())
+            emit(f"☁️ Cloud: gentle settings for {total_urls_count:,} URLs (concurrency={concurrency}) for stability.")
 
     # Auto-adjust concurrency for large datasets to avoid overwhelming resources
-    total_urls_count = len(urls)
     if total_urls_count > 100000:
         # 100k–150k: very low concurrency for stability (memory + rate limits)
         original_concurrency = concurrency
@@ -4699,9 +4740,9 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         if progress_callback:
             progress_callback(completed_before + done, total_overall)
     
-    # Backpressure: smaller queue for low-resource / cloud to limit memory
+    # Backpressure: queue size by environment and run size
     if is_cloud_mode():
-        queue_max = min(100, total_this_run + 10)
+        queue_max = min(300, total_this_run + 10) if total_urls_count < 5000 else min(100, total_this_run + 10)
     else:
         queue_max = min(200 if low_resource else 500, total_this_run + 10)
     result_queue = asyncio.Queue(maxsize=queue_max)
@@ -5010,9 +5051,6 @@ SESSION_DEFAULTS = {
 for key, value in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
-# Cloud: start with gentle concurrency so slider shows a sensible default
-if is_cloud_mode() and st.session_state.get('concurrency', 0) > _cloud_concurrency_max():
-    st.session_state['concurrency'] = _cloud_concurrency_default()
 
 # Dark theme UI styling (design alignment)
 st.markdown("""
@@ -5904,109 +5942,38 @@ st.markdown("""
     <h3 style="color: #f1f5f9 !important; margin-top: 0; display: flex; align-items: center;">
         <span class="step-badge">2</span>⚙️ Settings
     </h3>
-    <div class="tip-box tip-box-emerald"><strong>💡 Tip:</strong> Most settings have good defaults. The app auto-adapts (fewer workers on slow PCs, cache fallback for unreachable sites).</div>
+    <div class="tip-box tip-box-emerald"><strong>⚡ Speed is automatic.</strong> Workers, timeouts, and retries are set from your list size—nothing to tune.</div>
 </div>
 """, unsafe_allow_html=True)
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("#### Basic Settings")
-    
-    # Keywords - Simplified
+    st.markdown("#### What to scrape")
     keywords_input = st.text_input(
         "Keywords to find (optional)",
         value=st.session_state.get('keywords_input', "about,service,product"),
-        help="Comma-separated keywords. The scraper will look for pages with these in the URL (e.g., 'about', 'service', 'product')",
+        help="Comma-separated. The scraper looks for links with these in the URL (e.g. about, service, product).",
         key="keywords_input"
     )
     keywords = process_keywords(keywords_input)
     st.session_state['keywords'] = keywords
-    
     if keywords:
         st.caption(f"✅ Looking for: {', '.join(keywords)}")
     else:
         st.caption("💡 Leave empty to scrape homepage only")
-    
-    if is_cloud_mode():
-        concurrency_max = _cloud_concurrency_max()
-        concurrency_default = min(st.session_state.get('concurrency', _cloud_concurrency_default()), concurrency_max)
-    else:
-        concurrency_max = _get_concurrency_max()
-        concurrency_default = min(st.session_state.get('concurrency', min(20, concurrency_max)), concurrency_max)
-    concurrency = st.slider(
-        "Parallel workers",
-        1, concurrency_max, max(1, concurrency_default),
-        help="Sites scraped at once. Lower = more reliable (recommended on Streamlit Cloud)." if is_cloud_mode() else f"Sites scraped at once. Max {concurrency_max} (CPU-based). Lower = gentler on slow PCs.",
-        key="concurrency"
-    )
-    force_max_workers = st.checkbox(
-        "Force maximum workers",
-        value=st.session_state.get('force_max_workers', False),
-        help=f"Override to {concurrency_max} workers. Not recommended in cloud." if is_cloud_mode() else f"Override to {concurrency_max} workers for testing. Use with caution on weaker machines.",
-        key="force_max_workers"
-    )
-    if force_max_workers:
-        concurrency = concurrency_max
-    
-    # Pages to scrape per site
-    depth = st.slider(
-        "Pages to scrape per site",
-        0, 5, st.session_state.get('depth', 3),
-        help="0 = homepage only. 3 = homepage + 3 more pages.",
-        key="depth"
-    )
-    
-    # Retries
-    retries = st.number_input(
-        "Retries if failed", 
-        0, 5, st.session_state.get('retries', 3),
-        help="If a website fails, how many times to try again. 3 recommended for 95%+ success.",
-        key="retries"
-    )
 
 with col2:
-    st.markdown("#### Advanced Settings")
-    
-    # Timeout - in cloud use higher default for reliability
-    timeout_default = 45 if is_cloud_mode() else 35
-    timeout = st.number_input(
-        "Wait time per site (seconds)",
-        5, 120, st.session_state.get('timeout', timeout_default),
-        help="Higher = more reliable for slow sites (recommended in cloud). Unreachable sites fall back to archive.org / Playwright / Google cache." if is_cloud_mode() else "How long to wait per site. Unreachable sites fall back to archive.org / Playwright / Google cache.",
-        key="timeout"
-    )
-    with st.expander("ℹ️ About Google cache & context", expanded=False):
+    with st.expander("ℹ️ Unreachable sites", expanded=False):
         st.caption(
-            "**Context source:** The app only scrapes the URLs in your sheet (no separate Google search). "
-            "When a URL is unreachable, it tries **Google cache** and **Archive.org** to get the page. "
-            "There is no feature that searches Google for extra company info—only the URL you provide is used."
+            "If a URL is unreachable, the app tries **Google cache** and **Archive.org**. "
+            "It only scrapes the URLs in your sheet—no separate web search."
         )
-
-    # Max chars: default 10k, max 50k
-    max_chars = st.number_input(
-        "Text limit per site",
-        1000, 50000, st.session_state.get('max_chars', 10000),
-        step=1000,
-        help="Characters per site (default 10,000, max 50,000).",
-        key="max_chars"
-    )
-
-    # Rows per file - in cloud use smaller chunks for frequent saves
-    rows_per_file_default = 1000 if (is_cloud_mode() or _is_low_resource_default()) else st.session_state.get('rows_per_file', 2000)
-    rows_per_file = st.number_input(
-        "Split files every X rows",
-        500, 50000, min(rows_per_file_default, 50000), step=500,
-        help="Lower = more frequent saves and safer resume (recommended 1000–2000 in cloud)." if is_cloud_mode() else "Lower = less memory per write. Use 500-1000 on slow computers.",
-        key="rows_per_file"
-    )
-    
-    # User Agent - Hidden in expander
-    with st.expander("🔧 User-Agent (Advanced)", expanded=False):
+    with st.expander("🔧 Advanced (rarely needed)", expanded=False):
         user_agent = st.text_input(
-            "User-Agent", 
+            "User-Agent",
             value=st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
-            help="Browser identifier sent to websites. Usually don't need to change this.",
+            help="Browser identifier sent to websites.",
             key="user_agent"
         )
 
@@ -6568,22 +6535,13 @@ with st.container():
             type="secondary"
         )
 
-# Main action area (CTA section) - Get variables from tabs first so button is in same container
-# Get variables from tabs - Use session_state (proper Streamlit way)
+# Main action area - get variables (speed is set automatically when run starts, from URL count)
 keywords = st.session_state.get('keywords', [])
-concurrency = st.session_state.get('concurrency', _cloud_concurrency_default() if is_cloud_mode() else 20)
-if st.session_state.get('force_max_workers', False):
-    concurrency = _get_concurrency_max()
-if is_cloud_mode():
-    concurrency = min(concurrency, _cloud_concurrency_max())
-retries = st.session_state.get('retries', 2)
-depth = st.session_state.get('depth', 3)
-timeout = st.session_state.get('timeout', 30)
-max_chars = st.session_state.get('max_chars', 10000)
-rows_per_file = st.session_state.get('rows_per_file', 2000)
 user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 run_name = st.session_state.get('run_name', "")
-# Auto-detect: cloud always uses low-resource; else use CPU-based default
+# Defaults for test run; main run overwrites from get_auto_run_settings(total)
+_auto = get_auto_run_settings(500)
+concurrency, timeout, retries, depth, rows_per_file, max_chars = _auto["concurrency"], _auto["timeout"], _auto["retries"], _auto["depth"], _auto["rows_per_file"], _auto["max_chars"]
 low_resource = is_cloud_mode() or _is_low_resource_default()
 # Use checkbox key as source of truth (widget state); fallback to our sync key
 ai_enabled = st.session_state.get("ai_enabled_checkbox", st.session_state.get('ai_enabled', False))
@@ -7046,6 +7004,15 @@ if uploaded_file and start_clicked and can_start:
         run_folder = datetime.now().strftime("run_%Y%m%d_%H%M%S")
         output_dir = os.path.join("outputs", run_folder)
         os.makedirs(output_dir, exist_ok=True)
+
+    # All speed settings from list size (no user tuning)
+    auto_settings = get_auto_run_settings(total)
+    concurrency = auto_settings["concurrency"]
+    timeout = auto_settings["timeout"]
+    retries = auto_settings["retries"]
+    depth = auto_settings["depth"]
+    rows_per_file = auto_settings["rows_per_file"]
+    max_chars = auto_settings["max_chars"]
 
     progress_bar = st.progress(0)
     status_text = st.empty()
