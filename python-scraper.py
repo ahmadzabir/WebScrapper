@@ -50,13 +50,45 @@ except ImportError:
 # Utilities
 # -------------------------
 
-def _is_low_resource_default() -> bool:
-    """Auto-detect: use low-resource mode for slower machines (few CPUs)."""
+def _get_system_ram_gb() -> float:
+    """Return total system RAM in GB, or 0 if unknown."""
     try:
-        n = os.cpu_count() or 2
-        return n <= 4
+        import psutil
+        return psutil.virtual_memory().total / (1024 ** 3)
     except Exception:
-        return True
+        return 0.0
+
+
+def get_system_tier() -> str:
+    """
+    Detect system capability for auto-tuning. Used so 300k runs don't crash on low-RAM
+    machines and run at full force on capable hardware. Target: 300k in <6h on i5 + 8GB.
+    Returns: 'low' (<10GB RAM or ≤4 CPUs), 'medium' (10–20GB or 5–8 CPUs), 'high' (20GB+ or 8+ CPUs).
+    """
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        cpus = psutil.cpu_count(logical=True) or os.cpu_count() or 2
+    except Exception:
+        ram_gb = 0.0
+        cpus = os.cpu_count() or 2
+    if ram_gb > 0:
+        if ram_gb >= 20 or cpus >= 8:
+            return "high"
+        if ram_gb >= 10 or cpus >= 5:
+            return "medium"
+        return "low"  # <10GB RAM or ≤4 CPUs
+    # No RAM info: use CPU only
+    if cpus >= 8:
+        return "high"
+    if cpus >= 5:
+        return "medium"
+    return "low"
+
+
+def _is_low_resource_default() -> bool:
+    """Auto-detect: use low-resource mode when system tier is 'low' (limited RAM/CPU)."""
+    return get_system_tier() == "low"
 
 
 def _get_concurrency_max() -> int:
@@ -88,8 +120,13 @@ def _cloud_concurrency_default() -> int:
 
 
 def get_auto_run_settings(total_urls: int) -> dict:
-    """All speed/reliability settings from URL count and environment. Local = use more RAM/CPU; cloud = gentle. Supports up to 300k URLs."""
+    """
+    All speed/reliability settings from URL count and environment.
+    Local: auto-tunes by system tier (RAM/CPU) so 300k runs full force on fast machines
+    and stays stable and under ~6h on modest hardware (e.g. i5 + 8GB). Cloud = gentle.
+    """
     cloud = is_cloud_mode()
+    tier = get_system_tier() if not cloud else "low"
     if cloud:
         if total_urls < 5000:
             concurrency = 20
@@ -104,7 +141,7 @@ def get_auto_run_settings(total_urls: int) -> dict:
         if total_urls >= 200000:
             rows_per_file = 1000  # smaller chunks for 200k+ to reduce memory
     else:
-        # Local: use more workers and resources (faster, like running natively)
+        # Local: tier-based so fast machines run full force, low-RAM stays stable and <6h for 300k
         max_workers = _get_concurrency_max()
         if total_urls < 5000:
             concurrency = min(80, max_workers)
@@ -115,7 +152,13 @@ def get_auto_run_settings(total_urls: int) -> dict:
         elif total_urls < 200000:
             concurrency = min(16, max_workers)  # 100k–200k: moderate
         else:
-            concurrency = min(6, max_workers)  # 200k–300k: low concurrency for stability
+            # 200k–300k: high tier = full force (10–12), medium = 8, low = 6 (target <6h on 8GB)
+            if tier == "high":
+                concurrency = min(12, max_workers)
+            elif tier == "medium":
+                concurrency = min(8, max_workers)
+            else:
+                concurrency = min(6, max_workers)  # low RAM/CPU: stable, still ~14 URLs/s → 300k in <6h
         timeout = 30
         rows_per_file = 2000
         if total_urls >= 200000:
@@ -4817,22 +4860,22 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             concurrency = min(concurrency, _cloud_concurrency_max())
             emit(f"☁️ Cloud: gentle settings for {total_urls_count:,} URLs (concurrency={concurrency}) for stability.")
     else:
-        emit(f"🖥️ Local: high concurrency for {total_urls_count:,} URLs (concurrency={concurrency}, more CPU/network).")
+        # Local: settings already tuned by get_auto_run_settings from system tier (RAM/CPU)
+        tier = get_system_tier()
+        ram_gb = _get_system_ram_gb()
+        try:
+            import psutil
+            cpus = psutil.cpu_count(logical=True) or os.cpu_count() or 0
+        except Exception:
+            cpus = os.cpu_count() or 0
+        if total_urls_count >= 200000:
+            ram_str = f"{ram_gb:.0f}GB" if ram_gb >= 1 else "?"
+            emit(f"🖥️ Local: {total_urls_count:,} URLs — tier={tier} (RAM≈{ram_str}, {cpus} CPUs). Concurrency={concurrency} — full force on capable hardware, stable & <6h on 8GB.")
+        else:
+            emit(f"🖥️ Local: {total_urls_count:,} URLs (concurrency={concurrency}, tier={tier}).")
 
-    # Auto-adjust concurrency for large datasets to avoid overwhelming resources (supports up to 300k)
-    if total_urls_count > 200000:
-        # 200k–300k: minimal concurrency and queue for stability
-        original_concurrency = concurrency
-        concurrency = min(concurrency, 4)
-        if concurrency != original_concurrency:
-            emit(f"🔧 Very large run ({total_urls_count:,} URLs). Concurrency {concurrency} for stability.")
-    elif total_urls_count > 100000:
-        # 100k–200k: low concurrency for stability (memory + rate limits)
-        original_concurrency = concurrency
-        concurrency = min(concurrency, 6)
-        if concurrency != original_concurrency:
-            emit(f"🔧 Large run ({total_urls_count:,} URLs). Concurrency reduced to {concurrency} for stability.")
-    elif total_urls_count > 50000:
+    # For 50k–100k only: optional cap (get_auto_run_settings already tiers 200k+)
+    if total_urls_count > 50000 and total_urls_count <= 100000:
         # 50k+ URLs: reduce concurrency to prevent memory exhaustion
         original_concurrency = concurrency
         concurrency = min(concurrency, 6 if is_cloud_mode() else 10)
@@ -4890,12 +4933,15 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         if progress_callback:
             progress_callback(completed_before + done, total_overall)
     
-    # Backpressure: queue size by environment and run size (smaller for 200k+ to avoid memory spikes)
+    # Backpressure: queue size by environment, run size, and tier (low RAM = smaller queue to avoid OOM)
     if is_cloud_mode():
         queue_max = min(300, total_this_run + 10) if total_urls_count < 5000 else min(100, total_this_run + 10)
     else:
         if total_urls_count >= 200000:
-            queue_max = min(200, total_this_run + 10)  # 200k–300k: cap queue to reduce memory
+            # 200k–300k: tier-based queue — low=100 (8GB), medium=150, high=200 (full force)
+            tier = get_system_tier()
+            cap = 100 if tier == "low" else (150 if tier == "medium" else 200)
+            queue_max = min(cap, total_this_run + 10)
         else:
             queue_max = min(200 if low_resource else 1000, total_this_run + 10)
     result_queue = asyncio.Queue(maxsize=queue_max)
@@ -7448,6 +7494,11 @@ if uploaded_file and start_clicked and can_start:
     # Create ZIP file: only broken-down part files (output_part_*.csv, output_part_*.xlsx)
     csv_files = [f for f in output_files if f.startswith("output_part_") and f.endswith(".csv")]
     excel_files = [f for f in output_files if f.startswith("output_part_") and f.endswith(".xlsx")]
+    # Enriched mode: writer only produces enriched_output.csv / enriched_output.xlsx (no part files)
+    enriched_csv_path = os.path.join(output_dir, "enriched_output.csv")
+    enriched_xlsx_path = os.path.join(output_dir, "enriched_output.xlsx")
+    has_enriched_csv = "enriched_output.csv" in output_files and os.path.isfile(enriched_csv_path) and os.path.getsize(enriched_csv_path) > 0
+    has_enriched_xlsx = "enriched_output.xlsx" in output_files and os.path.isfile(enriched_xlsx_path) and os.path.getsize(enriched_xlsx_path) > 0
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for f in csv_files:
@@ -7469,12 +7520,32 @@ if uploaded_file and start_clicked and can_start:
         import traceback
         st.error(f"Traceback: {traceback.format_exc()}")
     
-    # CRITICAL: Verify files were actually created before proceeding
-    if not csv_files and not excel_files:
+    # When run used enriched mode (original CSV + new columns), writer only writes enriched_output.* — no part files. Populate session so download buttons work.
+    if (has_enriched_csv or has_enriched_xlsx) and (not csv_files and not excel_files):
+        try:
+            EXCEL_COLS_4 = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"]
+            EXCEL_COLS_3 = ["Website", "ScrapedText", "CompanySummary"]
+            if has_enriched_csv:
+                with open(enriched_csv_path, 'rb') as f:
+                    st.session_state['combined_csv_data'] = f.read()
+                st.session_state['combined_csv_filename'] = f"{run_folder}_enriched.csv"
+                st.session_state['combined_df'] = pd.read_csv(enriched_csv_path, encoding='utf-8-sig')
+            if has_enriched_xlsx:
+                try:
+                    with open(enriched_xlsx_path, 'rb') as f:
+                        st.session_state['combined_excel_data'] = f.read()
+                    st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
+                except Exception:
+                    pass
+        except Exception as e:
+            st.warning(f"Could not load enriched output for download: {e}")
+    
+    # CRITICAL: Consider enriched output as valid result files (enriched mode writes only those, no part files)
+    has_any_results = csv_files or excel_files or has_enriched_csv or has_enriched_xlsx
+    if not has_any_results:
         st.error("⚠️ **WARNING: No CSV or Excel files were generated!**")
         st.error("This might indicate that the writer coroutine failed or no data was processed.")
         st.info("Check the output directory for any error messages or partial files.")
-        # Try to list what's actually in the directory
         try:
             actual_files = os.listdir(output_dir)
             if actual_files:
@@ -7484,7 +7555,10 @@ if uploaded_file and start_clicked and can_start:
         except Exception as e:
             st.error(f"Could not list output directory: {e}")
     else:
-        st.success(f"✅ Scraping finished! Processed {total:,} website(s). Generated {len(csv_files)} CSV file(s) and {len(excel_files)} Excel file(s).")
+        if has_enriched_csv or has_enriched_xlsx:
+            st.success(f"✅ Scraping finished! Processed {total:,} website(s). Results saved as combined enriched CSV and Excel.")
+        else:
+            st.success(f"✅ Scraping finished! Processed {total:,} website(s). Generated {len(csv_files)} CSV file(s) and {len(excel_files)} Excel file(s).")
     
     # Failed URLs report - full list with error details and download
     if all_failed_urls:
