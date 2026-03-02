@@ -88,28 +88,38 @@ def _cloud_concurrency_default() -> int:
 
 
 def get_auto_run_settings(total_urls: int) -> dict:
-    """All speed/reliability settings from URL count and environment. Local = use more RAM/CPU; cloud = gentle."""
+    """All speed/reliability settings from URL count and environment. Local = use more RAM/CPU; cloud = gentle. Supports up to 300k URLs."""
     cloud = is_cloud_mode()
     if cloud:
         if total_urls < 5000:
             concurrency = 20
         elif total_urls < 20000:
             concurrency = 12
-        else:
+        elif total_urls < 100000:
             concurrency = 8
+        else:
+            concurrency = 4  # 100k–300k: very low for stability
         timeout = 45
         rows_per_file = 1000 if total_urls >= 5000 else 2000
+        if total_urls >= 200000:
+            rows_per_file = 1000  # smaller chunks for 200k+ to reduce memory
     else:
-        # Local: use more workers and resources (faster, app uses more RAM/CPU safely)
+        # Local: use more workers and resources (faster, like running natively)
         max_workers = _get_concurrency_max()
         if total_urls < 5000:
-            concurrency = min(40, max_workers)
+            concurrency = min(80, max_workers)
         elif total_urls < 20000:
-            concurrency = min(32, max_workers)
+            concurrency = min(64, max_workers)
+        elif total_urls < 100000:
+            concurrency = min(48, max_workers)
+        elif total_urls < 200000:
+            concurrency = min(16, max_workers)  # 100k–200k: moderate
         else:
-            concurrency = min(24, max_workers)
-        timeout = 35
+            concurrency = min(6, max_workers)  # 200k–300k: low concurrency for stability
+        timeout = 30
         rows_per_file = 2000
+        if total_urls >= 200000:
+            rows_per_file = 1000  # smaller chunks for 200k+ to reduce memory and flush often
     return {
         "concurrency": concurrency,
         "timeout": timeout,
@@ -448,8 +458,7 @@ def reset_scrape_db():
 # -------------------------
 
 def is_cloud_mode() -> bool:
-    """Detect if running in cloud/limited environment."""
-    # Check for common cloud environment indicators
+    """Detect if running in cloud/limited environment (Streamlit Cloud, Kubernetes, etc.). Local runs return False so they use full CPU/network."""
     cloud_indicators = [
         'STREAMLIT_SHARING_MODE',
         'STREAMLIT_CLOUD',
@@ -458,18 +467,8 @@ def is_cloud_mode() -> bool:
     for indicator in cloud_indicators:
         if os.environ.get(indicator):
             return True
-    
-    # Check for Streamlit's own detection
-    try:
-        import streamlit as st
-        # If we can get this info from Streamlit's runtime
-        if hasattr(st, '_is_running_with_streamlit'):
-            return True
-    except:
-        pass
-    
-    # Default to True for safety in unknown environments
-    return True
+    # No cloud env vars = assume local; use more workers and resources
+    return False
 
 
 def get_safe_headers() -> dict:
@@ -1310,16 +1309,42 @@ CHECKPOINT_FILENAME = "checkpoint.json"
 
 
 def save_checkpoint(checkpoint_data: dict, checkpoint_path: str) -> None:
-    """Save checkpoint to disk. Handles JSON serialization of completed_urls (set -> list)."""
+    """Save checkpoint to disk. Atomic write + retries. Never raise — data must never be lost."""
+    if not checkpoint_path or not checkpoint_data:
+        return
+    data = checkpoint_data.copy()
     try:
-        data = checkpoint_data.copy()
-        # Convert set to list for JSON
         data["completed_urls"] = list(data.get("completed_urls", []))
-        data["last_updated"] = datetime.now().isoformat()
-        with open(checkpoint_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"⚠️ Checkpoint save failed: {e}")
+    except Exception:
+        data["completed_urls"] = []
+    data["last_updated"] = datetime.now().isoformat()
+    tmp_path = checkpoint_path + ".tmp"
+    for attempt in range(3):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                if hasattr(f, 'fileno'):
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+            os.replace(tmp_path, checkpoint_path)
+            return
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(0.2 * (attempt + 1))
+            else:
+                try:
+                    print(f"⚠️ Checkpoint save failed after 3 attempts: {e}")
+                except Exception:
+                    pass
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 def load_checkpoint(checkpoint_path: str) -> dict | None:
@@ -3688,6 +3713,23 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
 # -------------------------
 
 
+def build_lead_data_for_row(df: pd.DataFrame, orig_row: int, lead_cols: dict, has_headers: bool, url: str) -> dict:
+    """Build lead_data dict from a single row (for large runs to avoid storing 300k dicts in memory)."""
+    lead_data = {'url': url}
+    default_company = url.replace('https://', '').replace('http://', '').split('/')[0] if url else ''
+    for key, col_name in (lead_cols or {}).items():
+        try:
+            ci = list(df.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
+            val = df.iloc[orig_row, ci] if orig_row < len(df) else None
+            v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
+            lead_data[key] = v
+        except (ValueError, TypeError, IndexError):
+            lead_data[key] = ""
+    if not lead_data.get('company_name'):
+        lead_data['company_name'] = default_company
+    return lead_data
+
+
 async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue: asyncio.Queue,
                            depth, keywords, max_chars, retries, timeout,
                            ai_enabled=False, ai_api_key=None, ai_provider=None, ai_model=None, ai_prompt=None,
@@ -3695,7 +3737,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                            email_copy_model=None, email_copy_prompt=None,
                            lead_data_map=None, ai_status_callback=None, scrape_status_callback=None, fast_mode: bool = False,
                            use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
-                           total_urls: int = 0):
+                           total_urls: int = 0,
+                           original_df=None, url_list_with_idx=None, csv_config: dict = None):
     from urllib.parse import urlparse
     import random
     
@@ -3722,7 +3765,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             # Normalize URL (add https:// if missing)
             normalized_url = normalize_url(original_url)
             
-            # Get lead data from map if available
+            # Get lead data: from map, or on-demand from dataframe for large runs (avoids 300k dicts in memory)
             lead_data = None
             if lead_data_map and url_index is not None and url_index in lead_data_map:
                 try:
@@ -3731,6 +3774,17 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 except (TypeError, AttributeError, ValueError):
                     lead_data = {}
                 lead_data['url'] = original_url  # Ensure URL is set
+            elif (original_df is not None and url_list_with_idx and csv_config is not None
+                  and url_index is not None and 0 <= url_index < len(url_list_with_idx)):
+                try:
+                    _, orig_row = url_list_with_idx[url_index]
+                    lead_data = build_lead_data_for_row(
+                        original_df, orig_row,
+                        csv_config.get('lead_cols') or {},
+                        csv_config.get('has_headers', True),
+                        original_url)
+                except Exception:
+                    lead_data = {'url': original_url, 'company_name': original_url.replace('https://', '').replace('http://', '').split('/')[0]}
             else:
                 # Fallback: extract company name from URL
                 lead_data = {
@@ -4118,7 +4172,11 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     emergency_flush_min_rows = max(10, min(30, rows_per_file // 25)) if is_cloud_mode() else max(15, min(50, rows_per_file // 20))
 
     while True:
-        item = await result_queue.get()
+        try:
+            item = await result_queue.get()
+        except BaseException as e:
+            emit(f"⚠️ Writer: result_queue.get error (non-fatal): {e}")
+            continue
         if item is None:
             emit(f"📝 Writer: Received stop signal. Processed {processed}/{total_urls}. Buffer has {len(buffer)}.")
             result_queue.task_done()
@@ -4127,357 +4185,366 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         processed += 1
         result_queue.task_done()  # CRITICAL: one per item (join() counts these)
         if progress_callback:
-            progress_callback(processed, total_urls)
-
-        # Save to database for large datasets (memory-efficient)
-        if db and buffer:
-            for row in buffer:
-                if len(row) >= 2:
-                    url = str(row[0]).strip() if row[0] else ""
-                    scraped_text = str(row[1]) if row[1] else ""
-                    ai_summary = str(row[2]) if len(row) >= 3 and row[2] else ""
-                    email_copy = str(row[3]) if include_email_copy and len(row) >= 4 and row[3] else ""
-                    row_index = row[4] if len(row) >= 5 and row[4] is not None else processed - 1
-                    
-                    # Determine result status
-                    result_status = 'success' if scraped_text and not scraped_text.startswith('❌') else 'failed'
-                    if scraped_text and (scraped_text.startswith('⚠️') or scraped_text.startswith('No relevant content')):
-                        result_status = 'partial'
-                    
-                    try:
-                        db.insert_result(
-                            url=url,
-                            row_index=row_index,
-                            scraped_text=scraped_text,
-                            company_summary=ai_summary,
-                            email_copy=email_copy,
-                            result_status=result_status
-                        )
-                    except Exception as e:
-                        emit(f"⚠️ Database: Error saving result for {url[:50]}: {e}")
-
-        # Process results and update enriched_df if available
-        if has_original_df and buffer:
-            for row in buffer:
-                if len(row) >= 3:
-                    url = str(row[0]).strip() if row[0] else ""
-                    scraped_text = str(row[1]) if row[1] else ""
-                    ai_summary = str(row[2]) if row[2] else ""
-                    email_copy = str(row[3]) if include_email_copy and len(row) >= 4 else ""
-                    
-                    if url:
-                        # Find matching row in original DataFrame by URL
-                        try:
-                            if has_headers and url_col and url_col in enriched_df.columns:
-                                url_series = enriched_df[url_col].astype(str).str.strip()
-                            else:
-                                url_series = enriched_df.iloc[:, url_col_idx].astype(str).str.strip()
-                            match_mask = url_series == url
-                            if match_mask.any():
-                                idx = match_mask.idxmax()
-                                enriched_df.at[idx, 'ScrapedText'] = scraped_text
-                                enriched_df.at[idx, 'CompanySummary'] = ai_summary
-                                if include_email_copy:
-                                    enriched_df.at[idx, 'EmailCopy'] = email_copy
-                        except Exception as e:
-                            emit(f"⚠️ Writer: Error merging row for {url[:50]}: {e}")
-            
-            # Clear buffer after processing (we've merged into enriched_df)
-            buffer = []
-        
-        # Write chunks to disk when:
-        # 1) regular threshold is reached, or
-        # 2) enough time passed with partial buffer (prevents progress loss on sudden refresh/crash)
-        # NOTE: When using original_df, we don't chunk - we save at the end
-        while len(buffer) >= rows_per_file or (
-            len(buffer) >= emergency_flush_min_rows and (time.time() - last_flush_ts) >= emergency_flush_every_s and not has_original_df
-        ):
-            part += 1
-            chunk_size = rows_per_file if len(buffer) >= rows_per_file else len(buffer)
-            chunk_rows = buffer[:chunk_size]
-            buffer = buffer[chunk_size:]
-            last_flush_ts = time.time()
-            if chunk_size < rows_per_file:
-                emit(f"⚠️ Early flush: writing {chunk_size} buffered rows to reduce loss risk")
-            
             try:
-                # Filter out ONLY truly empty rows (keep error messages as they are valid data)
-                filtered_rows = []
-                for row in chunk_rows:
+                progress_callback(processed, total_urls)
+            except Exception:
+                pass
+
+        try:
+            # Save to database for large datasets (memory-efficient)
+            if db and buffer:
+                for row in buffer:
                     if len(row) >= 2:
                         url = str(row[0]).strip() if row[0] else ""
-                        scraped_text = str(row[1]).strip() if row[1] else ""
-                        # Include rows with valid URL - keep error messages (they start with ❌)
-                        # Only exclude rows where URL is empty or scraped_text is completely empty
-                        if url and url != "":
-                            # Include even if scraped_text is empty or is an error message
-                            # Error messages are valid data that should be preserved
-                            filtered_rows.append(row)
+                        scraped_text = str(row[1]) if row[1] else ""
+                        ai_summary = str(row[2]) if len(row) >= 3 and row[2] else ""
+                        email_copy = str(row[3]) if include_email_copy and len(row) >= 4 and row[3] else ""
+                        row_index = row[4] if len(row) >= 5 and row[4] is not None else processed - 1
+                        
+                        # Determine result status
+                        result_status = 'success' if scraped_text and not scraped_text.startswith('❌') else 'failed'
+                        if scraped_text and (scraped_text.startswith('⚠️') or scraped_text.startswith('No relevant content')):
+                            result_status = 'partial'
+                        
+                        try:
+                            db.insert_result(
+                                url=url,
+                                row_index=row_index,
+                                scraped_text=scraped_text,
+                                company_summary=ai_summary,
+                                email_copy=email_copy,
+                                result_status=result_status
+                            )
+                        except Exception as e:
+                            emit(f"⚠️ Database: Error saving result for {url[:50]}: {e}")
+
+            # Process results and update enriched_df if available
+            if has_original_df and buffer:
+                for row in buffer:
+                    if len(row) >= 3:
+                        url = str(row[0]).strip() if row[0] else ""
+                        scraped_text = str(row[1]) if row[1] else ""
+                        ai_summary = str(row[2]) if row[2] else ""
+                        email_copy = str(row[3]) if include_email_copy and len(row) >= 4 else ""
+                        
+                        if url:
+                            # Find matching row in original DataFrame by URL
+                            try:
+                                if has_headers and url_col and url_col in enriched_df.columns:
+                                    url_series = enriched_df[url_col].astype(str).str.strip()
+                                else:
+                                    url_series = enriched_df.iloc[:, url_col_idx].astype(str).str.strip()
+                                match_mask = url_series == url
+                                if match_mask.any():
+                                    idx = match_mask.idxmax()
+                                    enriched_df.at[idx, 'ScrapedText'] = scraped_text
+                                    enriched_df.at[idx, 'CompanySummary'] = ai_summary
+                                    if include_email_copy:
+                                        enriched_df.at[idx, 'EmailCopy'] = email_copy
+                            except Exception as e:
+                                emit(f"⚠️ Writer: Error merging row for {url[:50]}: {e}")
                 
-                if not filtered_rows:
-                    # Skip writing if no valid rows
-                    continue
+                # Clear buffer after processing (we've merged into enriched_df)
+                buffer = []
+            
+            # Write chunks to disk when:
+            # 1) regular threshold is reached, or
+            # 2) enough time passed with partial buffer (prevents progress loss on sudden refresh/crash)
+            # NOTE: When using original_df, we don't chunk - we save at the end
+            while len(buffer) >= rows_per_file or (
+                len(buffer) >= emergency_flush_min_rows and (time.time() - last_flush_ts) >= emergency_flush_every_s and not has_original_df
+            ):
+                part += 1
+                chunk_size = rows_per_file if len(buffer) >= rows_per_file else len(buffer)
+                chunk_rows = buffer[:chunk_size]
+                buffer = buffer[chunk_size:]
+                last_flush_ts = time.time()
+                if chunk_size < rows_per_file:
+                    emit(f"⚠️ Early flush: writing {chunk_size} buffered rows to reduce loss risk")
                 
-                # Normalize rows: 4 columns when include_email_copy, else 3
-                n_cols = 4 if include_email_copy else 3
-                cols = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"] if include_email_copy else ["Website", "ScrapedText", "CompanySummary"]
-                normalized_rows = []
-                for row in filtered_rows:
-                    normalized_row = list(row[:n_cols])
-                    while len(normalized_row) < n_cols:
-                        normalized_row.append("")
-                    normalized_rows.append(tuple(normalized_row[:n_cols]))
-                
-                df = pd.DataFrame(normalized_rows, columns=cols)
-                
-                # Normalize scrape/AI/email error strings so narrow columns show clear messages
-                if "ScrapedText" in df.columns:
-                    df["ScrapedText"] = df["ScrapedText"].apply(
-                        lambda x: _normalize_scrape_error_for_display(str(x) if pd.notna(x) else "")
-                    )
-                if "CompanySummary" in df.columns:
-                    df["CompanySummary"] = df["CompanySummary"].apply(
-                        lambda x: _normalize_ai_error_for_display(str(x) if pd.notna(x) else "", "Summary")
-                    )
-                if include_email_copy and "EmailCopy" in df.columns:
-                    df["EmailCopy"] = df["EmailCopy"].apply(
-                        lambda x: _normalize_ai_error_for_display(str(x) if pd.notna(x) else "", "Email")
-                    )
-                
-                # PERFECT CSV CLEANING - Clean all DataFrame columns before writing
-                def clean_dataframe_for_csv(df):
-                    """Clean all string columns in DataFrame for perfect CSV formatting"""
-                    import re
-                    for col in df.columns:
-                        # Convert to string, handle None/NaN
-                        df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-                        # Remove null bytes
-                        df[col] = df[col].str.replace('\x00', '', regex=False)
-                        # Replace newlines, carriage returns, tabs with space
-                        df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
-                        # Remove other control characters
-                        df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
-                        # Normalize whitespace
-                        df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
-                        # Strip whitespace
-                        df[col] = df[col].str.strip()
-                        # Replace empty strings with empty string (not NaN)
-                        df[col] = df[col].replace('', '')
-                    return df
-                
-                # Clean DataFrame
-                df = clean_dataframe_for_csv(df.copy())
-                
-                # Remove ONLY rows with empty URLs (keep error messages)
-                df = df[df["Website"].astype(str).str.strip() != ""]
-                
-                # Enforce column structure
-                for c in cols:
-                    if c not in df.columns:
-                        df[c] = ""
-                df = df[cols]
-                
-                if len(df) == 0:
-                    # Skip writing if DataFrame is empty after filtering
-                    continue
-                
-                # CRITICAL: Write Excel file FIRST (more reliable than CSV)
-                excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
-                excel_written = False
                 try:
-                    df_excel = df[cols].copy()
-                    from openpyxl import Workbook
-                    wb = Workbook()
-                    ws = wb.active
-                    _write_excel_sheet(ws, cols, df_excel)
+                    # Filter out ONLY truly empty rows (keep error messages as they are valid data)
+                    filtered_rows = []
+                    for row in chunk_rows:
+                        if len(row) >= 2:
+                            url = str(row[0]).strip() if row[0] else ""
+                            scraped_text = str(row[1]).strip() if row[1] else ""
+                            # Include rows with valid URL - keep error messages (they start with ❌)
+                            # Only exclude rows where URL is empty or scraped_text is completely empty
+                            if url and url != "":
+                                # Include even if scraped_text is empty or is an error message
+                                # Error messages are valid data that should be preserved
+                                filtered_rows.append(row)
                     
-                    # Run heavy I/O in executor to avoid blocking event loop (fixes progress freeze)
-                    def _save_excel():
-                        wb.save(excel_path)
-                    try:
-                        await loop.run_in_executor(None, _save_excel)
-                    except Exception as save_error:
-                        # If save fails, try to save with minimal data
-                        print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
-                        # Create a fresh workbook with just headers
-                        wb_recovery = Workbook()
-                        ws_recovery = wb_recovery.active
-                        ws_recovery.title = "Scraped Data"
-                        ws_recovery.append(cols)
-                        wb_recovery.save(excel_path)
-                        raise save_error
+                    if not filtered_rows:
+                        # Skip writing if no valid rows
+                        continue
                     
-                    # Verify Excel file was written
-                    if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
-                        files_written.append(excel_path)
-                        excel_written = True
-                        emit(f"✅ Writer: Wrote Excel file: {os.path.basename(excel_path)} ({len(df_excel)} rows)")
-                    else:
-                        emit(f"❌ Writer: Excel file missing/empty: {os.path.basename(excel_path)}")
-                except Exception as e:
-                    # If Excel fails, log error but continue
-                    emit(f"⚠️ Writer: Excel export failed for part {part}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # PERFECT CSV WRITING - Zero tolerance for errors
-                csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
-                
-                # Write CSV with perfect formatting:
-                # - UTF-8 with BOM for Excel compatibility
-                # - QUOTE_ALL: All fields quoted to handle commas, quotes, special chars
-                # - lineterminator='\n': Standard Unix line endings
-                # - doublequote=True: Escape quotes by doubling them (CSV standard)
-                try:
+                    # Normalize rows: 4 columns when include_email_copy, else 3
+                    n_cols = 4 if include_email_copy else 3
+                    cols = ["Website", "ScrapedText", "CompanySummary", "EmailCopy"] if include_email_copy else ["Website", "ScrapedText", "CompanySummary"]
+                    normalized_rows = []
+                    for row in filtered_rows:
+                        normalized_row = list(row[:n_cols])
+                        while len(normalized_row) < n_cols:
+                            normalized_row.append("")
+                        normalized_rows.append(tuple(normalized_row[:n_cols]))
+                    
+                    df = pd.DataFrame(normalized_rows, columns=cols)
+                    
+                    # Normalize scrape/AI/email error strings so narrow columns show clear messages
+                    if "ScrapedText" in df.columns:
+                        df["ScrapedText"] = df["ScrapedText"].apply(
+                            lambda x: _normalize_scrape_error_for_display(str(x) if pd.notna(x) else "")
+                        )
+                    if "CompanySummary" in df.columns:
+                        df["CompanySummary"] = df["CompanySummary"].apply(
+                            lambda x: _normalize_ai_error_for_display(str(x) if pd.notna(x) else "", "Summary")
+                        )
+                    if include_email_copy and "EmailCopy" in df.columns:
+                        df["EmailCopy"] = df["EmailCopy"].apply(
+                            lambda x: _normalize_ai_error_for_display(str(x) if pd.notna(x) else "", "Email")
+                        )
+                    
+                    # PERFECT CSV CLEANING - Clean all DataFrame columns before writing
+                    def clean_dataframe_for_csv(df):
+                        """Clean all string columns in DataFrame for perfect CSV formatting"""
+                        import re
+                        for col in df.columns:
+                            # Convert to string, handle None/NaN
+                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                            # Remove null bytes
+                            df[col] = df[col].str.replace('\x00', '', regex=False)
+                            # Replace newlines, carriage returns, tabs with space
+                            df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                            # Remove other control characters
+                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                            # Normalize whitespace
+                            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                            # Strip whitespace
+                            df[col] = df[col].str.strip()
+                            # Replace empty strings with empty string (not NaN)
+                            df[col] = df[col].replace('', '')
+                        return df
+                    
+                    # Clean DataFrame
+                    df = clean_dataframe_for_csv(df.copy())
+                    
+                    # Remove ONLY rows with empty URLs (keep error messages)
+                    df = df[df["Website"].astype(str).str.strip() != ""]
+                    
+                    # Enforce column structure
+                    for c in cols:
+                        if c not in df.columns:
+                            df[c] = ""
                     df = df[cols]
-                    def _write_csv():
+                    
+                    if len(df) == 0:
+                        # Skip writing if DataFrame is empty after filtering
+                        continue
+                    
+                    # CRITICAL: Write Excel file FIRST (more reliable than CSV)
+                    excel_path = os.path.join(output_dir, f"output_part_{part}.xlsx")
+                    excel_written = False
+                    try:
+                        df_excel = df[cols].copy()
+                        from openpyxl import Workbook
+                        wb = Workbook()
+                        ws = wb.active
+                        _write_excel_sheet(ws, cols, df_excel)
+                        
+                        # Run heavy I/O in executor to avoid blocking event loop (fixes progress freeze)
+                        def _save_excel():
+                            wb.save(excel_path)
+                        try:
+                            await loop.run_in_executor(None, _save_excel)
+                        except Exception as save_error:
+                            # If save fails, try to save with minimal data
+                            print(f"⚠️ Excel save failed, attempting recovery: {save_error}")
+                            # Create a fresh workbook with just headers
+                            wb_recovery = Workbook()
+                            ws_recovery = wb_recovery.active
+                            ws_recovery.title = "Scraped Data"
+                            ws_recovery.append(cols)
+                            wb_recovery.save(excel_path)
+                            raise save_error
+                        
+                        # Verify Excel file was written
+                        if os.path.exists(excel_path) and os.path.getsize(excel_path) > 0:
+                            files_written.append(excel_path)
+                            excel_written = True
+                            emit(f"✅ Writer: Wrote Excel file: {os.path.basename(excel_path)} ({len(df_excel)} rows)")
+                        else:
+                            emit(f"❌ Writer: Excel file missing/empty: {os.path.basename(excel_path)}")
+                    except Exception as e:
+                        # If Excel fails, log error but continue
+                        emit(f"⚠️ Writer: Excel export failed for part {part}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # PERFECT CSV WRITING - Zero tolerance for errors
+                    csv_path = os.path.join(output_dir, f"output_part_{part}.csv")
+                    
+                    # Write CSV with perfect formatting:
+                    # - UTF-8 with BOM for Excel compatibility
+                    # - QUOTE_ALL: All fields quoted to handle commas, quotes, special chars
+                    # - lineterminator='\n': Standard Unix line endings
+                    # - doublequote=True: Escape quotes by doubling them (CSV standard)
+                    try:
+                        df = df[cols]
+                        def _write_csv():
+                            with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                                writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                                writer.writerow(cols)
+                                for idx in range(len(df)):
+                                    row = df.iloc[idx]
+                                    def clean_val(v):
+                                        if not v: return ""
+                                        v = str(v).replace('\x00', '')
+                                        v = re.sub(r'[\n\r\f\v\t]', ' ', v)
+                                        v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
+                                        return re.sub(r'\s+', ' ', v).strip()
+                                    row_values = [clean_val(row[c]) for c in cols]
+                                    row_values = (row_values + [""] * len(cols))[:len(cols)]
+                                    writer.writerow(row_values)
+                        await loop.run_in_executor(None, _write_csv)
+                        
+                        # Verify file was written
+                        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                            files_written.append(csv_path)
+                            emit(f"✅ Writer: Wrote CSV file: {os.path.basename(csv_path)} ({len(df)} rows)")
+                        else:
+                            emit(f"❌ Writer: CSV file missing/empty: {os.path.basename(csv_path)}")
+                        
+                        # VALIDATION: Verify CSV file is valid by reading it back
+                        try:
+                            test_df = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
+                            # Check row count matches
+                            if len(test_df) != len(df):
+                                raise ValueError(f"CSV validation failed: row count mismatch (expected {len(df)}, got {len(test_df)})")
+                            if len(test_df.columns) != len(cols):
+                                raise ValueError(f"CSV validation failed: column count is {len(test_df.columns)}, expected {len(cols)}. Columns: {list(test_df.columns)}")
+                            if list(test_df.columns) != cols:
+                                raise ValueError(f"CSV validation failed: column names don't match. Expected {cols}, got {list(test_df.columns)}")
+                        except Exception as e:
+                            # If validation fails, log but don't rewrite (already used manual writer)
+                            import logging
+                            logging.warning(f"CSV validation warning: {e}")
+                            # Also print to console for debugging
+                            emit(f"⚠️ CSV validation warning for {os.path.basename(csv_path)}: {e}")
+                        # CRASH RECOVERY: Update checkpoint after each successful write
+                        if checkpoint_data is not None and checkpoint_path and len(df) > 0:
+                            try:
+                                urls_in_chunk = df["Website"].astype(str).str.strip().tolist()
+                                checkpoint_data.setdefault("completed_urls", set()).update(u for u in urls_in_chunk if u)
+                                checkpoint_data["last_part"] = part
+                                save_checkpoint(checkpoint_data, checkpoint_path)
+                            except Exception as cp_err:
+                                print(f"⚠️ Checkpoint update failed: {cp_err}")
+                    except Exception as e:
+                        import logging
+                        logging.error(f"CSV write failed: {e}. Using manual writer...")
+                        df = df[cols]
                         with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
                             writer.writerow(cols)
                             for idx in range(len(df)):
                                 row = df.iloc[idx]
-                                def clean_val(v):
-                                    if not v: return ""
-                                    v = str(v).replace('\x00', '')
-                                    v = re.sub(r'[\n\r\f\v\t]', ' ', v)
-                                    v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
-                                    return re.sub(r'\s+', ' ', v).strip()
-                                row_values = [clean_val(row[c]) for c in cols]
-                                row_values = (row_values + [""] * len(cols))[:len(cols)]
+                                row_values = ["" if pd.isna(row[c]) else str(row[c]) for c in cols]
                                 writer.writerow(row_values)
-                    await loop.run_in_executor(None, _write_csv)
                     
-                    # Verify file was written
-                    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                        files_written.append(csv_path)
-                        emit(f"✅ Writer: Wrote CSV file: {os.path.basename(csv_path)} ({len(df)} rows)")
-                    else:
-                        emit(f"❌ Writer: CSV file missing/empty: {os.path.basename(csv_path)}")
-                    
-                    # VALIDATION: Verify CSV file is valid by reading it back
-                    try:
-                        test_df = pd.read_csv(csv_path, encoding='utf-8-sig', quoting=csv.QUOTE_ALL, engine='python')
-                        # Check row count matches
-                        if len(test_df) != len(df):
-                            raise ValueError(f"CSV validation failed: row count mismatch (expected {len(df)}, got {len(test_df)})")
-                        if len(test_df.columns) != len(cols):
-                            raise ValueError(f"CSV validation failed: column count is {len(test_df.columns)}, expected {len(cols)}. Columns: {list(test_df.columns)}")
-                        if list(test_df.columns) != cols:
-                            raise ValueError(f"CSV validation failed: column names don't match. Expected {cols}, got {list(test_df.columns)}")
-                    except Exception as e:
-                        # If validation fails, log but don't rewrite (already used manual writer)
-                        import logging
-                        logging.warning(f"CSV validation warning: {e}")
-                        # Also print to console for debugging
-                        emit(f"⚠️ CSV validation warning for {os.path.basename(csv_path)}: {e}")
-                    # CRASH RECOVERY: Update checkpoint after each successful write
-                    if checkpoint_data is not None and checkpoint_path and len(df) > 0:
-                        try:
-                            urls_in_chunk = df["Website"].astype(str).str.strip().tolist()
-                            checkpoint_data.setdefault("completed_urls", set()).update(u for u in urls_in_chunk if u)
-                            checkpoint_data["last_part"] = part
-                            save_checkpoint(checkpoint_data, checkpoint_path)
-                        except Exception as cp_err:
-                            print(f"⚠️ Checkpoint update failed: {cp_err}")
+                    # Excel file already written above, skip duplicate writing
+                    pass
                 except Exception as e:
-                    import logging
-                    logging.error(f"CSV write failed: {e}. Using manual writer...")
-                    df = df[cols]
-                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
-                        writer.writerow(cols)
-                        for idx in range(len(df)):
-                            row = df.iloc[idx]
-                            row_values = ["" if pd.isna(row[c]) else str(row[c]) for c in cols]
-                            writer.writerow(row_values)
-                
-                # Excel file already written above, skip duplicate writing
-                pass
-            except Exception as e:
-                # If Excel fails for large file, at least save CSV with perfect formatting
-                try:
-                    # Clean DataFrame first
-                    def clean_dataframe_for_csv(df):
-                        import re
-                        for col in df.columns:
-                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-                            df[col] = df[col].str.replace('\x00', '', regex=False)
-                            df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
-                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
-                            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
-                            df[col] = df[col].str.strip()
-                            df[col] = df[col].replace('', '')
-                        return df
-                    df = clean_dataframe_for_csv(df.copy())
-                    
-                    # CRITICAL: Ensure CompanySummary exists before writing
-                    if "CompanySummary" not in df.columns:
-                        df["CompanySummary"] = ""
-                    df = df[["Website", "ScrapedText", "CompanySummary"]]
-                    
-                    # Use manual CSV writer for perfect quoting
-                    # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
-                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
-                        # ALWAYS write 3-column header
-                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                    # If Excel fails for large file, at least save CSV with perfect formatting
+                    try:
+                        # Clean DataFrame first
+                        def clean_dataframe_for_csv(df):
+                            import re
+                            for col in df.columns:
+                                df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                                df[col] = df[col].str.replace('\x00', '', regex=False)
+                                df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                                df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                                df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                                df[col] = df[col].str.strip()
+                                df[col] = df[col].replace('', '')
+                            return df
+                        df = clean_dataframe_for_csv(df.copy())
                         
-                        # CRITICAL: Use iloc to prevent iterrows() misalignment issues
-                        for idx in range(len(df)):
-                            row = df.iloc[idx]
-                            row_values = []
-                            
-                            # Extract by column name to ensure correct order
-                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
-                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
-                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
-                            
-                            # Clean values - CRITICAL: Remove newlines and normalize whitespace
-                            def clean_csv_val(v):
-                                if not v:
-                                    return ''
-                                import re
-                                v = str(v)
-                                v = v.replace('\x00', '')  # Remove null bytes
-                                v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')  # Replace newlines/tabs with space
-                                v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)  # Remove control chars
-                                v = re.sub(r'\s+', ' ', v).strip()  # Normalize whitespace
-                                return v
-                            
-                            row_values.append(clean_csv_val(website))
-                            row_values.append(clean_csv_val(scraped_text))
-                            row_values.append(clean_csv_val(company_summary))
-                            
-                            # Ensure exactly 3 values
-                            while len(row_values) < 3:
-                                row_values.append('')
-                            row_values = row_values[:3]
-                            
-                            # CRITICAL: csv.writer with QUOTE_ALL will automatically quote all fields
-                            # and escape internal quotes by doubling them (Excel standard)
-                            writer.writerow(row_values)
-                except:
-                    # Ultimate fallback: manual writer - CRITICAL: Always write 3 columns
-                    if "CompanySummary" not in df.columns:
-                        df["CompanySummary"] = ""
-                    df = df[["Website", "ScrapedText", "CompanySummary"]]
-                    with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
-                        writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
-                        # ALWAYS write 3-column header
-                        writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                        # CRITICAL: Ensure CompanySummary exists before writing
+                        if "CompanySummary" not in df.columns:
+                            df["CompanySummary"] = ""
+                        df = df[["Website", "ScrapedText", "CompanySummary"]]
+                        
+                        # Use manual CSV writer for perfect quoting
                         # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
-                        for idx in range(len(df)):
-                            row = df.iloc[idx]
-                            # Extract by column name to ensure correct order, always 3 values
-                            website = "" if pd.isna(row["Website"]) else str(row["Website"])
-                            scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
-                            company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
-                            writer.writerow([website, scraped_text, company_summary])
-            except BaseException as write_err:
-                # CRITICAL: Never crash the writer - log and continue so progress is never lost
-                emit(f"⚠️ Writer: Error writing chunk (skipping to prevent crash): {write_err}")
-                import traceback
-                traceback.print_exc()
+                        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                            # ALWAYS write 3-column header
+                            writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                            
+                            # CRITICAL: Use iloc to prevent iterrows() misalignment issues
+                            for idx in range(len(df)):
+                                row = df.iloc[idx]
+                                row_values = []
+                                
+                                # Extract by column name to ensure correct order
+                                website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                                scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                                company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                                
+                                # Clean values - CRITICAL: Remove newlines and normalize whitespace
+                                def clean_csv_val(v):
+                                    if not v:
+                                        return ''
+                                    import re
+                                    v = str(v)
+                                    v = v.replace('\x00', '')  # Remove null bytes
+                                    v = v.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')  # Replace newlines/tabs with space
+                                    v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)  # Remove control chars
+                                    v = re.sub(r'\s+', ' ', v).strip()  # Normalize whitespace
+                                    return v
+                                
+                                row_values.append(clean_csv_val(website))
+                                row_values.append(clean_csv_val(scraped_text))
+                                row_values.append(clean_csv_val(company_summary))
+                                
+                                # Ensure exactly 3 values
+                                while len(row_values) < 3:
+                                    row_values.append('')
+                                row_values = row_values[:3]
+                                
+                                # CRITICAL: csv.writer with QUOTE_ALL will automatically quote all fields
+                                # and escape internal quotes by doubling them (Excel standard)
+                                writer.writerow(row_values)
+                    except Exception:
+                        # Ultimate fallback: manual writer - CRITICAL: Always write 3 columns
+                        if "CompanySummary" not in df.columns:
+                            df["CompanySummary"] = ""
+                        df = df[["Website", "ScrapedText", "CompanySummary"]]
+                        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                            writer = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n')
+                            # ALWAYS write 3-column header
+                            writer.writerow(["Website", "ScrapedText", "CompanySummary"])
+                            # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
+                            for idx in range(len(df)):
+                                row = df.iloc[idx]
+                                # Extract by column name to ensure correct order, always 3 values
+                                website = "" if pd.isna(row["Website"]) else str(row["Website"])
+                                scraped_text = "" if pd.isna(row["ScrapedText"]) else str(row["ScrapedText"])
+                                company_summary = "" if pd.isna(row["CompanySummary"]) else str(row["CompanySummary"])
+                                writer.writerow([website, scraped_text, company_summary])
+                except BaseException as write_err:
+                    # CRITICAL: Never crash the writer - log and continue so progress is never lost
+                    emit(f"⚠️ Writer: Error writing chunk (skipping to prevent crash): {write_err}")
+                    import traceback
+                    traceback.print_exc()
+        except BaseException as writer_loop_err:
+            try:
+                emit(f"⚠️ Writer: Loop error (progress kept in buffer): {writer_loop_err}")
+            except Exception:
+                pass
 
     # Write remaining buffer (only for non-merged mode)
     if buffer and not has_original_df:
@@ -4717,7 +4784,7 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
                       run_folder: str = "", fast_mode: bool = False,
                       low_resource: bool = False, log_callback=None,
                       use_playwright_fallback: bool = True, use_common_crawl_fallback: bool = True,
-                      original_df: pd.DataFrame = None, csv_config: dict = None):
+                      original_df: pd.DataFrame = None, csv_config: dict = None, url_list_with_idx: list = None):
     """
     Run the scraper. Supports resume from checkpoint if output_dir contains a checkpoint file.
     Uses backpressure on result_queue to prevent memory exhaustion with large datasets.
@@ -4749,14 +4816,22 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             low_resource = True
             concurrency = min(concurrency, _cloud_concurrency_max())
             emit(f"☁️ Cloud: gentle settings for {total_urls_count:,} URLs (concurrency={concurrency}) for stability.")
+    else:
+        emit(f"🖥️ Local: high concurrency for {total_urls_count:,} URLs (concurrency={concurrency}, more CPU/network).")
 
-    # Auto-adjust concurrency for large datasets to avoid overwhelming resources
-    if total_urls_count > 100000:
-        # 100k–150k: very low concurrency for stability (memory + rate limits)
+    # Auto-adjust concurrency for large datasets to avoid overwhelming resources (supports up to 300k)
+    if total_urls_count > 200000:
+        # 200k–300k: minimal concurrency and queue for stability
         original_concurrency = concurrency
         concurrency = min(concurrency, 4)
         if concurrency != original_concurrency:
-            emit(f"🔧 Very large dataset ({total_urls_count:,} URLs). Concurrency reduced to {concurrency} for stability.")
+            emit(f"🔧 Very large run ({total_urls_count:,} URLs). Concurrency {concurrency} for stability.")
+    elif total_urls_count > 100000:
+        # 100k–200k: low concurrency for stability (memory + rate limits)
+        original_concurrency = concurrency
+        concurrency = min(concurrency, 6)
+        if concurrency != original_concurrency:
+            emit(f"🔧 Large run ({total_urls_count:,} URLs). Concurrency reduced to {concurrency} for stability.")
     elif total_urls_count > 50000:
         # 50k+ URLs: reduce concurrency to prevent memory exhaustion
         original_concurrency = concurrency
@@ -4778,8 +4853,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         completed_urls = checkpoint_data.get("completed_urls", set())
         start_part = checkpoint_data.get("last_part", 0)
         stored_urls = checkpoint_data.get("urls", [])
-        # Only resume if stored URLs match (same run)
-        if set(stored_urls) == set(urls):
+        # Only resume if stored URLs match (same run). Compare length first to avoid building huge sets when different.
+        if len(stored_urls) == len(urls) and set(stored_urls) == set(urls):
             remaining_with_idx = [(u, idx) for idx, u in enumerate(urls) if u not in completed_urls]
             if not remaining_with_idx:
                 emit("✅ All URLs already completed (resume found nothing to do)")
@@ -4815,11 +4890,14 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         if progress_callback:
             progress_callback(completed_before + done, total_overall)
     
-    # Backpressure: queue size by environment and run size
+    # Backpressure: queue size by environment and run size (smaller for 200k+ to avoid memory spikes)
     if is_cloud_mode():
         queue_max = min(300, total_this_run + 10) if total_urls_count < 5000 else min(100, total_this_run + 10)
     else:
-        queue_max = min(200 if low_resource else 500, total_this_run + 10)
+        if total_urls_count >= 200000:
+            queue_max = min(200, total_this_run + 10)  # 200k–300k: cap queue to reduce memory
+        else:
+            queue_max = min(200 if low_resource else 1000, total_this_run + 10)
     result_queue = asyncio.Queue(maxsize=queue_max)
     url_queue = asyncio.Queue()
 
@@ -4829,13 +4907,15 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     timeout_obj = aiohttp.ClientTimeout(total=None)
     # Use cookie jar for session persistence (makes requests look more legitimate)
     cookie_jar = aiohttp.CookieJar(unsafe=True)  # Allow cross-domain cookies
-    # Connector - tune for low-resource vs fast mode
+    # Connector - tune for low-resource vs fast mode; local runs get higher limits
     if low_resource:
         conn_limit, conn_per_host = 30, 3
+    elif fast_mode and not is_cloud_mode():
+        conn_limit, conn_per_host = 400, 20
     elif fast_mode:
         conn_limit, conn_per_host = 200, 8
     else:
-        conn_limit, conn_per_host = 100, 5
+        conn_limit, conn_per_host = 150 if is_cloud_mode() else 300, 5 if is_cloud_mode() else 15
     connector = aiohttp.TCPConnector(
         limit=conn_limit,
         limit_per_host=conn_per_host,
@@ -4865,7 +4945,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         ai_enabled, ai_api_key, ai_provider, ai_model, ai_prompt,
         email_copy_enabled, email_copy_api_key, email_copy_provider, email_copy_model, email_copy_prompt,
         lead_data_map, ai_status_callback, scrape_status_callback, fast_mode,
-        use_playwright_fallback, use_common_crawl_fallback, total_urls=total_overall)) for i in range(concurrency)]
+        use_playwright_fallback, use_common_crawl_fallback, total_urls=total_overall,
+        original_df=original_df, url_list_with_idx=url_list_with_idx, csv_config=csv_config)) for i in range(concurrency)]
 
     # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
@@ -5072,9 +5153,12 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
             pass
         try:
             save_checkpoint(checkpoint_data, checkpoint_path)
-            emit("⚠️ Checkpoint saved.")
-        except BaseException as cp_err:
-            emit(f"⚠️ Checkpoint save failed (progress may be in files): {cp_err}")
+        except BaseException:
+            pass
+        try:
+            emit("💾 Checkpoint saved (progress safe).")
+        except Exception:
+            pass
 
 # -------------------------
 # Streamlit UI
@@ -6531,7 +6615,7 @@ with st.expander("💰 Cost Estimator", expanded=False):
     # Settings
     col1, col2 = st.columns(2)
     with col1:
-        est_urls = st.number_input("URLs to process", min_value=1, max_value=100000, value=default_urls, key="est_urls")
+        est_urls = st.number_input("URLs to process", min_value=1, max_value=300000, value=default_urls, key="est_urls")
     with col2:
         est_success_rate = st.slider("Expected success rate %", 80, 99, 90, key="est_success_rate") / 100
     
@@ -6993,51 +7077,45 @@ if uploaded_file and start_clicked and can_start:
         st.error("❌ No valid URLs found in the selected column. Check your CSV and URL column.")
         st.stop()
     
-    # Phase 7: Cloud Mode - Allow up to 150k with reliability-first settings (Streamlit Cloud free tier)
-    CLOUD_MODE_MAX_URLS = 150000  # Max URLs per run in cloud; tuned for reliability over speed
-    MAX_RECOMMENDED_URLS = 150000  # Soft limit with info message
-
-    if is_cloud_mode() and total > CLOUD_MODE_MAX_URLS:
+    # Phase 7: Support up to 300k leads (cloud cap slightly lower for stability; local full 300k)
+    MAX_URLS_LOCAL = 300000
+    CLOUD_MODE_MAX_URLS = 300000  # Allow 300k in cloud with gentle settings
+    if total > MAX_URLS_LOCAL:
+        st.warning(f"⚠️ **Limit:** Your CSV has {total:,} URLs. Maximum is {MAX_URLS_LOCAL:,} per run.")
+        st.info("💡 Split into multiple CSVs and run sequentially for more than 300k.")
+        urls = urls[:MAX_URLS_LOCAL]
+        url_list_with_idx = url_list_with_idx[:MAX_URLS_LOCAL]
+        total = len(urls)
+    elif is_cloud_mode() and total > CLOUD_MODE_MAX_URLS:
         st.warning(f"⚠️ **Cloud limit:** Your CSV has {total:,} URLs. Maximum is {CLOUD_MODE_MAX_URLS:,} per run.")
-        st.info("💡 Split into multiple CSVs and run sequentially for more than 150k.")
         urls = urls[:CLOUD_MODE_MAX_URLS]
         url_list_with_idx = url_list_with_idx[:CLOUD_MODE_MAX_URLS]
         total = len(urls)
-    elif total > 100000:
-        st.info(f"ℹ️ **Large run ({total:,} URLs):** Using reliability-optimized settings. Slower but stable on Streamlit Cloud free tier.")
+    if total > 100000:
+        st.info(f"ℹ️ **Large run ({total:,} URLs):** Reliability-optimized settings. Progress saved every few seconds; you can resume if the session drops.")
         st.caption("Results are saved incrementally; you can resume if the session drops.")
     
-    # Prepare lead data mapping (filtered index -> lead data dict)
+    # Prepare lead data mapping (filtered index -> lead data dict). For 100k+ URLs, build on demand in workers to avoid memory.
+    LARGE_RUN_THRESHOLD = 100000
     lead_data_map = {}
-    for idx, (url, orig_row) in enumerate(url_list_with_idx):
-        lead_data = {'url': url}
-        default_company = url.replace('https://', '').replace('http://', '').split('/')[0] if url else ''
-        for key, col_name in (lead_cols or {}).items():
-            try:
-                ci = list(df_in.columns).index(col_name) if has_headers else int(str(col_name).replace("Column ", "")) - 1
-                val = df_in.iloc[orig_row, ci] if orig_row < len(df_in) else None
-                v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else str(val).strip()
-                lead_data[key] = v
-            except (ValueError, TypeError, IndexError):
-                lead_data[key] = ""
-        if not lead_data.get('company_name'):
-            lead_data['company_name'] = default_company
-        lead_data_map[idx] = lead_data
-    
-    # Store lead data map in session state
+    if total <= LARGE_RUN_THRESHOLD:
+        for idx, (url, orig_row) in enumerate(url_list_with_idx):
+            lead_data = build_lead_data_for_row(df_in, orig_row, lead_cols or {}, has_headers, url)
+            lead_data_map[idx] = lead_data
+    # Store lead data map in session state (empty for large runs; workers use original_df + url_list_with_idx + csv_config)
     st.session_state['lead_data_map'] = lead_data_map
     
     # Show tips for large files (single block, no duplicate messages)
     if total > 10000:
-        with st.expander("💡 Tips for Large Datasets (including 150k on Streamlit Cloud)", expanded=True):
+        with st.expander("💡 Tips for Large Datasets (up to 300k leads)", expanded=True):
             st.markdown(f"""
             **Your dataset:** {total:,} URLs
 
-            **Reliability-first (Streamlit Cloud free tier):**
-            - ✅ **Concurrency:** Keep at 4–6 workers for 50k+ URLs; app auto-caps in cloud.
+            **Reliability-first (supports up to 300k per run):**
+            - ✅ **Concurrency:** Auto-tuned by size (e.g. 4–6 for 100k+, lower for 200k+). Don't override for huge runs.
             - ✅ **Max chars per site:** 10,000–20,000 keeps memory and files manageable.
-            - ✅ **Rows per file:** 1,000–2,000 for frequent saves and resume.
-            - ✅ **Be patient:** 150k URLs can take many hours; progress is saved so you can resume.
+            - ✅ **Rows per file:** Smaller chunks for 200k+ for frequent saves and resume.
+            - ✅ **Be patient:** 100k–300k URLs can take many hours; progress is saved so you can resume.
 
             **Crash recovery:** Progress is saved every few seconds. If the session drops, re-upload your CSV and click **Start** to resume from the last checkpoint. Use **Resume or Download Partial Results** to get what’s done so far.
             """)
@@ -7203,7 +7281,7 @@ if uploaded_file and start_clicked and can_start:
                             run_folder=run_folder, fast_mode=fast_mode,
                             low_resource=low_resource, log_callback=log_cb,
                             use_playwright_fallback=True, use_common_crawl_fallback=True,
-                            original_df=df_in, csv_config=csv_config))
+                            original_df=df_in, csv_config=csv_config, url_list_with_idx=url_list_with_idx))
             log_cb("✅ Run completed")
             if all_failed_urls:
                 log_cb(f"⚠️ {len(all_failed_urls):,} URLs failed. See 'Failed URLs' section below for details and download.")
@@ -7238,92 +7316,90 @@ if uploaded_file and start_clicked and can_start:
         thread = threading.Thread(target=run_async_scraper, daemon=False)
         thread.start()
         while thread.is_alive():
-            with progress_lock:
-                d, t = progress_state_ui["done"], progress_state_ui["total"]
-            pct = d / max(t, 1)
-            now_ts = time.time()
-            elapsed = now_ts - start_time
-            with progress_lock:
-                if not progress_samples or progress_samples[-1][1] != d:
-                    progress_samples.append((now_ts, d))
-                window = [p for p in progress_samples if now_ts - p[0] <= 120]
-            # Throughput from trailing window (more stable ETA than global average)
-            if len(window) >= 2:
-                dt = max(window[-1][0] - window[0][0], 1e-6)
-                dd = max(window[-1][1] - window[0][1], 0)
-                rate = dd / dt
-            else:
-                rate = 0.0
-            remaining = ((t - d) / rate) if rate > 1e-6 else float("inf")
-            idle_for = int(now_ts - (progress_samples[-1][0] if progress_samples else start_time))
-            progress_bar.progress(min(pct, 1.0))
-            idx = (d - 1) % len(fun_messages) if d > 0 else 0
-            if remaining == float("inf"):
-                status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: calculating...")
-            else:
-                status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-            if idle_for >= 30:
-                with scrape_status_lock:
-                    n_active = len(scrape_in_progress)
-                if n_active > 0:
-                    eta_text.warning(f"No completed URLs for {idle_for}s — {n_active} still in progress. Do not refresh.")
+            try:
+                with progress_lock:
+                    d, t = progress_state_ui["done"], progress_state_ui["total"]
+                pct = d / max(t, 1)
+                now_ts = time.time()
+                elapsed = now_ts - start_time
+                with progress_lock:
+                    if not progress_samples or progress_samples[-1][1] != d:
+                        progress_samples.append((now_ts, d))
+                    window = [p for p in progress_samples if now_ts - p[0] <= 120]
+                # Throughput from trailing window (more stable ETA than global average)
+                if len(window) >= 2:
+                    dt = max(window[-1][0] - window[0][0], 1e-6)
+                    dd = max(window[-1][1] - window[0][1], 0)
+                    rate = dd / dt
                 else:
-                    eta_text.warning(f"No progress for {idle_for}s. App will wait for recovery (slow network/system); do not refresh.")
-            else:
-                eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
-            with runtime_lock:
-                logs_text = "\n".join(runtime_logs)
-            logs_placeholder.code(logs_text or "(no logs yet)", language=None)
-            
-            # Real-time activity dashboard - Compact view
-            with dashboard_placeholder.container():
-                with scrape_status_lock:
-                    in_progress = list(scrape_in_progress.items())
-                    recent = list(scrape_recent)
-                # Use all_failed_urls for Issues (one entry per URL, exact error) so count is accurate
-                failed_list = list(all_failed_urls)
-                n_scraping = sum(1 for _, d in in_progress if d["status"] == "scraping")
-                n_ai = sum(1 for _, d in in_progress if d["status"] == "ai_summarizing")
-                n_email = sum(1 for _, d in in_progress if d["status"] == "email_copy")
-                rate_per_min = rate * 60 if rate > 0 else 0
-                pct_done = (d / max(t, 1)) * 100
+                    rate = 0.0
+                remaining = ((t - d) / rate) if rate > 1e-6 else float("inf")
+                idle_for = int(now_ts - (progress_samples[-1][0] if progress_samples else start_time))
+                progress_bar.progress(min(pct, 1.0))
+                idx = (d - 1) % len(fun_messages) if d > 0 else 0
+                if remaining == float("inf"):
+                    status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: calculating...")
+                else:
+                    status_text.text(f"{fun_messages[idx]} ({d}/{t}) — ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+                if idle_for >= 30:
+                    with scrape_status_lock:
+                        n_active = len(scrape_in_progress)
+                    if n_active > 0:
+                        eta_text.warning(f"No completed URLs for {idle_for}s — {n_active} still in progress. Do not refresh.")
+                    else:
+                        eta_text.warning(f"No progress for {idle_for}s. App will wait for recovery (slow network/system); do not refresh.")
+                else:
+                    eta_text.text(f"⏱️ Elapsed: {int(elapsed // 60)}m {int(elapsed % 60)}s")
+                with runtime_lock:
+                    logs_text = "\n".join(runtime_logs)
+                logs_placeholder.code(logs_text or "(no logs yet)", language=None)
                 
-                # Compact metrics row
-                st.markdown("#### 📊 Progress")
-                m1, m2, m3, m4 = st.columns(4)
-                with m1:
-                    st.metric("Done", f"{d:,}/{t:,}", f"{pct_done:.0f}%")
-                with m2:
-                    st.metric("Rate", f"{rate_per_min:.0f}/min")
-                with m3:
-                    active_text = f"🔍{n_scraping} 🤖{n_ai} ✉️{n_email}" if in_progress else "Idle"
-                    st.metric("Active", active_text)
-                with m4:
-                    error_count = len(failed_list)
-                    st.metric("Issues (failed)", error_count, delta_color="inverse" if error_count > 0 else "normal")
-                
-                # Show in-progress items in an expander
-                if in_progress:
-                    with st.expander(f"⏳ Currently processing ({len(in_progress)})", expanded=False):
-                        for url, data in in_progress[-5:]:
-                            short_url = escape((url[:50] + "…") if len(url) > 50 else url)
-                            status = data.get("status", "scraping")
-                            msg = escape(str(data.get("message", ""))[:60])
-                            icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
-                            st.caption(f"{icon} {short_url} — {msg}")
-                
-                # Issues = not scraped or content < 200 chars; show exact error (full message in sheet)
-                if failed_list:
-                    with st.expander(f"⚠️ Issues ({len(failed_list)}) — not scraped or &lt;200 chars", expanded=False):
-                        for e in failed_list[-10:]:
-                            u = e.get("url", "")
-                            m = (e.get("message", "") or "").strip()
-                            short_url = escape((u[:40] + "…") if len(u) > 40 else u)
-                            msg = escape(m[:500] + ("…" if len(m) > 500 else ""))
-                            st.markdown(f"<span style='color:#f87171;'>✗</span> {short_url}<br><span style='color:#94a3b8; font-size:0.8rem; white-space:pre-wrap;'>{msg}</span>", unsafe_allow_html=True)
-                        if len(failed_list) > 10:
-                            st.caption(f"_Showing last 10 of {len(failed_list)}. Download CSV below for full list with exact errors._")
-            
+                # Real-time activity dashboard - Compact view
+                with dashboard_placeholder.container():
+                    with scrape_status_lock:
+                        in_progress = list(scrape_in_progress.items())
+                        recent = list(scrape_recent)
+                    failed_list = list(all_failed_urls)
+                    n_scraping = sum(1 for _, d in in_progress if d["status"] == "scraping")
+                    n_ai = sum(1 for _, d in in_progress if d["status"] == "ai_summarizing")
+                    n_email = sum(1 for _, d in in_progress if d["status"] == "email_copy")
+                    rate_per_min = rate * 60 if rate > 0 else 0
+                    pct_done = (d / max(t, 1)) * 100
+                    
+                    st.markdown("#### 📊 Progress")
+                    m1, m2, m3, m4 = st.columns(4)
+                    with m1:
+                        st.metric("Done", f"{d:,}/{t:,}", f"{pct_done:.0f}%")
+                    with m2:
+                        st.metric("Rate", f"{rate_per_min:.0f}/min")
+                    with m3:
+                        active_text = f"🔍{n_scraping} 🤖{n_ai} ✉️{n_email}" if in_progress else "Idle"
+                        st.metric("Active", active_text)
+                    with m4:
+                        error_count = len(failed_list)
+                        st.metric("Issues (failed)", error_count, delta_color="inverse" if error_count > 0 else "normal")
+                    
+                    if in_progress:
+                        with st.expander(f"⏳ Currently processing ({len(in_progress)})", expanded=False):
+                            for url, data in in_progress[-5:]:
+                                short_url = escape((url[:50] + "…") if len(url) > 50 else url)
+                                status = data.get("status", "scraping")
+                                msg = escape(str(data.get("message", ""))[:60])
+                                icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
+                                st.caption(f"{icon} {short_url} — {msg}")
+                    
+                    if failed_list:
+                        with st.expander(f"⚠️ Issues ({len(failed_list)}) — not scraped or &lt;200 chars", expanded=False):
+                            for e in failed_list[-10:]:
+                                u = e.get("url", "")
+                                m = (e.get("message", "") or "").strip()
+                                short_url = escape((u[:40] + "…") if len(u) > 40 else u)
+                                msg = escape(m[:500] + ("…" if len(m) > 500 else ""))
+                                st.markdown(f"<span style='color:#f87171;'>✗</span> {short_url}<br><span style='color:#94a3b8; font-size:0.8rem; white-space:pre-wrap;'>{msg}</span>", unsafe_allow_html=True)
+                            if len(failed_list) > 10:
+                                st.caption(f"_Showing last 10 of {len(failed_list)}. Download CSV below for full list with exact errors._")
+            except Exception:
+                pass
             # Yield so Streamlit can send UI updates and the scraper thread can run (avoid tight loop)
             time.sleep(1.0)
         thread.join()
