@@ -1,5 +1,6 @@
 param(
     [switch]$Clean,
+    [switch]$Test,
     [string]$Version = "1.0.0"
 )
 
@@ -56,6 +57,21 @@ if (-not (Test-Path $ExePath)) {
     throw "Build failed: executable not found at $ExePath"
 }
 
+if ($Test) {
+    Write-Host "==> Running launch test (5 seconds) to verify exe starts without crash..."
+    $proc = Start-Process -FilePath $ExePath -PassThru -WindowStyle Normal
+    Start-Sleep -Seconds 5
+    if ($proc.HasExited) {
+        if ($proc.ExitCode -ne 0) {
+            throw "Launch test FAILED: exe exited with code $($proc.ExitCode). Fix the build before releasing."
+        }
+    }
+    if (-not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "==> Launch test PASSED: exe started and ran for 5 seconds."
+    }
+}
+
 $ReleaseZip = Join-Path $ProjectRoot "dist\WebScrapperDesktop-Windows.zip"
 if (Test-Path $ReleaseZip) {
     Remove-Item -Force $ReleaseZip
@@ -80,12 +96,19 @@ if ($isccExe) {
     if (-not (Test-Path $issPath)) {
         throw "Inno Setup script not found: $issPath"
     }
-    # Fix InfoBeforeFile: wrong path causes desktop_app\desktop_app\installer_before.txt in CI — comment it out
-    $issContent = Get-Content -Path $issPath -Raw -Encoding UTF8
-    if ($issContent -match 'InfoBeforeFile=desktop_app\\installer_before\.txt') {
-        $issContent = $issContent -replace 'InfoBeforeFile=desktop_app\\installer_before\.txt', ';InfoBeforeFile=desktop_app\installer_before.txt (disabled: wrong path in CI)'
-        Set-Content -Path $issPath -Value $issContent -NoNewline -Encoding UTF8
-        Write-Host "==> Disabled incorrect InfoBeforeFile path in WebScrapperDesktop.iss"
+    # Remove any InfoBeforeFile= line to avoid desktop_app\desktop_app path resolution in CI
+    $issLines = Get-Content -Path $issPath -Encoding UTF8
+    $changed = $false
+    $issLines = $issLines | ForEach-Object {
+        if ($_ -match '^\s*InfoBeforeFile=') {
+            $changed = $true
+            return "; $_ (removed for CI)"
+        }
+        $_
+    }
+    if ($changed) {
+        $issLines | Set-Content -Path $issPath -Encoding UTF8
+        Write-Host "==> Removed InfoBeforeFile line from WebScrapperDesktop.iss for CI"
     }
     # Run ISCC from desktop_app so .iss relative paths (..\dist, etc.) resolve correctly
     Push-Location (Join-Path $ProjectRoot "desktop_app")
