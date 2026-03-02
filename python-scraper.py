@@ -1374,6 +1374,48 @@ def get_actual_completed_from_files(run_path: str) -> tuple[int, set]:
     return total_rows, urls
 
 
+def get_latest_run_with_results():
+    """
+    Find the most recent run folder in outputs/ that has result files (ZIP or output_part_*.csv).
+    Returns dict with output_dir, run_folder, zip_path, zip_name, csv_files, excel_files, total
+    or None if no such run exists. Keeps download section visible after refresh when session state is cleared.
+    """
+    outputs_dir = "outputs"
+    if not os.path.isdir(outputs_dir):
+        return None
+    for run_folder in sorted(os.listdir(outputs_dir), reverse=True):
+        run_path = os.path.join(outputs_dir, run_folder)
+        if not os.path.isdir(run_path):
+            continue
+        zip_name = f"{run_folder}.zip"
+        zip_path = os.path.join(run_path, zip_name)
+        has_zip = os.path.isfile(zip_path) and os.path.getsize(zip_path) > 0
+        try:
+            files = os.listdir(run_path)
+        except Exception:
+            continue
+        csv_files = [f for f in files if f.endswith(".csv")]
+        excel_files = [f for f in files if f.endswith(".xlsx")]
+        has_parts = any(f.startswith("output_part_") and f.endswith(".csv") for f in files)
+        if not (has_zip or has_parts or csv_files or excel_files):
+            continue
+        ck = load_checkpoint(get_checkpoint_path(run_path))
+        total = len(ck.get("urls", [])) if ck else 0
+        if total == 0:
+            actual_rows, _ = get_actual_completed_from_files(run_path)
+            total = actual_rows if actual_rows > 0 else 1
+        return {
+            "output_dir": run_path,
+            "run_folder": run_folder,
+            "zip_path": zip_path if has_zip else None,
+            "zip_name": zip_name,
+            "csv_files": csv_files,
+            "excel_files": excel_files,
+            "total": total,
+        }
+    return None
+
+
 def reconcile_checkpoint_with_files(output_dir: str) -> int:
     """If checkpoint has more completed_urls than actual rows in files, fix checkpoint. Returns actual count."""
     ck_path = get_checkpoint_path(output_dir)
@@ -1975,7 +2017,10 @@ async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max
                 max_tokens=4000,
                 top_p=0.9,
             )
-            return response.choices[0].message.content.strip()
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                return "❌ OpenRouter returned empty response; try again or another model."
+            return content
         except Exception as e:
             error_str = str(e).lower()
             error_msg = str(e)
@@ -2039,7 +2084,10 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
                 max_tokens=4000,  # Increased for complete quotes
                 top_p=0.9  # More focused responses
             )
-            return response.choices[0].message.content.strip()
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                return "❌ OpenAI returned empty response; try again or another model."
+            return content
         except Exception as e:
             error_str = str(e).lower()
             error_msg = str(e)
@@ -2437,6 +2485,9 @@ async def generate_ai_summary(
     # Post-process to fix all formatting issues
     cleaned_output = clean_and_structure_ai_output(raw_output)
     
+    # Never return blank when we had a real response (so CSV always has an explicit reason if no summary)
+    if not (cleaned_output or "").strip() and raw_output and not raw_output.startswith("❌"):
+        return "❌ Summary empty: AI returned no usable content after formatting."
     return cleaned_output
 
 
@@ -3717,7 +3768,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     )
                 except asyncio.TimeoutError:
                     err_msg = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
-                    _scrape_status("error", "Timeout, trying cache fallback...")
+                    _scrape_status("error", err_msg)
                     try:
                         cache_result = await asyncio.wait_for(
                             _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True),
@@ -3732,10 +3783,10 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                             _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
                         else:
                             scraped_text = err_msg
-                            _scrape_status("error", scraped_text[:120])
+                            _scrape_status("error", scraped_text)
                     else:
                         scraped_text = err_msg
-                        _scrape_status("error", scraped_text[:120])
+                        _scrape_status("error", scraped_text)
                 except Exception as e:
                     # If scraping fails with an exception, try once more with a more lenient approach
                     try:
@@ -3755,7 +3806,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     except Exception as e2:
                         scraped_text = f"❌ Error scraping {normalized_url}: {str(e2)}"
                     if scraped_text and scraped_text.startswith("❌"):
-                        _scrape_status("error", "Scrape failed, trying cache fallback...")
+                        _scrape_status("error", scraped_text)
                         try:
                             cache_result = await asyncio.wait_for(
                                 _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True),
@@ -3770,12 +3821,12 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 scraped_text = cached_text
                                 _scrape_status("scraped", f"Recovered from cache ({len(scraped_text):,} chars)")
                     if scraped_text and scraped_text.startswith("❌"):
-                        _scrape_status("error", scraped_text[:120])
+                        _scrape_status("error", scraped_text)
                 
                 # Single gate: never treat bad content as success (short, challenge, or error-like)
                 if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
                     scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
-                    _scrape_status("error", scraped_text[:120])
+                    _scrape_status("error", scraped_text)
                 
                 # RELAXED VALIDATION: Only flag obvious mismatches
                 # Many sites legitimately redirect to different domains (same organization)
@@ -3803,7 +3854,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 if len(scraped_text.strip()) < _SHORT_CONTENT_FOR_MISMATCH:
                                     # Very short content from different domain - likely wrong
                                     scraped_text = f"❌ CONTENT MISMATCH: Scraped content is from {actual_domain} but expected {expected_domain}. Original URL: {original_url}"
-                                    _scrape_status("error", scraped_text[:120])
+                                    _scrape_status("error", scraped_text)
                                 # Otherwise, allow it - many sites redirect to related domains
                 if scraped_text and not scraped_text.startswith("❌"):
                     _scrape_status("scraped", f"{len(scraped_text):,} chars scraped")
@@ -3832,14 +3883,13 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                             )
                         except asyncio.TimeoutError:
                             ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
-                            _scrape_status("error", "Company summary: timeout (2 min)")
+                            _scrape_status("error", ai_summary)
                         except Exception as e:
                             ai_summary = f"❌ AI Summary error: {str(e)}"
-                            err_short = str(e)[:80] if e else "unknown"
-                            _scrape_status("error", f"Company summary failed: {err_short}")
+                            _scrape_status("error", ai_summary)
                         else:
                             if ai_summary and ai_summary.startswith("❌"):
-                                _scrape_status("error", "Company summary failed")
+                                _scrape_status("error", ai_summary)
                 else:
                     ai_summary = ""
                 # Generate email copy if enabled (skip when scraping already failed or insufficient content)
@@ -3865,21 +3915,20 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                             )
                         except asyncio.TimeoutError:
                             email_copy = "❌ Email copy timeout: Generation exceeded 2 minutes"
-                            _scrape_status("error", "Email copy: timeout (2 min)")
+                            _scrape_status("error", email_copy)
                         except Exception as e:
                             email_copy = f"❌ Email copy error: {str(e)}"
-                            err_short = str(e)[:80] if e else "unknown"
-                            _scrape_status("error", f"Email copy failed: {err_short}")
+                            _scrape_status("error", email_copy)
                         else:
                             if email_copy and email_copy.startswith("❌"):
-                                _scrape_status("error", "Email copy failed")
+                                _scrape_status("error", email_copy)
                 else:
                     email_copy = ""
             
             # Reject bad results (short or challenge pages) so they never get written as success
             if scraped_text and _scraped_result_is_bad(scraped_text):
                 scraped_text = f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters) or blocked/verification page. Try again later."
-                _scrape_status("error", scraped_text[:100])
+                _scrape_status("error", scraped_text)
 
             # PERFECT CSV CLEANING - Zero tolerance for formatting errors
             def clean_csv_field(field_value):
@@ -4036,6 +4085,15 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     has_original_df = original_df is not None and not original_df.empty
     url_col = csv_config.get('url_column') if csv_config else None
     has_headers = csv_config.get('has_headers', True) if csv_config else True
+    # URL column index for no-headers CSV (Column 1 -> 0)
+    if csv_config and not has_headers and url_col is not None:
+        try:
+            url_col_idx = int(str(url_col).replace("Column ", "").strip()) - 1
+            url_col_idx = max(0, min(url_col_idx, len(original_df.columns) - 1)) if has_original_df else 0
+        except (ValueError, TypeError):
+            url_col_idx = 0
+    else:
+        url_col_idx = 0
     
     if has_original_df:
         # Make a copy to avoid modifying the original
@@ -4110,9 +4168,11 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
                     if url:
                         # Find matching row in original DataFrame by URL
                         try:
-                            # Match by URL column - normalize both for comparison
-                            url_col_values = enriched_df.iloc[:, url_col_idx if not has_headers else list(enriched_df.columns).index(url_col)].astype(str).str.strip()
-                            match_mask = url_col_values == url
+                            if has_headers and url_col and url_col in enriched_df.columns:
+                                url_series = enriched_df[url_col].astype(str).str.strip()
+                            else:
+                                url_series = enriched_df.iloc[:, url_col_idx].astype(str).str.strip()
+                            match_mask = url_series == url
                             if match_mask.any():
                                 idx = match_mask.idxmax()
                                 enriched_df.at[idx, 'ScrapedText'] = scraped_text
@@ -4524,9 +4584,24 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
             
             enriched_df = clean_enriched_df(enriched_df)
             
-            # Write enriched CSV
+            # Write enriched CSV with strict formatting (no newlines in fields, QUOTE_ALL for Excel)
             enriched_csv_path = os.path.join(output_dir, "enriched_output.csv")
-            enriched_df.to_csv(enriched_csv_path, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
+            cols = list(enriched_df.columns)
+            with open(enriched_csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                w = csv.writer(f, quoting=csv.QUOTE_ALL, doublequote=True, lineterminator='\n', quotechar='"')
+                w.writerow(cols)
+                for i in range(len(enriched_df)):
+                    row = enriched_df.iloc[i]
+                    vals = []
+                    for c in cols:
+                        v = row[c] if c in row.index else ''
+                        if pd.isna(v):
+                            v = ''
+                        v = str(v).replace('\x00', '').replace('\n', ' ').replace('\r', ' ')
+                        v = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', v)
+                        v = re.sub(r'\s+', ' ', v).strip()
+                        vals.append(v)
+                    w.writerow(vals)
             files_written.append(enriched_csv_path)
             emit(f"✅ Writer: Wrote enriched CSV: {os.path.basename(enriched_csv_path)} ({len(enriched_df)} rows, {len(enriched_df.columns)} columns)")
             
@@ -7062,9 +7137,15 @@ if uploaded_file and start_clicked and can_start:
                 entry = {"url": url, "status": status, "message": message}
                 scrape_recent.append(entry)
                 if status == "error":
-                    err_entry = {"url": url, "message": message[:200]}
+                    full_msg = (message or "").strip()
+                    err_entry = {"url": url, "message": full_msg}
                     scrape_errors.append(err_entry)
-                    all_failed_urls.append(err_entry)
+                    # One entry per URL: update existing or append so final CSV has exact error (no truncation)
+                    existing = next((e for e in all_failed_urls if e.get("url") == url), None)
+                    if existing:
+                        existing["message"] = full_msg
+                    else:
+                        all_failed_urls.append(err_entry)
 
     def ai_status_callback(url, message):
         with ai_status_lock:
@@ -7121,7 +7202,8 @@ if uploaded_file and start_clicked and can_start:
                             ai_status_callback if ai_enabled_for_run else None, scrape_status_callback,
                             run_folder=run_folder, fast_mode=fast_mode,
                             low_resource=low_resource, log_callback=log_cb,
-                            use_playwright_fallback=True, use_common_crawl_fallback=True))
+                            use_playwright_fallback=True, use_common_crawl_fallback=True,
+                            original_df=df_in, csv_config=csv_config))
             log_cb("✅ Run completed")
             if all_failed_urls:
                 log_cb(f"⚠️ {len(all_failed_urls):,} URLs failed. See 'Failed URLs' section below for details and download.")
@@ -7198,7 +7280,8 @@ if uploaded_file and start_clicked and can_start:
                 with scrape_status_lock:
                     in_progress = list(scrape_in_progress.items())
                     recent = list(scrape_recent)
-                    errors = list(scrape_errors)
+                # Use all_failed_urls for Issues (one entry per URL, exact error) so count is accurate
+                failed_list = list(all_failed_urls)
                 n_scraping = sum(1 for _, d in in_progress if d["status"] == "scraping")
                 n_ai = sum(1 for _, d in in_progress if d["status"] == "ai_summarizing")
                 n_email = sum(1 for _, d in in_progress if d["status"] == "email_copy")
@@ -7216,8 +7299,8 @@ if uploaded_file and start_clicked and can_start:
                     active_text = f"🔍{n_scraping} 🤖{n_ai} ✉️{n_email}" if in_progress else "Idle"
                     st.metric("Active", active_text)
                 with m4:
-                    error_count = len(errors)
-                    st.metric("Errors", error_count, delta_color="inverse" if error_count > 0 else "normal")
+                    error_count = len(failed_list)
+                    st.metric("Issues (failed)", error_count, delta_color="inverse" if error_count > 0 else "normal")
                 
                 # Show in-progress items in an expander
                 if in_progress:
@@ -7229,19 +7312,26 @@ if uploaded_file and start_clicked and can_start:
                             icon = "🔍" if status == "scraping" else ("🤖" if status == "ai_summarizing" else "✉️")
                             st.caption(f"{icon} {short_url} — {msg}")
                 
-                # Show errors in a separate expander if any
-                if errors:
-                    with st.expander(f"⚠️ Issues ({len(errors)})", expanded=False):
-                        for e in errors[-5:]:
+                # Issues = not scraped or content < 200 chars; show exact error (full message in sheet)
+                if failed_list:
+                    with st.expander(f"⚠️ Issues ({len(failed_list)}) — not scraped or &lt;200 chars", expanded=False):
+                        for e in failed_list[-10:]:
                             u = e.get("url", "")
-                            m = e.get("message", "")
+                            m = (e.get("message", "") or "").strip()
                             short_url = escape((u[:40] + "…") if len(u) > 40 else u)
-                            msg = escape((m[:60] + "…") if len(m) > 60 else m)
-                            st.markdown(f"<span style='color:#f87171;'>✗</span> {short_url}<br><span style='color:#94a3b8; font-size:0.8rem;'>{msg}</span>", unsafe_allow_html=True)
+                            msg = escape(m[:500] + ("…" if len(m) > 500 else ""))
+                            st.markdown(f"<span style='color:#f87171;'>✗</span> {short_url}<br><span style='color:#94a3b8; font-size:0.8rem; white-space:pre-wrap;'>{msg}</span>", unsafe_allow_html=True)
+                        if len(failed_list) > 10:
+                            st.caption(f"_Showing last 10 of {len(failed_list)}. Download CSV below for full list with exact errors._")
             
             # Yield so Streamlit can send UI updates and the scraper thread can run (avoid tight loop)
             time.sleep(1.0)
         thread.join()
+        # Run finished: progress bar 100%, and explicit "Complete" messaging (no ETA/remaining)
+        progress_bar.progress(1.0)
+        status_text.markdown(f"**✅ Run complete.** All **{total:,}** URL(s) have been processed. You can download your results below.")
+        elapsed_final = int(time.time() - start_time)
+        eta_text.caption(f"Total time: {int(elapsed_final // 60)}m {int(elapsed_final % 60)}s")
         with runtime_lock:
             logs_text = "\n".join(runtime_logs) or "(no logs yet)"
         logs_placeholder.code(logs_text, language=None)
@@ -7279,24 +7369,25 @@ if uploaded_file and start_clicked and can_start:
         st.error(f"❌ Error listing output directory: {e}")
         output_files = []
     
-    # Create ZIP file
+    # Create ZIP file: only broken-down part files (output_part_*.csv, output_part_*.xlsx)
+    csv_files = [f for f in output_files if f.startswith("output_part_") and f.endswith(".csv")]
+    excel_files = [f for f in output_files if f.startswith("output_part_") and f.endswith(".xlsx")]
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for f in output_files:
+            for f in csv_files:
                 file_path = os.path.join(output_dir, f)
-                if os.path.isfile(file_path):  # Only process files, not directories
-                    if f.endswith(".csv") and f != zip_name and "combined" not in f.lower():
-                        try:
-                            zf.write(file_path, arcname=f)
-                            csv_files.append(f)
-                        except Exception as e:
-                            st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
-                    elif f.endswith(".xlsx") and f != zip_name and "combined" not in f.lower():
-                        try:
-                            zf.write(file_path, arcname=f)
-                            excel_files.append(f)
-                        except Exception as e:
-                            st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
+                if os.path.isfile(file_path):
+                    try:
+                        zf.write(file_path, arcname=f)
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
+            for f in excel_files:
+                file_path = os.path.join(output_dir, f)
+                if os.path.isfile(file_path):
+                    try:
+                        zf.write(file_path, arcname=f)
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not add {f} to ZIP: {e}")
     except Exception as e:
         st.error(f"❌ Error creating ZIP file: {e}")
         import traceback
@@ -7342,7 +7433,7 @@ if uploaded_file and start_clicked and can_start:
             w = csv.writer(buf, quoting=csv.QUOTE_ALL)
             w.writerow(["Website", "Error"])
             for e in all_failed_urls:
-                w.writerow([e.get("url", ""), (e.get("message", "") or "")[:500]])
+                w.writerow([e.get("url", ""), (e.get("message", "") or "").strip()])
             failed_csv = buf.getvalue()
             st.download_button(
                 "📥 Download failed URLs (CSV)",
@@ -7389,532 +7480,9 @@ if uploaded_file and start_clicked and can_start:
     if total > 0:
         st.info(f"💡 **Accuracy:** Max characters limit ({max_chars:,} chars) was accurately enforced per website. Each website's content was limited to this exact amount.")
     
-    # Download section (anchor for dark-theme download card styling)
-    st.markdown("""
-    <div class="download-section-anchor" style="margin: 2rem 0 1.5rem;">
-        <h2 style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 0.5rem;">📥 Download Results</h2>
-        <p style="color: #64748b; font-size: 0.9rem;">CSV, Excel, and ZIP archive</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col_dl1, col_dl2, col_dl3 = st.columns(3)
-    
-    with col_dl1:
-        st.subheader("📦 All Files (ZIP)")
-        zip_data = st.session_state.get('zip_data')
-        if zip_data:
-            st.download_button(
-                label="⬇️ Download ZIP Archive",
-                data=zip_data,
-                file_name=zip_name,
-                mime="application/zip",
-                help="Download all CSV and Excel files in a ZIP archive",
-                key="download_zip"
-            )
-        else:
-            # Fallback: read from file if not in session_state
-            try:
-                with open(zip_path, 'rb') as f:
-                    zip_data = f.read()
-                    st.session_state['zip_data'] = zip_data
-                    st.download_button(
-                        label="⬇️ Download ZIP Archive",
-                        data=zip_data,
-                        file_name=zip_name,
-                        mime="application/zip",
-                        help="Download all CSV and Excel files in a ZIP archive",
-                        key="download_zip_fallback"
-                    )
-            except Exception as e:
-                st.error(f"Could not read ZIP file: {e}")
-        st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
-    
-    with col_dl2:
-        st.subheader("📊 Excel Files")
-        if excel_files:
-            # Create a combined Excel file
-            try:
-                # CRITICAL: ALWAYS read from CSV files first (source of truth), NOT Excel files
-                # Excel files may be corrupted or have wrong data, CSV files are the source of truth
-                csv_all_data = []
-                if csv_files:
-                    for csv_file in sorted(csv_files):
-                        # CRITICAL: Skip combined CSV files - they should not be re-read
-                        if "combined" in csv_file.lower():
-                            continue
-                        
-                        csv_path = os.path.join(output_dir, csv_file)
-                        try:
-                            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                                rows_data = []
-                                with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
-                                    csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
-                                    header = next(csv_reader, None)
-                                    if not header:
-                                        continue
-                                    
-                                    # Normalize header
-                                    header_normalized = [str(h).strip().strip('"').strip("'") for h in header]
-                                    
-                                    # Map header to column indices - support 3 or 4 cols (EmailCopy)
-                                    col_indices = {}
-                                    for idx, h in enumerate(header_normalized):
-                                        h_lower = h.lower().strip()
-                                        if h_lower == 'website' or h_lower == 'url':
-                                            col_indices['Website'] = idx
-                                        elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
-                                            col_indices['ScrapedText'] = idx
-                                        elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
-                                            col_indices['CompanySummary'] = idx
-                                        elif 'email' in h_lower and 'copy' in h_lower:
-                                            col_indices['EmailCopy'] = idx
-                                    
-                                    if 'Website' not in col_indices and len(header_normalized) >= 1:
-                                        col_indices['Website'] = 0
-                                    if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
-                                        col_indices['ScrapedText'] = 1
-                                    if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
-                                        col_indices['CompanySummary'] = 2
-                                    if 'EmailCopy' not in col_indices and len(header_normalized) >= 4:
-                                        col_indices['EmailCopy'] = 3
-                                    
-                                    if len(col_indices) < 3:
-                                        st.warning(f"⚠️ CSV file {csv_file} missing columns. Found: {header_normalized}")
-                                        continue
-                                    
-                                    # Support 3 or 4 columns (EmailCopy when present)
-                                    num_cols = 4 if 'EmailCopy' in col_indices else 3
-                                    for row in csv_reader:
-                                        if len(row) == 0:
-                                            continue
-                                        while len(row) < num_cols:
-                                            row.append("")
-                                        if len(row) > num_cols:
-                                            row = row[:num_cols]
-                                        
-                                        website_idx = col_indices.get('Website', 0)
-                                        scraped_idx = col_indices.get('ScrapedText', 1)
-                                        summary_idx = col_indices.get('CompanySummary', 2)
-                                        email_idx = col_indices.get('EmailCopy')
-                                        
-                                        if website_idx >= len(row) or scraped_idx >= len(row) or summary_idx >= len(row):
-                                            continue
-                                        
-                                        website = str(row[website_idx]).strip()
-                                        scraped_text = str(row[scraped_idx]).strip()
-                                        company_summary = str(row[summary_idx]).strip()
-                                        email_copy = str(row[email_idx]).strip() if email_idx is not None and email_idx < len(row) else ""
-                                        
-                                        row_dict = {'Website': website, 'ScrapedText': scraped_text, 'CompanySummary': company_summary}
-                                        if email_idx is not None:
-                                            row_dict['EmailCopy'] = email_copy
-                                        rows_data.append(row_dict)
-                                
-                                if rows_data:
-                                    use_cols = EXCEL_COLS_4 if 'EmailCopy' in rows_data[0] else EXCEL_COLS_3
-                                    df_csv = pd.DataFrame(rows_data, columns=use_cols)
-                                    csv_all_data.append(df_csv)
-                        except Exception as e:
-                            st.warning(f"⚠️ Error reading CSV {csv_file} for Excel: {e}")
-                            import traceback
-                            st.error(f"Traceback: {traceback.format_exc()}")
-                            continue
-                
-                # Fallback: Read from Excel files ONLY if CSV reading completely failed
-                all_data = []
-                if not csv_all_data:
-                    st.warning("⚠️ No CSV data found, falling back to Excel files (may have wrong data)")
-                    for excel_file in sorted(excel_files):
-                        excel_path = os.path.join(output_dir, excel_file)
-                        try:
-                            # Check if file exists and has content
-                            if not os.path.exists(excel_path):
-                                st.warning(f"⚠️ Excel file not found: {excel_file}")
-                                continue
-                            
-                            if os.path.getsize(excel_path) == 0:
-                                st.warning(f"⚠️ Excel file is empty: {excel_file}")
-                                continue
-                            
-                            # Read Excel file with explicit column handling
-                            df_part = pd.read_excel(excel_path, engine='openpyxl', header=0)
-                            
-                            # Check if DataFrame is empty
-                            if df_part.empty:
-                                st.warning(f"⚠️ Excel file {excel_file} contains no data")
-                                continue
-                            
-                            # CRITICAL: Normalize column names - handle corrupted/merged headers
-                            # Clean column names: strip whitespace, handle case-insensitive matching
-                            df_part.columns = [str(col).strip() for col in df_part.columns]
-                            
-                            # Map columns to standard names (case-insensitive, handle variations)
-                            column_mapping = {}
-                            for col in df_part.columns:
-                                col_lower = col.lower().strip()
-                                if 'website' in col_lower or col_lower == 'url':
-                                    column_mapping[col] = 'Website'
-                                elif 'scraped' in col_lower and 'text' in col_lower:
-                                    column_mapping[col] = 'ScrapedText'
-                                elif 'company' in col_lower and 'summary' in col_lower:
-                                    column_mapping[col] = 'CompanySummary'
-                                elif 'summary' in col_lower and 'company' not in col_lower:
-                                    column_mapping[col] = 'CompanySummary'
-                                elif 'email' in col_lower and 'copy' in col_lower:
-                                    column_mapping[col] = 'EmailCopy'
-                            
-                            # Rename columns
-                            df_part = df_part.rename(columns=column_mapping)
-                            
-                            # If we still don't have the right columns, try to infer from position
-                            # This handles cases where headers might be completely corrupted
-                            if 'Website' not in df_part.columns and len(df_part.columns) >= 1:
-                                df_part.columns.values[0] = 'Website'
-                            if 'ScrapedText' not in df_part.columns and len(df_part.columns) >= 2:
-                                df_part.columns.values[1] = 'ScrapedText'
-                            if 'CompanySummary' not in df_part.columns and len(df_part.columns) >= 3:
-                                df_part.columns.values[2] = 'CompanySummary'
-                            
-                            # Ensure all required columns exist
-                            if "Website" not in df_part.columns:
-                                st.warning(f"⚠️ Excel file {excel_file} missing Website column. Found columns: {list(df_part.columns)}")
-                                continue
-                            
-                            if "ScrapedText" not in df_part.columns:
-                                # If ScrapedText is missing, create it from the second column or empty
-                                if len(df_part.columns) >= 2:
-                                    second_col = df_part.columns[1]
-                                    df_part = df_part.rename(columns={second_col: 'ScrapedText'})
-                                else:
-                                    df_part['ScrapedText'] = ""
-                            
-                            if "CompanySummary" not in df_part.columns:
-                                df_part["CompanySummary"] = ""
-                            if "EmailCopy" not in df_part.columns:
-                                df_part["EmailCopy"] = ""
-                            standard_cols = [c for c in EXCEL_COLS_4 if c in df_part.columns] or EXCEL_COLS_3
-                            df_part = df_part[standard_cols]
-                            
-                            # Convert all columns to string and clean
-                            for col in df_part.columns:
-                                df_part[col] = df_part[col].astype(str).replace('nan', '').replace('None', '')
-                            
-                            # Only add if DataFrame has rows
-                            if len(df_part) > 0:
-                                all_data.append(df_part)
-                            else:
-                                st.warning(f"⚠️ Excel file {excel_file} has no valid rows after processing")
-                        except Exception as e:
-                            st.warning(f"⚠️ Error reading Excel file {excel_file}: {e}")
-                            import traceback
-                            st.error(f"Traceback: {traceback.format_exc()}")
-                            continue
-                
-                if csv_all_data:
-                    combined_df = pd.concat(csv_all_data, ignore_index=True)
-                    for c in EXCEL_COLS_4:
-                        if c not in combined_df.columns:
-                            combined_df[c] = ""
-                    combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("") if "EmailCopy" in combined_df.columns else ""
-                    combined_cols = EXCEL_COLS_4
-                    combined_df = combined_df[combined_cols]
-                elif all_data:
-                    st.warning("⚠️ CSV reading failed, using Excel files (may have incomplete data)")
-                    combined_df = pd.concat(all_data, ignore_index=True)
-                    for c in EXCEL_COLS_4:
-                        if c not in combined_df.columns:
-                            combined_df[c] = ""
-                    combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("") if "EmailCopy" in combined_df.columns else ""
-                    combined_cols = EXCEL_COLS_4
-                    combined_df = combined_df[combined_cols]
-                else:
-                    st.error("❌ No data available to combine")
-                    raise ValueError("No data available to combine for Excel file")
-                
-                # Clean the combined DataFrame
-                def clean_dataframe_for_excel(df):
-                    """Clean all string columns in DataFrame for Excel"""
-                    import re
-                    for col in df.columns:
-                        df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-                        df[col] = df[col].str.replace('\x00', '', regex=False)
-                        df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
-                        df[col] = df[col].str.strip()
-                    return df
-                combined_df = clean_dataframe_for_excel(combined_df.copy())
-                
-                from openpyxl import Workbook
-                excel_buffer = BytesIO()
-                wb = Workbook()
-                ws = wb.active
-                combined_cols = EXCEL_COLS_4
-                _write_excel_sheet(ws, combined_cols, combined_df)
-                
-                # CRITICAL: Save with explicit error handling
-                try:
-                    wb.save(excel_buffer)
-                except Exception as save_error:
-                    st.error(f"❌ Excel save failed: {save_error}")
-                    import traceback
-                    st.error(f"Traceback: {traceback.format_exc()}")
-                    raise save_error
-                
-                excel_buffer.seek(0)
-                excel_data = excel_buffer.read()
-                
-                # Store in session_state for persistence
-                st.session_state['combined_excel_data'] = excel_data
-                st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
-                st.session_state['combined_df'] = combined_df  # Store for CSV too
-                
-                st.download_button(
-                    label="⬇️ Download Combined Excel",
-                    data=excel_data,
-                    file_name=f"{run_folder}_combined.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Download all data in a single Excel file",
-                    key="download_excel"
-                )
-                st.caption(f"{len(combined_df)} total rows")
-            except Exception as e:
-                st.warning(f"Could not create combined Excel: {e}")
-                import traceback
-                st.error(f"Error details: {traceback.format_exc()}")
-        else:
-            st.info("No Excel files generated")
-    
-    with col_dl3:
-        st.subheader("📄 CSV Files")
-        if csv_files:
-            # Create a combined CSV file
-            try:
-                all_data = []
-                for csv_file in sorted(csv_files):
-                    # CRITICAL: Skip combined CSV files - they should not be re-read
-                    if "combined" in csv_file.lower():
-                        continue
-                    
-                    csv_path = os.path.join(output_dir, csv_file)
-                    try:
-                        # Check if file exists and has content
-                        if not os.path.exists(csv_path):
-                            st.warning(f"⚠️ CSV file not found: {csv_file}")
-                            continue
-                        
-                        if os.path.getsize(csv_path) == 0:
-                            st.warning(f"⚠️ CSV file is empty: {csv_file}")
-                            continue
-                        
-                        # CRITICAL: Read CSV using Python's csv.reader (not pandas) for perfect round-trip compatibility
-                        # pandas read_csv can misinterpret CSV files even with QUOTE_ALL
-                        rows_data = []
-                        with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
-                            csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
-                            header = next(csv_reader, None)
-                            if not header:
-                                st.warning(f"⚠️ CSV file {csv_file} has no header")
-                                continue
-                            
-                            # Normalize header - handle any variations
-                            header_normalized = []
-                            for h in header:
-                                h_clean = str(h).strip().strip('"').strip("'")
-                                header_normalized.append(h_clean)
-                            
-                            # Map header to standard columns (3 or 4 when EmailCopy present)
-                            col_indices = {}
-                            for idx, h in enumerate(header_normalized):
-                                h_lower = h.lower().strip()
-                                if h_lower == 'website' or h_lower == 'url':
-                                    col_indices['Website'] = idx
-                                elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
-                                    col_indices['ScrapedText'] = idx
-                                elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
-                                    col_indices['CompanySummary'] = idx
-                                elif 'email' in h_lower and 'copy' in h_lower:
-                                    col_indices['EmailCopy'] = idx
-                            if 'Website' not in col_indices and len(header_normalized) >= 1:
-                                col_indices['Website'] = 0
-                            if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
-                                col_indices['ScrapedText'] = 1
-                            if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
-                                col_indices['CompanySummary'] = 2
-                            if 'EmailCopy' not in col_indices and len(header_normalized) >= 4:
-                                col_indices['EmailCopy'] = 3
-                            if len(col_indices) < 3:
-                                st.warning(f"⚠️ CSV file {csv_file} column mapping incomplete: {col_indices}")
-                                continue
-                            num_cols_csv = 4 if 'EmailCopy' in col_indices else 3
-                            csv_cols = EXCEL_COLS_4 if 'EmailCopy' in col_indices else EXCEL_COLS_3
-                            
-                            for row_num, row in enumerate(csv_reader, start=2):
-                                if len(row) == 0:
-                                    continue
-                                while len(row) < num_cols_csv:
-                                    row.append("")
-                                if len(row) > num_cols_csv:
-                                    row = row[:num_cols_csv]
-                                website_idx = col_indices.get('Website', 0)
-                                scraped_idx = col_indices.get('ScrapedText', 1)
-                                summary_idx = col_indices.get('CompanySummary', 2)
-                                email_idx = col_indices.get('EmailCopy')
-                                website = str(row[website_idx]).strip() if website_idx < len(row) else ""
-                                scraped_text = str(row[scraped_idx]).strip() if scraped_idx < len(row) else ""
-                                company_summary = str(row[summary_idx]).strip() if summary_idx < len(row) else ""
-                                email_copy = str(row[email_idx]).strip() if email_idx is not None and email_idx < len(row) else ""
-                                if website:
-                                    row_dict = {'Website': website, 'ScrapedText': scraped_text, 'CompanySummary': company_summary}
-                                    if email_idx is not None:
-                                        row_dict['EmailCopy'] = email_copy
-                                    rows_data.append(row_dict)
-                        
-                        if not rows_data:
-                            st.warning(f"⚠️ CSV file {csv_file} contains no valid data rows")
-                            continue
-                        
-                        df_part = pd.DataFrame(rows_data, columns=csv_cols)
-                        
-                        # Only add if DataFrame has rows
-                        if len(df_part) > 0:
-                            all_data.append(df_part)
-                        else:
-                            st.warning(f"⚠️ CSV file {csv_file} has no valid rows after processing")
-                    except Exception as e:
-                        st.warning(f"⚠️ Error reading CSV file {csv_file}: {e}")
-                        import traceback
-                        st.error(f"Traceback: {traceback.format_exc()}")
-                        continue
-                
-                if all_data:
-                    combined_df = pd.concat(all_data, ignore_index=True)
-                    for c in EXCEL_COLS_4:
-                        if c not in combined_df.columns:
-                            combined_df[c] = ""
-                    combined_df["EmailCopy"] = combined_df["EmailCopy"].fillna("") if "EmailCopy" in combined_df.columns else ""
-                    combined_df = combined_df[EXCEL_COLS_4]
-                    
-                    # PERFECT CSV CLEANING for combined CSV
-                    def clean_dataframe_for_csv(df):
-                        """Clean all string columns in DataFrame for perfect CSV formatting"""
-                        import re
-                        for col in df.columns:
-                            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-                            df[col] = df[col].str.replace('\x00', '', regex=False)
-                            df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
-                            df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
-                            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
-                            df[col] = df[col].str.strip()
-                            df[col] = df[col].replace('', '')
-                        return df
-                    combined_df = clean_dataframe_for_csv(combined_df.copy())
-                    combined_df = combined_df[EXCEL_COLS_4]
-                    
-                    # CRITICAL: Write CSV directly to ensure Excel compatibility
-                    # Use StringIO for text-based CSV writing, then encode to bytes
-                    csv_buffer = StringIO()
-                    # Use QUOTE_ALL and explicit settings for Excel compatibility
-                    csv_writer = csv.writer(
-                        csv_buffer, 
-                        quoting=csv.QUOTE_ALL,  # Quote all fields to handle commas/quotes
-                        doublequote=True,  # Escape quotes by doubling them
-                        lineterminator='\n',  # Unix line endings
-                        quotechar='"'  # Use double quotes
-                    )
-                    
-                    csv_cols = [c for c in EXCEL_COLS_4 if c in combined_df.columns] or EXCEL_COLS_3
-                    csv_writer.writerow(csv_cols)
-                    
-                    # Clean function for CSV values - ensures Excel compatibility
-                    def clean_csv_value_for_excel(val_str):
-                        """Clean a single CSV value ensuring Excel compatibility"""
-                        if not val_str:
-                            return ""
-                        import re
-                        # Convert to string if not already
-                        val_str = str(val_str)
-                        # Remove null bytes (can break CSV parsing)
-                        val_str = val_str.replace('\x00', '')
-                        # CRITICAL: Replace newlines/carriage returns with space (Excel can't handle newlines in CSV fields)
-                        val_str = val_str.replace('\n', ' ').replace('\r', ' ')
-                        # Replace tabs with space
-                        val_str = val_str.replace('\t', ' ')
-                        # Remove other control characters (except space)
-                        val_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', val_str)
-                        # Collapse multiple spaces to single space
-                        val_str = re.sub(r'\s+', ' ', val_str)
-                        # Strip leading/trailing whitespace
-                        val_str = val_str.strip()
-                        # Note: csv.writer with QUOTE_ALL will automatically quote the entire field
-                        # and escape any internal quotes by doubling them (Excel standard)
-                        return val_str
-                    
-                    # Write rows - ensure exactly 3 values per row in correct order
-                    # CRITICAL: Use iloc instead of iterrows() to prevent misalignment
-                    for idx in range(len(combined_df)):
-                        row = combined_df.iloc[idx]
-                        
-                        row_vals = [clean_csv_value_for_excel("" if pd.isna(row.get(c, "")) else str(row[c])) for c in csv_cols]
-                        csv_writer.writerow(row_vals)
-                    
-                    csv_buffer.seek(0)
-                    
-                    # Get string content and encode to bytes with UTF-8 BOM for Excel compatibility
-                    csv_data = csv_buffer.getvalue().encode('utf-8-sig')
-                    
-                    # CRITICAL: Validate the CSV by reading it back
-                    try:
-                        csv_buffer.seek(0)
-                        test_reader = csv.reader(csv_buffer, quoting=csv.QUOTE_ALL)
-                        test_rows = list(test_reader)
-                        if len(test_rows) > 0:
-                            expected_cols = len(csv_cols)
-                            if list(test_rows[0]) != csv_cols:
-                                st.warning(f"⚠️ CSV header validation failed. Expected {csv_cols}, got: {test_rows[0]}")
-                            for i, test_row in enumerate(test_rows[1:], start=2):
-                                if len(test_row) != expected_cols:
-                                    st.warning(f"⚠️ CSV row {i} has {len(test_row)} columns instead of {expected_cols}")
-                    except Exception as e:
-                        st.warning(f"⚠️ CSV validation error: {e}")
-                    
-                    # Store for persistence
-                    st.session_state['combined_csv_data'] = csv_data
-                    st.session_state['combined_df'] = combined_df
-                    st.session_state['combined_csv_filename'] = f"{run_folder}_combined.csv"
-                    
-                    st.download_button(
-                        label="⬇️ Download Combined CSV",
-                        data=csv_data,
-                        file_name=f"{run_folder}_combined.csv",
-                        mime="text/csv",
-                        help="Download all data in a single CSV file (Excel/Google Sheets compatible)",
-                        key="download_csv"
-                    )
-                    st.caption(f"{len(combined_df)} total rows")
-            except Exception as e:
-                st.warning(f"Could not create combined CSV: {e}")
-                import traceback
-                st.error(f"Error details: {traceback.format_exc()}")
-        else:
-            st.info("No CSV files generated")
-    
-    
-    # File list
-    with st.expander("📋 View Generated Files", expanded=False):
-        st.write("**CSV Files:**")
-        for f in sorted(csv_files):
-            st.code(f, language=None)
-        st.write("**Excel Files:**")
-        for f in sorted(excel_files):
-            st.code(f, language=None)
-        st.write(f"**Location:** `{output_dir}`")
-    
-    st.info("💡 **Tip:** CSV files use UTF-8 encoding with BOM for Excel compatibility. Excel files (.xlsx) are ready to open directly!")
-    
-    # Store max_chars info for display
+    # Store for the single download section below (no duplicate section)
     st.session_state['max_chars_info'] = max_chars
     
-    # IMPORTANT: Set flag that scraping is complete for download section
-    st.session_state['scraping_complete'] = True
 
 # Show download section if scraping was completed OR if we have download data
 has_download_data = (
@@ -7923,6 +7491,7 @@ has_download_data = (
     st.session_state.get('combined_csv_data')
 )
 
+# Single download section: show when scraping is complete or we have download data (no duplicate)
 if st.session_state.get('scraping_complete', False) or has_download_data:
     # Retrieve data from session_state
     output_dir = st.session_state.get('output_dir')
@@ -7964,8 +7533,8 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
         st.warning("⚠️ **Important:** Downloads are stored temporarily. If you refresh or leave this page, files may be lost. Download NOW to save your results.")
     
     # Download section (persistent, same anchor for styling)
-    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 1rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
-    
+    st.markdown("""<h2 class="download-section-anchor" style="color: #f1f5f9; font-size: 1.5rem; margin-bottom: 0.5rem;">📥 Download Results</h2>""", unsafe_allow_html=True)
+    st.caption("**ZIP:** All broken-down part files. **Combined Excel:** One file with only Website URL, scraped content, company summary, and email copy (4 columns). **Combined CSV:** Your original uploaded file with the new data appended as columns — clean, no formatting errors.")
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
     with col_dl1:
@@ -7977,7 +7546,7 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
                 data=zip_data,
                 file_name=zip_name or "results.zip",
                 mime="application/zip",
-                help="Download all CSV and Excel files in a ZIP archive",
+                help="All broken-down CSV and Excel part files (output_part_*.csv, output_part_*.xlsx)",
                 key="download_zip_main"
             )
         else:
@@ -7992,7 +7561,7 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
                             data=zip_data,
                             file_name=zip_name or "results.zip",
                             mime="application/zip",
-                            help="Download all CSV and Excel files in a ZIP archive",
+                            help="All broken-down CSV and Excel part files (output_part_*.csv, output_part_*.xlsx)",
                             key="download_zip_fallback"
                         )
                 else:
@@ -8005,7 +7574,7 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
         st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
     
     with col_dl2:
-        st.subheader("📊 Excel Files")
+        st.subheader("📊 Combined Excel")
         excel_data = st.session_state.get('combined_excel_data')
         excel_filename = st.session_state.get('combined_excel_filename')
         combined_df = st.session_state.get('combined_df')
@@ -8016,7 +7585,7 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
                 data=excel_data,
                 file_name=excel_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Download all data in a single Excel file",
+                help="Website URL, scraped content, company summary, and email copy only (4 columns)",
                 key="download_excel_main"
             )
             if combined_df is not None:
@@ -8031,75 +7600,131 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
                     output_dir = None
             
             if output_dir:
-                st.info("🔄 Regenerating combined Excel file from existing files...")
+                # Prefer enriched output (original sheet + new columns) when present
+                enriched_csv_path = os.path.join(output_dir, "enriched_output.csv")
+                enriched_xlsx_path = os.path.join(output_dir, "enriched_output.xlsx")
+                used_enriched = False
+                if os.path.exists(enriched_csv_path) and os.path.getsize(enriched_csv_path) > 0:
+                    try:
+                        combined_df = pd.read_csv(enriched_csv_path, encoding='utf-8-sig')
+                        if not combined_df.empty:
+                            with open(enriched_csv_path, 'rb') as f:
+                                st.session_state['combined_csv_data'] = f.read()
+                            st.session_state['combined_csv_filename'] = f"{run_folder}_enriched.csv"
+                            st.session_state['combined_df'] = combined_df
+                            # Combined Excel: only Website, ScrapedText, CompanySummary, EmailCopy (4 columns)
+                            excel_cols = [c for c in EXCEL_COLS_4 if c in combined_df.columns] or [c for c in EXCEL_COLS_3 if c in combined_df.columns]
+                            combined_excel_df = combined_df[excel_cols].copy()
+                            def clean_dataframe_for_excel(df):
+                                import re
+                                for col in df.columns:
+                                    df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+                                    df[col] = df[col].str.replace('\x00', '', regex=False)
+                                    df[col] = df[col].str.replace(r'[\n\r\f\v\t]', ' ', regex=True)
+                                    df[col] = df[col].str.replace(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', regex=True)
+                                    df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
+                                    df[col] = df[col].str.strip()
+                                return df
+                            combined_excel_df = clean_dataframe_for_excel(combined_excel_df)
+                            from openpyxl import Workbook
+                            excel_buffer = BytesIO()
+                            wb = Workbook()
+                            ws = wb.active
+                            _write_excel_sheet(ws, excel_cols, combined_excel_df)
+                            wb.save(excel_buffer)
+                            excel_buffer.seek(0)
+                            st.session_state['combined_excel_data'] = excel_buffer.read()
+                            st.session_state['combined_excel_filename'] = f"{run_folder}_combined.xlsx"
+                            used_enriched = True
+                    except Exception as e:
+                        st.warning(f"Could not use enriched output: {e}")
+                if not used_enriched:
+                    st.info("🔄 Regenerating combined Excel file from existing files...")
                 try:
-                    # CRITICAL: Read from CSV files first (source of truth), NOT Excel files
-                    csv_all_data = []
-                    if csv_files:
-                        for csv_file in sorted(csv_files):
-                            if "combined" in csv_file.lower():
-                                continue
-                            csv_path = os.path.join(output_dir, csv_file)
-                            try:
-                                if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                                    rows_data = []
-                                    with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
-                                        csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
-                                        header = next(csv_reader, None)
-                                        if not header:
-                                            continue
-                                        header_normalized = [str(h).strip().strip('"').strip("'") for h in header]
-                                        col_indices = {}
-                                        for idx, h in enumerate(header_normalized):
-                                            h_lower = h.lower().strip()
-                                            if h_lower == 'website' or h_lower == 'url':
-                                                col_indices['Website'] = idx
-                                            elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
-                                                col_indices['ScrapedText'] = idx
-                                            elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
-                                                col_indices['CompanySummary'] = idx
-                                        if 'Website' not in col_indices and len(header_normalized) >= 1:
-                                            col_indices['Website'] = 0
-                                        if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
-                                            col_indices['ScrapedText'] = 1
-                                        if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
-                                            col_indices['CompanySummary'] = 2
-                                        if len(col_indices) != 3:
-                                            continue
-                                        for row in csv_reader:
-                                            if len(row) == 0:
+                    if used_enriched:
+                        st.download_button(
+                            label="⬇️ Download Combined Excel",
+                            data=st.session_state.get('combined_excel_data'),
+                            file_name=st.session_state.get('combined_excel_filename', f"{run_folder}_combined.xlsx"),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            help="Website URL, scraped content, company summary, and email copy only (4 columns)",
+                            key="download_excel_regen"
+                        )
+                        st.caption(f"{len(combined_df)} total rows — Website, Scraped Text, Company Summary, Email Copy")
+                    else:
+                        # CRITICAL: Read from CSV files first (source of truth), NOT Excel files
+                        csv_all_data = []
+                        if csv_files:
+                            for csv_file in sorted(csv_files):
+                                if "combined" in csv_file.lower() or csv_file == "enriched_output.csv":
+                                    continue
+                                csv_path = os.path.join(output_dir, csv_file)
+                                try:
+                                    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                                        rows_data = []
+                                        with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                                            csv_reader = csv.reader(f, quoting=csv.QUOTE_ALL, doublequote=True)
+                                            header = next(csv_reader, None)
+                                            if not header:
                                                 continue
-                                            while len(row) < 3:
-                                                row.append("")
-                                            if len(row) > 3:
-                                                row = row[:3]
-                                            website_idx = col_indices.get('Website', 0)
-                                            scraped_idx = col_indices.get('ScrapedText', 1)
-                                            summary_idx = col_indices.get('CompanySummary', 2)
-                                            if website_idx >= len(row) or scraped_idx >= len(row) or summary_idx >= len(row):
+                                            header_normalized = [str(h).strip().strip('"').strip("'") for h in header]
+                                            col_indices = {}
+                                            for idx, h in enumerate(header_normalized):
+                                                h_lower = h.lower().strip()
+                                                if h_lower == 'website' or h_lower == 'url':
+                                                    col_indices['Website'] = idx
+                                                elif h_lower == 'scrapedtext' or (h_lower.startswith('scraped') and 'text' in h_lower):
+                                                    col_indices['ScrapedText'] = idx
+                                                elif h_lower == 'companysummary' or (h_lower.startswith('company') and 'summary' in h_lower):
+                                                    col_indices['CompanySummary'] = idx
+                                                elif 'email' in h_lower and 'copy' in h_lower:
+                                                    col_indices['EmailCopy'] = idx
+                                            if 'Website' not in col_indices and len(header_normalized) >= 1:
+                                                col_indices['Website'] = 0
+                                            if 'ScrapedText' not in col_indices and len(header_normalized) >= 2:
+                                                col_indices['ScrapedText'] = 1
+                                            if 'CompanySummary' not in col_indices and len(header_normalized) >= 3:
+                                                col_indices['CompanySummary'] = 2
+                                            if 'EmailCopy' not in col_indices and len(header_normalized) >= 4:
+                                                col_indices['EmailCopy'] = 3
+                                            if len(col_indices) < 3:
                                                 continue
-                                            website = str(row[website_idx]).strip()
-                                            scraped_text = str(row[scraped_idx]).strip()
-                                            company_summary = str(row[summary_idx]).strip()
-                                            if website:
-                                                rows_data.append({
-                                                    'Website': website,
-                                                    'ScrapedText': scraped_text,
-                                                    'CompanySummary': company_summary
-                                                })
-                                    if rows_data:
-                                        df_csv = pd.DataFrame(rows_data, columns=["Website", "ScrapedText", "CompanySummary"])
-                                        csv_all_data.append(df_csv)
-                            except Exception as e:
-                                st.warning(f"⚠️ Error reading CSV {csv_file}: {e}")
-                                continue
+                                            use_cols = EXCEL_COLS_4 if 'EmailCopy' in col_indices else EXCEL_COLS_3
+                                            num_cols = len(use_cols)
+                                            for row in csv_reader:
+                                                if len(row) == 0:
+                                                    continue
+                                                while len(row) < num_cols:
+                                                    row.append("")
+                                                if len(row) > num_cols:
+                                                    row = row[:num_cols]
+                                                website_idx = col_indices.get('Website', 0)
+                                                scraped_idx = col_indices.get('ScrapedText', 1)
+                                                summary_idx = col_indices.get('CompanySummary', 2)
+                                                email_idx = col_indices.get('EmailCopy')
+                                                if website_idx >= len(row) or scraped_idx >= len(row) or summary_idx >= len(row):
+                                                    continue
+                                                website = str(row[website_idx]).strip()
+                                                scraped_text = str(row[scraped_idx]).strip()
+                                                company_summary = str(row[summary_idx]).strip()
+                                                email_copy = str(row[email_idx]).strip() if email_idx is not None and email_idx < len(row) else ""
+                                                if website:
+                                                    row_dict = {'Website': website, 'ScrapedText': scraped_text, 'CompanySummary': company_summary, 'EmailCopy': email_copy if use_cols == EXCEL_COLS_4 else ''}
+                                                    rows_data.append(row_dict)
+                                        if rows_data:
+                                            df_csv = pd.DataFrame(rows_data, columns=EXCEL_COLS_4)
+                                            csv_all_data.append(df_csv)
+                                except Exception as e:
+                                    st.warning(f"⚠️ Error reading CSV {csv_file}: {e}")
+                                    continue
                     
                     # Use CSV data if available, otherwise fall back to Excel files
                     if csv_all_data:
                         combined_df = pd.concat(csv_all_data, ignore_index=True)
-                        if "CompanySummary" not in combined_df.columns:
-                            combined_df["CompanySummary"] = ""
-                        combined_df = combined_df[["Website", "ScrapedText", "CompanySummary"]]
+                        for c in EXCEL_COLS_4:
+                            if c not in combined_df.columns:
+                                combined_df[c] = ""
+                        combined_df = combined_df[EXCEL_COLS_4]
                     elif excel_files:
                         # Fallback to Excel files
                         all_data = []
@@ -8228,7 +7853,7 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
             st.info("No Excel files generated")
     
     with col_dl3:
-        st.subheader("📄 CSV Files")
+        st.subheader("📄 Combined CSV (original + new data)")
         csv_data = st.session_state.get('combined_csv_data')
         csv_filename = st.session_state.get('combined_csv_filename')
         combined_df = st.session_state.get('combined_df')
@@ -8261,13 +7886,63 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
                 data=csv_data,
                 file_name=csv_filename,
                 mime="text/csv",
-                help="Download all data in a single CSV file (Excel/Google Sheets compatible)",
+                help="Your original uploaded file with scraped content, company summary, and email copy appended as new columns. Clean formatting.",
                 key="download_csv_main"
             )
             if combined_df is not None:
                 st.caption(f"{len(combined_df)} total rows")
+        elif csv_files and output_dir and os.path.isdir(output_dir):
+            # Restore combined CSV from disk so download stays after refresh
+            try:
+                enriched_path = os.path.join(output_dir, "enriched_output.csv")
+                if os.path.isfile(enriched_path) and os.path.getsize(enriched_path) > 0:
+                    with open(enriched_path, 'rb') as f:
+                        csv_data = f.read()
+                    st.session_state['combined_csv_data'] = csv_data
+                    st.session_state['combined_csv_filename'] = f"{run_folder}_enriched.csv"
+                    combined_df = pd.read_csv(enriched_path, encoding='utf-8-sig')
+                    st.session_state['combined_df'] = combined_df
+                else:
+                    dfs = []
+                    for f in sorted(csv_files):
+                        if "combined" in f.lower() or f == "enriched_output.csv":
+                            continue
+                        fp = os.path.join(output_dir, f)
+                        if os.path.isfile(fp) and f.endswith(".csv"):
+                            try:
+                                df = pd.read_csv(fp, encoding='utf-8-sig')
+                                if len(df) > 0:
+                                    dfs.append(df)
+                            except Exception:
+                                pass
+                    if dfs:
+                        combined_df = pd.concat(dfs, ignore_index=True)
+                        csv_buffer = StringIO()
+                        combined_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
+                        csv_data = csv_buffer.getvalue().encode('utf-8-sig')
+                        st.session_state['combined_csv_data'] = csv_data
+                        st.session_state['combined_csv_filename'] = f"{run_folder}_combined.csv"
+                        st.session_state['combined_df'] = combined_df
+                csv_data = st.session_state.get('combined_csv_data')
+                csv_filename = st.session_state.get('combined_csv_filename')
+                combined_df = st.session_state.get('combined_df')
+                if csv_data and csv_filename:
+                    st.download_button(
+                        label="⬇️ Download Combined CSV",
+                        data=csv_data,
+                        file_name=csv_filename,
+                        mime="text/csv",
+                        help="Download all data in a single CSV file (Excel/Google Sheets compatible)",
+                        key="download_csv_regen"
+                    )
+                    if combined_df is not None:
+                        st.caption(f"{len(combined_df)} total rows")
+                else:
+                    st.info("Could not regenerate CSV from files. Use the ZIP to get individual files.")
+            except Exception as e:
+                st.warning(f"Could not load CSV from disk: {e}. Use the ZIP to get individual files.")
         elif csv_files:
-            st.info("Click 'Start Scraping' again to generate CSV file")
+            st.info("Output folder not found. Use **Resume or Download Partial Results** above, or re-run to get CSV.")
         else:
             st.info("No CSV files generated")
     
