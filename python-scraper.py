@@ -2063,10 +2063,16 @@ async def fetch_openrouter_models(api_key: str = "") -> list:
         return fallback
 
 
-async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
-    """Generate company summary using OpenRouter API (OpenAI-compatible)."""
+# System message for email copy so the model doesn't use summary-format or refuse B2B outreach
+EMAIL_COPY_SYSTEM = "You are a professional B2B copywriter. The user will provide company information and ask for a short personalized business email. Output only the email body (no subject line, no explanations). Write in a professional, specific tone. Do not refuse; write the requested email."
+
+
+async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None, system_message: str | None = None) -> str:
+    """Generate company summary using OpenRouter API (OpenAI-compatible). Optional system_message for email copy."""
     if not OPENAI_AVAILABLE:
         return "❌ OpenAI library not installed. Install with: pip install openai"
+    
+    system_content = system_message if system_message else "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: ===SUMMARY===, ===FACTS=== (with complete evidence quotes), and ===HYPOTHESES=== (with signals, commercial implications, and confidence levels). CRITICAL: Use EXACT section headers (===SUMMARY===, ===FACTS===, ===HYPOTHESES===). Do NOT use markdown formatting (**, __, #). Evidence quotes must be COMPLETE sentences, not truncated. Do NOT truncate words mid-word. Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format STRICTLY."
     
     client = AsyncOpenAI(
         base_url="https://openrouter.ai/api/v1",
@@ -2078,7 +2084,7 @@ async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: ===SUMMARY===, ===FACTS=== (with complete evidence quotes), and ===HYPOTHESES=== (with signals, commercial implications, and confidence levels). CRITICAL: Use EXACT section headers (===SUMMARY===, ===FACTS===, ===HYPOTHESES===). Do NOT use markdown formatting (**, __, #). Evidence quotes must be COMPLETE sentences, not truncated. Do NOT truncate words mid-word. Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format STRICTLY."},
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2,
@@ -2133,10 +2139,12 @@ async def generate_openrouter_summary(api_key: str, model: str, prompt: str, max
     return "❌ OpenRouter API failed after retries"
 
 
-async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
-    """Generate company summary using OpenAI API with automatic rate limit handling."""
+async def generate_openai_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None, system_message: str | None = None) -> str:
+    """Generate company summary using OpenAI API with automatic rate limit handling. Optional system_message for email copy."""
     if not OPENAI_AVAILABLE:
         return "❌ OpenAI library not installed. Install with: pip install openai"
+    
+    system_content = system_message if system_message else "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: ===SUMMARY===, ===FACTS=== (with complete evidence quotes), and ===HYPOTHESES=== (with signals, commercial implications, and confidence levels). CRITICAL: Use EXACT section headers (===SUMMARY===, ===FACTS===, ===HYPOTHESES===). Do NOT use markdown formatting (**, __, #). Evidence quotes must be COMPLETE sentences, not truncated. Do NOT truncate words mid-word. Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format STRICTLY."
     
     client = AsyncOpenAI(api_key=api_key, timeout=120.0)
     
@@ -2145,7 +2153,7 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are Hypothesis Bot, an advanced commercial analysis agent. Your job is to turn messy webcopy into structured intelligence: ===SUMMARY===, ===FACTS=== (with complete evidence quotes), and ===HYPOTHESES=== (with signals, commercial implications, and confidence levels). CRITICAL: Use EXACT section headers (===SUMMARY===, ===FACTS===, ===HYPOTHESES===). Do NOT use markdown formatting (**, __, #). Evidence quotes must be COMPLETE sentences, not truncated. Do NOT truncate words mid-word. Never invent facts. Only use what's explicitly in the webcopy. Be surgical and concise. Follow the output format STRICTLY."},
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2,  # Lower temperature for more consistent formatting
@@ -2208,8 +2216,8 @@ async def generate_openai_summary(api_key: str, model: str, prompt: str, max_ret
             await asyncio.sleep(1 + attempt)
 
 
-async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None) -> str:
-    """Generate company summary using Google Gemini API with automatic rate limit handling."""
+async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_retries: int = 5, status_callback=None, system_message: str | None = None) -> str:
+    """Generate company summary using Google Gemini API with automatic rate limit handling. Optional system_message for email copy."""
     if not GEMINI_AVAILABLE:
         return "❌ Gemini library not installed. Install with: pip install google-generativeai"
     
@@ -2217,6 +2225,9 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
         genai.configure(api_key=api_key)
     except Exception as e:
         return f"❌ Gemini API Configuration Error: {str(e)}"
+    
+    # When system_message is provided (e.g. email copy), prepend so model follows role
+    content_prompt = (system_message + "\n\n---\n\n" + prompt) if system_message else prompt
     
     for attempt in range(max_retries):
         try:
@@ -2236,7 +2247,7 @@ async def generate_gemini_summary(api_key: str, model: str, prompt: str, max_ret
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: gemini_model.generate_content(prompt)
+                lambda p=content_prompt: gemini_model.generate_content(p)
             )
             if hasattr(response, 'text'):
                 return response.text.strip()
@@ -2572,11 +2583,36 @@ def build_email_copy_prompt(prompt_template: str, lead_data: dict | None, scrape
     return _replace_prompt_variables(prompt_template, lead_data)
 
 
+def _is_ai_refusal(text: str) -> bool:
+    """Detect common model refusal phrases so we can retry or show a helpful error."""
+    if not text or len(text.strip()) < 10:
+        return False
+    t = text.strip().lower()
+    refusal_phrases = (
+        "i cannot assist",
+        "i can't assist",
+        "i'm sorry, but i cannot",
+        "i am sorry, but i cannot",
+        "i'm unable to assist",
+        "i am unable to assist",
+        "i can't help with that",
+        "i cannot help with that",
+        "i'm not able to",
+        "i am not able to",
+        "cannot fulfill this request",
+        "cannot complete your request",
+        "against my guidelines",
+        "against my programming",
+        "not able to provide",
+    )
+    return any(p in t for p in refusal_phrases)
+
+
 async def generate_email_copy(
     api_key: str, provider: str, model: str, prompt_template: str,
     lead_data: dict, scraped_content: str, status_callback=None
 ) -> str:
-    """Generate email copy for a lead. Works independently of company summary."""
+    """Generate email copy for a lead. Uses email-specific system message so the model doesn't refuse or output summary format."""
     if not api_key or not api_key.strip():
         return "❌ No API key provided"
     if not scraped_content or scraped_content.startswith("❌"):
@@ -2585,14 +2621,18 @@ async def generate_email_copy(
         return "❌ Insufficient content scraped. Content too short to generate email copy."
     full_prompt = build_email_copy_prompt(prompt_template, lead_data, scraped_content)
     raw_output = ""
+    # Use email-specific system message so the model writes the email instead of refusing or using summary format
     if provider.lower() == "openai":
-        raw_output = await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback)
+        raw_output = await generate_openai_summary(api_key, model, full_prompt, status_callback=status_callback, system_message=EMAIL_COPY_SYSTEM)
     elif provider.lower() == "gemini":
-        raw_output = await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback)
+        raw_output = await generate_gemini_summary(api_key, model, full_prompt, status_callback=status_callback, system_message=EMAIL_COPY_SYSTEM)
     elif provider.lower() == "openrouter":
-        raw_output = await generate_openrouter_summary(api_key, model, full_prompt, status_callback=status_callback)
+        raw_output = await generate_openrouter_summary(api_key, model, full_prompt, status_callback=status_callback, system_message=EMAIL_COPY_SYSTEM)
     else:
         return f"❌ Unknown provider: {provider}"
+    # Detect refusal: model said "I cannot assist" etc. — return helpful error so user can rephrase or try another model
+    if raw_output and _is_ai_refusal(raw_output):
+        return "❌ Email copy: The AI declined to write the email (content policy). Try rephrasing your prompt to focus on 'a short professional follow-up email based on this company's website' or use a different model (e.g. GPT-4o, Claude)."
     # Light cleanup for email copy (preserve line breaks)
     if raw_output and not raw_output.startswith("❌"):
         raw_output = raw_output.strip()
