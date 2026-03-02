@@ -69,8 +69,20 @@ def _get_concurrency_max() -> int:
 
 
 def _should_use_fast_mode(total_urls: int) -> bool:
-    """Auto-enable fast mode for large runs (500+ URLs)."""
+    """Auto-enable fast mode for large runs (500+ URLs). Disabled in cloud for reliability."""
+    if is_cloud_mode():
+        return False  # Cloud: prioritize reliability over speed
     return total_urls >= 500
+
+
+def _cloud_concurrency_max() -> int:
+    """Max parallel workers in cloud (free tier): keep low for stability."""
+    return 8
+
+
+def _cloud_concurrency_default() -> int:
+    """Default workers in cloud: conservative for 150k runs."""
+    return 4
 
 
 # -------------------------
@@ -3975,9 +3987,10 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
         traceback.print_exc()
         return  # Exit if we can't create directory
     
-    # Initialize database for large dataset support
+    # Initialize database for large dataset support (lower threshold in cloud for memory safety)
     db = None
-    if use_database and total_urls > 1000:  # Use database for large datasets
+    db_threshold = 500 if is_cloud_mode() else 1000
+    if use_database and total_urls > db_threshold:
         try:
             db = init_scrape_db()
             emit(f"🗄️ Writer: Initialized SQLite database for {total_urls:,} URLs")
@@ -4007,8 +4020,9 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     processed = 0
     files_written = []
     last_flush_ts = time.time()
-    emergency_flush_every_s = 5  # Flush every 5s to minimize data loss on crash
-    emergency_flush_min_rows = max(15, min(50, rows_per_file // 20))
+    # In cloud, flush more often to minimize data loss if session drops
+    emergency_flush_every_s = 3 if is_cloud_mode() else 5
+    emergency_flush_min_rows = max(10, min(30, rows_per_file // 25)) if is_cloud_mode() else max(15, min(50, rows_per_file // 20))
 
     while True:
         item = await result_queue.get()
@@ -4613,20 +4627,32 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         emit("❌ No URLs to process. Exiting.")
         return
 
+    # Cloud mode: prioritize reliability over speed (Streamlit Cloud free tier)
+    if is_cloud_mode():
+        low_resource = True
+        concurrency = min(concurrency, _cloud_concurrency_max())
+        emit(f"☁️ Cloud mode: using gentle settings (concurrency={concurrency}) for reliability.")
+
     # Auto-adjust concurrency for large datasets to avoid overwhelming resources
     total_urls_count = len(urls)
-    if total_urls_count > 50000:
-        # For 50k+ URLs, reduce concurrency to prevent memory exhaustion
+    if total_urls_count > 100000:
+        # 100k–150k: very low concurrency for stability (memory + rate limits)
         original_concurrency = concurrency
-        concurrency = min(concurrency, 10)  # Cap at 10 workers for very large datasets
+        concurrency = min(concurrency, 4)
         if concurrency != original_concurrency:
-            emit(f"🔧 Large dataset detected ({total_urls_count:,} URLs). Reduced concurrency from {original_concurrency} to {concurrency} for stability.")
+            emit(f"🔧 Very large dataset ({total_urls_count:,} URLs). Concurrency reduced to {concurrency} for stability.")
+    elif total_urls_count > 50000:
+        # 50k+ URLs: reduce concurrency to prevent memory exhaustion
+        original_concurrency = concurrency
+        concurrency = min(concurrency, 6 if is_cloud_mode() else 10)
+        if concurrency != original_concurrency:
+            emit(f"🔧 Large dataset ({total_urls_count:,} URLs). Reduced concurrency to {concurrency} for stability.")
     elif total_urls_count > 20000:
-        # For 20k+ URLs, moderate concurrency
+        # 20k+ URLs: moderate concurrency
         original_concurrency = concurrency
-        concurrency = min(concurrency, 15)
+        concurrency = min(concurrency, 8 if is_cloud_mode() else 15)
         if concurrency != original_concurrency:
-            emit(f"🔧 Large dataset detected ({total_urls_count:,} URLs). Reduced concurrency from {original_concurrency} to {concurrency} for stability.")
+            emit(f"🔧 Large dataset ({total_urls_count:,} URLs). Reduced concurrency to {concurrency} for stability.")
 
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_path = get_checkpoint_path(output_dir)
@@ -4673,8 +4699,11 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
         if progress_callback:
             progress_callback(completed_before + done, total_overall)
     
-    # Backpressure: smaller queue for low-resource machines
-    queue_max = min(200 if low_resource else 500, total_this_run + 10)
+    # Backpressure: smaller queue for low-resource / cloud to limit memory
+    if is_cloud_mode():
+        queue_max = min(100, total_this_run + 10)
+    else:
+        queue_max = min(200 if low_resource else 500, total_this_run + 10)
     result_queue = asyncio.Queue(maxsize=queue_max)
     url_queue = asyncio.Queue()
 
@@ -4981,6 +5010,9 @@ SESSION_DEFAULTS = {
 for key, value in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+# Cloud: start with gentle concurrency so slider shows a sensible default
+if is_cloud_mode() and st.session_state.get('concurrency', 0) > _cloud_concurrency_max():
+    st.session_state['concurrency'] = _cloud_concurrency_default()
 
 # Dark theme UI styling (design alignment)
 st.markdown("""
@@ -5896,18 +5928,22 @@ with col1:
     else:
         st.caption("💡 Leave empty to scrape homepage only")
     
-    concurrency_max = _get_concurrency_max()
-    concurrency_default = min(st.session_state.get('concurrency', min(20, concurrency_max)), concurrency_max)
+    if is_cloud_mode():
+        concurrency_max = _cloud_concurrency_max()
+        concurrency_default = min(st.session_state.get('concurrency', _cloud_concurrency_default()), concurrency_max)
+    else:
+        concurrency_max = _get_concurrency_max()
+        concurrency_default = min(st.session_state.get('concurrency', min(20, concurrency_max)), concurrency_max)
     concurrency = st.slider(
         "Parallel workers",
         1, concurrency_max, max(1, concurrency_default),
-        help=f"Sites scraped at once. Max {concurrency_max} (CPU-based). Lower = gentler on slow PCs.",
+        help="Sites scraped at once. Lower = more reliable (recommended on Streamlit Cloud)." if is_cloud_mode() else f"Sites scraped at once. Max {concurrency_max} (CPU-based). Lower = gentler on slow PCs.",
         key="concurrency"
     )
     force_max_workers = st.checkbox(
         "Force maximum workers",
         value=st.session_state.get('force_max_workers', False),
-        help=f"Override to {concurrency_max} workers for testing. Use with caution on weaker machines.",
+        help=f"Override to {concurrency_max} workers. Not recommended in cloud." if is_cloud_mode() else f"Override to {concurrency_max} workers for testing. Use with caution on weaker machines.",
         key="force_max_workers"
     )
     if force_max_workers:
@@ -5932,11 +5968,12 @@ with col1:
 with col2:
     st.markdown("#### Advanced Settings")
     
-    # Timeout - generous defaults for unreliable sites (auto-applied)
+    # Timeout - in cloud use higher default for reliability
+    timeout_default = 45 if is_cloud_mode() else 35
     timeout = st.number_input(
         "Wait time per site (seconds)",
-        5, 120, st.session_state.get('timeout', 35),
-        help="How long to wait per site. Unreachable sites fall back to archive.org / Playwright / Google cache.",
+        5, 120, st.session_state.get('timeout', timeout_default),
+        help="Higher = more reliable for slow sites (recommended in cloud). Unreachable sites fall back to archive.org / Playwright / Google cache." if is_cloud_mode() else "How long to wait per site. Unreachable sites fall back to archive.org / Playwright / Google cache.",
         key="timeout"
     )
     with st.expander("ℹ️ About Google cache & context", expanded=False):
@@ -5955,12 +5992,12 @@ with col2:
         key="max_chars"
     )
 
-    # Rows per file - auto-tuned for system
-    rows_per_file_default = 1000 if _is_low_resource_default() else st.session_state.get('rows_per_file', 2000)
+    # Rows per file - in cloud use smaller chunks for frequent saves
+    rows_per_file_default = 1000 if (is_cloud_mode() or _is_low_resource_default()) else st.session_state.get('rows_per_file', 2000)
     rows_per_file = st.number_input(
-        "Split files every X rows", 
+        "Split files every X rows",
         500, 50000, min(rows_per_file_default, 50000), step=500,
-        help="Lower = less memory per write. Use 500-1000 on slow computers.",
+        help="Lower = more frequent saves and safer resume (recommended 1000–2000 in cloud)." if is_cloud_mode() else "Lower = less memory per write. Use 500-1000 on slow computers.",
         key="rows_per_file"
     )
     
@@ -6534,9 +6571,11 @@ with st.container():
 # Main action area (CTA section) - Get variables from tabs first so button is in same container
 # Get variables from tabs - Use session_state (proper Streamlit way)
 keywords = st.session_state.get('keywords', [])
-concurrency = st.session_state.get('concurrency', 20)
+concurrency = st.session_state.get('concurrency', _cloud_concurrency_default() if is_cloud_mode() else 20)
 if st.session_state.get('force_max_workers', False):
     concurrency = _get_concurrency_max()
+if is_cloud_mode():
+    concurrency = min(concurrency, _cloud_concurrency_max())
 retries = st.session_state.get('retries', 2)
 depth = st.session_state.get('depth', 3)
 timeout = st.session_state.get('timeout', 30)
@@ -6544,8 +6583,8 @@ max_chars = st.session_state.get('max_chars', 10000)
 rows_per_file = st.session_state.get('rows_per_file', 2000)
 user_agent = st.session_state.get('user_agent', "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 run_name = st.session_state.get('run_name', "")
-# Auto-detect: no user checkboxes - app adapts to system and run size
-low_resource = _is_low_resource_default()
+# Auto-detect: cloud always uses low-resource; else use CPU-based default
+low_resource = is_cloud_mode() or _is_low_resource_default()
 # Use checkbox key as source of truth (widget state); fallback to our sync key
 ai_enabled = st.session_state.get("ai_enabled_checkbox", st.session_state.get('ai_enabled', False))
 if not ai_enabled:
@@ -6921,20 +6960,19 @@ if uploaded_file and start_clicked and can_start:
         st.error("❌ No valid URLs found in the selected column. Check your CSV and URL column.")
         st.stop()
     
-    # Phase 7: Cloud Mode - Enforce batch size limits
-    # With SQLite persistence and memory-efficient processing, we can handle much larger datasets
-    CLOUD_MODE_MAX_URLS = 100000  # Maximum URLs per run in cloud mode (150k recommended for paid tiers)
-    MAX_RECOMMENDED_URLS = 150000  # Soft limit with warning
-    
+    # Phase 7: Cloud Mode - Allow up to 150k with reliability-first settings (Streamlit Cloud free tier)
+    CLOUD_MODE_MAX_URLS = 150000  # Max URLs per run in cloud; tuned for reliability over speed
+    MAX_RECOMMENDED_URLS = 150000  # Soft limit with info message
+
     if is_cloud_mode() and total > CLOUD_MODE_MAX_URLS:
-        st.warning(f"⚠️ **Cloud Mode Limit:** Your CSV has {total:,} URLs. Maximum is {CLOUD_MODE_MAX_URLS:,} URLs per run.")
-        st.info("💡 **Tip:** For 150k+ leads, consider splitting into multiple CSV files and running them sequentially.")
+        st.warning(f"⚠️ **Cloud limit:** Your CSV has {total:,} URLs. Maximum is {CLOUD_MODE_MAX_URLS:,} per run.")
+        st.info("💡 Split into multiple CSVs and run sequentially for more than 150k.")
         urls = urls[:CLOUD_MODE_MAX_URLS]
         url_list_with_idx = url_list_with_idx[:CLOUD_MODE_MAX_URLS]
         total = len(urls)
-    elif total > MAX_RECOMMENDED_URLS:
-        st.info(f"ℹ️ Your CSV has {total:,} URLs. For best performance with {MAX_RECOMMENDED_URLS:,}+ leads, the app uses database persistence and memory-efficient streaming.")
-        st.caption("Large dataset mode: Results are saved incrementally to prevent memory issues.")
+    elif total > 100000:
+        st.info(f"ℹ️ **Large run ({total:,} URLs):** Using reliability-optimized settings. Slower but stable on Streamlit Cloud free tier.")
+        st.caption("Results are saved incrementally; you can resume if the session drops.")
     
     # Prepare lead data mapping (filtered index -> lead data dict)
     lead_data_map = {}
@@ -6956,42 +6994,22 @@ if uploaded_file and start_clicked and can_start:
     # Store lead data map in session state
     st.session_state['lead_data_map'] = lead_data_map
     
-    # Show warning and info for large files
+    # Show tips for large files (single block, no duplicate messages)
     if total > 10000:
-        st.warning(f"⚠️ **Large dataset detected:** {total:,} URLs. This may take a while and generate large files.")
-        with st.expander("💡 Tips for Large Datasets", expanded=True):
+        with st.expander("💡 Tips for Large Datasets (including 150k on Streamlit Cloud)", expanded=True):
             st.markdown(f"""
             **Your dataset:** {total:,} URLs
-            
-            **Recommendations:**
-            - ✅ **Max chars per site:** Use 20,000-50,000 to keep files manageable
-            - ✅ **Rows per file:** Use 2,000-5,000 for easier handling
-            - ✅ **Concurrency:** Start with 20-30, increase if stable
-            - ✅ **Be patient:** Large datasets can take hours
-            
-            **Estimated output size:**
-            - With 50k chars/site: ~{total * 50000 / (1024*1024):.0f} MB of text data
-            - Will be split into multiple files for better performance
-            - Excel files may be large - CSV recommended for very large datasets
 
-            **Crash recovery:** Progress is saved automatically every ~10 seconds. If the app crashes,
-            scroll to the top → "Resume or Download Partial Results" to download what you have, or
-            re-upload your CSV and click Start to resume automatically (no run name needed).
+            **Reliability-first (Streamlit Cloud free tier):**
+            - ✅ **Concurrency:** Keep at 4–6 workers for 50k+ URLs; app auto-caps in cloud.
+            - ✅ **Max chars per site:** 10,000–20,000 keeps memory and files manageable.
+            - ✅ **Rows per file:** 1,000–2,000 for frequent saves and resume.
+            - ✅ **Be patient:** 150k URLs can take many hours; progress is saved so you can resume.
+
+            **Crash recovery:** Progress is saved every few seconds. If the session drops, re-upload your CSV and click **Start** to resume from the last checkpoint. Use **Resume or Download Partial Results** to get what’s done so far.
             """)
     elif total > 5000:
-        st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
-    
-    # Show warning for large files
-    if total > 10000:
-        st.warning(f"⚠️ **Large dataset detected:** {total:,} URLs. This may take a while and generate large files. Consider:")
-        st.info("""
-        - **Reduce max_chars per site** to keep file sizes manageable
-        - **Increase rows_per_file** to reduce number of output files
-        - **Monitor progress** - the app will process in chunks
-        - **Be patient** - large datasets can take hours to complete
-        """)
-    elif total > 5000:
-        st.info(f"ℹ️ Processing {total:,} URLs. This may take some time. Files will be saved in chunks for better performance.")
+        st.info(f"ℹ️ Processing {total:,} URLs. Results are saved in chunks; you can resume if needed.")
 
     # AUTO-RESUME: Find existing run with same URLs before creating new folder
     output_dir = None
