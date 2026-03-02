@@ -48,6 +48,15 @@ Open a terminal (or File Explorer) and go into the folder that contains `python-
 
 The first run may take a minute to install dependencies. After that it starts quickly.
 
+**For better success with Cloudflare and slow sites** (optional but recommended):
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+This adds a real-browser fallback that bypasses many anti-bot protections.
+
 ---
 
 ## Step 4: Open the app in your browser

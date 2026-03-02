@@ -18,6 +18,12 @@ call venv\Scripts\activate.bat
 
 echo Installing/updating dependencies...
 pip install -q -r requirements.txt
+python -m playwright install chromium 2>nul
+if errorlevel 1 (
+    echo Note: Playwright browser not installed. Run "playwright install chromium" for better Cloudflare/timeout handling.
+) else (
+    echo Playwright Chromium ready for Cloudflare bypass.
+)
 
 echo.
 echo Starting Web Scraper...

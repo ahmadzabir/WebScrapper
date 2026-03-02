@@ -17,6 +17,7 @@ source venv/bin/activate
 
 echo "Installing/updating dependencies..."
 pip install -q -r requirements.txt
+python -m playwright install chromium 2>/dev/null || echo "Note: Run 'playwright install chromium' for better Cloudflare/timeout handling."
 
 echo ""
 echo "Starting Web Scraper..."

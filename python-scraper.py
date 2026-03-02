@@ -3,6 +3,7 @@ import aiohttp
 import pandas as pd
 import re
 import os
+import sys
 import time
 import csv
 import zipfile
@@ -19,6 +20,16 @@ from typing import Optional, Dict, List
 import hashlib
 import sqlite3
 import tempfile
+
+# Windows: stdout/stderr UTF-8 so print() never raises 'charmap' codec errors
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # Phase 3: Extraction pipeline imports
 try:
@@ -73,13 +84,16 @@ def get_system_tier() -> str:
         ram_gb = 0.0
         cpus = os.cpu_count() or 2
     if ram_gb > 0:
+        # 32GB+ or 8+ logical CPUs (e.g. 10th gen 6-core) = high
         if ram_gb >= 20 or cpus >= 8:
             return "high"
+        if ram_gb >= 16 or cpus >= 6:
+            return "high"  # 16GB+ or 6+ cores: treat as high for better speed
         if ram_gb >= 10 or cpus >= 5:
             return "medium"
         return "low"  # <10GB RAM or ≤4 CPUs
     # No RAM info: use CPU only
-    if cpus >= 8:
+    if cpus >= 6:
         return "high"
     if cpus >= 5:
         return "medium"
@@ -141,25 +155,27 @@ def get_auto_run_settings(total_urls: int) -> dict:
         if total_urls >= 200000:
             rows_per_file = 1000  # smaller chunks for 200k+ to reduce memory
     else:
-        # Local: tier-based so fast machines run full force, low-RAM stays stable and <6h for 300k
+        # Local: tier-based so fast machines run full force (32GB + 10th gen = high)
         max_workers = _get_concurrency_max()
         if total_urls < 5000:
-            concurrency = min(80, max_workers)
+            # Small runs: use hardware fully (96–120 workers on 8+ cores)
+            concurrency = min(120, max_workers) if tier == "high" else min(80, max_workers)
         elif total_urls < 20000:
-            concurrency = min(64, max_workers)
+            concurrency = min(96, max_workers) if tier == "high" else min(64, max_workers)
         elif total_urls < 100000:
-            concurrency = min(48, max_workers)
+            concurrency = min(64, max_workers) if tier == "high" else min(48, max_workers)
         elif total_urls < 200000:
-            concurrency = min(16, max_workers)  # 100k–200k: moderate
+            concurrency = min(24, max_workers) if tier == "high" else min(16, max_workers)
         else:
-            # 200k–300k: high tier = full force (10–12), medium = 8, low = 6 (target <6h on 8GB)
+            # 200k–300k: high = 12, medium = 8, low = 6 (target <6h on 8GB)
             if tier == "high":
                 concurrency = min(12, max_workers)
             elif tier == "medium":
                 concurrency = min(8, max_workers)
             else:
-                concurrency = min(6, max_workers)  # low RAM/CPU: stable, still ~14 URLs/s → 300k in <6h
-        timeout = 30
+                concurrency = min(6, max_workers)
+        # High-tier: longer timeout so slow sites don't time out (60s for 32GB/10th gen)
+        timeout = 60 if tier == "high" else (45 if tier == "medium" else 30)
         rows_per_file = 2000
         if total_urls >= 200000:
             rows_per_file = 1000  # smaller chunks for 200k+ to reduce memory and flush often
@@ -2929,12 +2945,13 @@ def get_realistic_headers(user_agent=None, target_url=None):
 _domain_request_times = {}  # Track last request time per domain
 _domain_lock = asyncio.Lock()  # Lock for thread-safe access to domain timing
 
-# Limit concurrent Playwright instances - prevents OOM when 100+ URLs timeout and all try browser
+# Limit concurrent Playwright instances. Local: 4 for better throughput; cloud: 2 for stability
 _playwright_semaphore = None
 def _get_playwright_semaphore():
     global _playwright_semaphore
     if _playwright_semaphore is None:
-        _playwright_semaphore = asyncio.Semaphore(2)
+        n = 4 if not is_cloud_mode() else 2
+        _playwright_semaphore = asyncio.Semaphore(n)
     return _playwright_semaphore
 
 
@@ -3098,11 +3115,13 @@ async def _fetch_from_cache_fallbacks(
     session: aiohttp.ClientSession, url: str, timeout: int,
     use_playwright_fallback: bool = False, use_common_crawl_fallback: bool = False,
     skip_google_cache: bool = False, quick_mode: bool = False,
+    try_playwright_first: bool = False,
+    playwright_full_time: bool = False,
 ) -> tuple | str:
     """
-    When direct fetch fails: try archive.org first, then Playwright, then Google cache (unless skipped),
-    then Common Crawl. skip_google_cache=True when we already have a Google error page (avoid retrying it).
-    quick_mode=True uses shorter timeouts (for post-timeout recovery when we have a 60s cap).
+    When direct fetch fails: try archive.org, Playwright, Google cache, Common Crawl.
+    try_playwright_first=True: try Playwright before archive (for Cloudflare/challenge pages).
+    quick_mode=True uses shorter timeouts. For timeout recovery, Playwright uses full time (not quick).
     Returns (page_url, html) on success, or error string on failure.
     """
     from urllib.parse import quote
@@ -3110,6 +3129,14 @@ async def _fetch_from_cache_fallbacks(
     cache_timeout = aiohttp.ClientTimeout(total=cache_total, connect=8 if quick_mode else 10, sock_read=10 if quick_mode else 15)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     max_chars = 50000  # for validation only
+
+    # Try Playwright first when we know it's Cloudflare/challenge (real browser bypasses it)
+    if try_playwright_first and use_playwright_fallback:
+        result = await _fetch_via_playwright(url, timeout, quick_mode=False)
+        if isinstance(result, tuple):
+            page_url, html = result
+            if _cache_result_acceptable(page_url, html, max_chars):
+                return result
 
     # 1. Try archive.org — most reliable when site is down or blocked
     # quick_mode: 2 snapshots only; normal: 4 snapshots
@@ -3134,9 +3161,9 @@ async def _fetch_from_cache_fallbacks(
         except Exception:
             pass
 
-    # 2. Try Playwright — gets real page for Cloudflare/bot-blocked sites
+    # 2. Try Playwright — gets real page for Cloudflare/bot-blocked sites (playwright_full_time=use full 45s for timeout recovery)
     if use_playwright_fallback:
-        result = await _fetch_via_playwright(url, timeout, quick_mode=quick_mode)
+        result = await _fetch_via_playwright(url, timeout, quick_mode=quick_mode and not playwright_full_time)
         if isinstance(result, tuple):
             page_url, html = result
             if _cache_result_acceptable(page_url, html, max_chars):
@@ -3167,8 +3194,8 @@ async def _fetch_from_cache_fallbacks(
 
 async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False) -> tuple | str:
     """
-    Headless browser fallback — only when needed. Uses Playwright/Chromium for JS-heavy or blocked sites.
-    Semaphore limits concurrent browsers to 2 to prevent OOM when many URLs timeout at once.
+    Headless browser fallback — bypasses Cloudflare and bot protection. Uses Playwright/Chromium.
+    Cloudflare needs 5–10s to pass; we use 45s goto + 6s wait for reliable success.
     Returns (url, html) or "".
     """
     try:
@@ -3176,8 +3203,9 @@ async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False
     except ImportError:
         return ""
     sem = _get_playwright_semaphore()
-    goto_timeout = 15000 if quick_mode else 25000
-    sleep_after = 2 if quick_mode else 4
+    # Cloudflare needs time: 45s load + 6s wait for challenge to pass (was 25s+4s)
+    goto_timeout = 30000 if quick_mode else 45000
+    sleep_after = 4 if quick_mode else 6
     urls_to_try = [url]
     if url.startswith("https://"):
         urls_to_try.append(url.replace("https://", "http://", 1))
@@ -3194,7 +3222,7 @@ async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False
                         await asyncio.sleep(sleep_after)
                         html = await page.content()
                         if html and _is_challenge_or_verification_page(html):
-                            await asyncio.sleep(2 if quick_mode else 3)
+                            await asyncio.sleep(5 if quick_mode else 8)  # Cloudflare often needs 5–8s
                             html = await page.content()
                         if html and len(html.strip()) > 200 and not _is_challenge_or_verification_page(html):
                             return (try_url, html)
@@ -3435,7 +3463,10 @@ async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries:
                         return (final_url, html)
                         
                 except asyncio.TimeoutError:
-                    last_error = f"Timeout fetching {url_to_try} (exceeded {retry_timeout}s)"
+                    last_error = (
+                        f"Timeout: request to {url_to_try[:80]}{'…' if len(url_to_try) > 80 else ''} exceeded {retry_timeout}s "
+                        f"(connection + response). Tip: increase Timeout in Step 2 Settings for slow sites, or site may be blocking."
+                    )
                     if attempt < retries:
                         await asyncio.sleep(0.5 + attempt * 0.3 if fast_mode else 2 + attempt * 1)
                     continue
@@ -3492,16 +3523,19 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         else:
             homepage = await fetch(session, normalized_url, timeout, fetch_retries, fast_mode)
     except asyncio.TimeoutError:
-        homepage = f"Timeout: Direct fetch exceeded {fetch_budget}s"
+        homepage = (
+            f"Timeout: initial connection/response exceeded {fetch_budget}s. "
+            f"Tip: increase Timeout in Step 2 Settings, or site may be blocking."
+        )
     if isinstance(homepage, str):
-        # Direct fetch failed: try cache fallbacks (archive.org, Playwright, Google cache, Common Crawl)
-        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        # Direct fetch failed: try Playwright first when error suggests Cloudflare/blocking
+        try_pw_first = "challenge" in homepage.lower() or "cloudflare" in homepage.lower() or "timeout" in homepage.lower()
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=try_pw_first)
         if isinstance(cache_result, tuple):
             homepage = cache_result
         else:
-            # Retry fallback chain once (helps with transient failures for 95%+ success)
             await asyncio.sleep(1)
-            cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+            cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=try_pw_first)
             if isinstance(cache_result, tuple):
                 homepage = cache_result
             else:
@@ -3532,14 +3566,14 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
                 return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
     # Reject Cloudflare/challenge pages so we try archive and other fallbacks instead
     if _is_challenge_or_verification_page(html):
-        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=True)
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
                 return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
         else:
             await asyncio.sleep(1)
-            cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+            cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=True)
             if isinstance(cache_result, tuple):
                 page_url, html = cache_result
                 if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
@@ -3624,7 +3658,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     cleaned = cleanup_html(html)
     # Catch challenge/verification text that only appears after cleanup (e.g. split across tags)
     if cleaned and _cleaned_text_is_challenge(cleaned):
-        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=True)
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
@@ -3893,9 +3927,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 email_copy = ""
                 _scrape_status("error", scraped_text)
             else:
-                # Global timeout per URL - shorter in fast mode, generous for slow sites
-                # For large runs (500+), use 180s so cache fallback has time (fetch 45s + cache 135s)
-                fast_cap = 180 if (total_urls or 0) >= 500 else 90
+                # Global timeout per URL - high tier gets more time so slow sites + cache fallback succeed
+                fast_cap = 240 if (total_urls or 0) >= 500 else 120  # was 180/90; 240s gives cache fallback more room
                 max_total_time = min((timeout * (retries + 1) * (depth + 1) * 2) + (30 if fast_mode else 60), fast_cap if fast_mode else 300)
                 
                 try:
@@ -3906,12 +3939,17 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         timeout=max_total_time
                     )
                 except asyncio.TimeoutError:
-                    err_msg = f"❌ Timeout: Scraping {normalized_url} exceeded maximum time limit ({max_total_time}s)"
+                    url_short = normalized_url[:70] + ("…" if len(normalized_url) > 70 else "")
+                    err_msg = (
+                        f"❌ Timeout: full scrape for {url_short} exceeded {max_total_time}s. "
+                        f"Site works in browser but not scraper — often blocked by anti-bot. "
+                        f"Tip: 1) Increase Timeout in Step 2 Settings, 2) Install Playwright (pip install playwright && playwright install chromium) for browser fallback."
+                    )
                     _scrape_status("error", err_msg)
                     try:
                         cache_result = await asyncio.wait_for(
-                            _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True),
-                            timeout=60
+                            _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True, playwright_full_time=True),
+                            timeout=90
                         )
                     except asyncio.TimeoutError:
                         cache_result = ""
@@ -3939,7 +3977,11 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                     timeout=max_total_time
                                 )
                             except asyncio.TimeoutError:
-                                scraped_text = f"❌ Timeout: Scraping {fallback_url} exceeded maximum time limit ({max_total_time}s)"
+                                url_short = fallback_url[:70] + ("…" if len(fallback_url) > 70 else "")
+                                scraped_text = (
+                                    f"❌ Timeout: scrape for {url_short} exceeded {max_total_time}s. "
+                                    f"Tip: increase Timeout in Step 2 Settings."
+                                )
                         else:
                             scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
                     except Exception as e2:
@@ -3948,8 +3990,8 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         _scrape_status("error", scraped_text)
                         try:
                             cache_result = await asyncio.wait_for(
-                                _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True),
-                                timeout=60
+                                _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True, playwright_full_time=True),
+                                timeout=90
                             )
                         except asyncio.TimeoutError:
                             cache_result = ""
@@ -4193,7 +4235,10 @@ async def writer_coroutine(result_queue: asyncio.Queue, rows_per_file: int, outp
     which handles results in memory-efficient chunks.
     """
     def emit(msg: str):
-        print(msg)
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
         if log_callback:
             try:
                 log_callback(msg)
@@ -4802,7 +4847,10 @@ async def run_test_preview(urls: list, n: int, retries, timeout, depth, keywords
                            lead_data_map: dict, log_callback=None) -> list:
     """Run scraping + AI on first n URLs, return results for in-browser preview. No file output."""
     def emit(msg: str):
-        print(msg)
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
         if log_callback:
             try:
                 log_callback(msg)
@@ -4878,7 +4926,10 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     If original_df is provided, merges scraped results with original CSV data.
     """
     def emit(msg: str):
-        print(msg)
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
         if log_callback:
             try:
                 log_callback(msg)
@@ -5039,7 +5090,8 @@ async def run_scraper(urls, concurrency, retries, timeout, depth, keywords, max_
     # Timeout: cap at 3 hours, plus 10 min headroom for pause/recovery phases
     base_time = (timeout * (retries + 1) * (depth + 1) * 2 * total_this_run) + (30 * total_this_run)
     max_queue_time = min(base_time + 600, 3 * 3600 + 600)  # +10 min for pause-and-wait recovery
-    emit(f"⚙️ Run config: total={total_overall}, remaining={total_this_run}, queue_max={queue_max}, max_queue_time={int(max_queue_time)}s, fast_mode={fast_mode}, low_resource={low_resource}")
+    tier = get_system_tier() if not is_cloud_mode() else "cloud"
+    emit(f"⚙️ Run config: tier={tier}, workers={concurrency}, timeout={timeout}s, total={total_overall}, remaining={total_this_run}, queue_max={queue_max}, max_queue_time={int(max_queue_time)}s, fast_mode={fast_mode}, low_resource={low_resource}")
     
     recovery_wait_s = 300  # 5 minutes: wait for slow network/system before giving up
     recovery_chunk_s = 30  # Check progress every 30s during recovery
@@ -7526,7 +7578,8 @@ if uploaded_file and start_clicked and can_start:
         )
         
         if scrape_error[0]:
-            st.error(f"❌ Scraper error: {scrape_error[0]}")
+            err_msg = str(scrape_error[0]).encode("ascii", errors="replace").decode("ascii")
+            st.error(f"❌ Scraper error: {err_msg}")
             st.warning("⚠️ **Partial results may have been saved.** Scroll up to **'Resume or Download Partial Results'** at the top to download what you have or re-upload your CSV and click Start to resume automatically.")
             st.info("📋 **Found a bug?** Click **Download run logs** above and send the file when reporting the issue.")
 
