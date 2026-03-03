@@ -57,6 +57,19 @@ playwright install chromium
 
 This adds a real-browser fallback that bypasses many anti-bot protections.
 
+**When a site can’t be scraped at all**, the app still fills in **accurate** info using **free fallbacks** (no API keys): **domain** from the URL; **WHOIS** (registrant, country); **SSL certificate** (organization/CN from the site’s HTTPS cert); **lightweight fetch** (page &lt;title&gt; and meta description from the first 32KB—often works when full scrape is blocked); and **Archive.org** (title from a snapshot if the live page failed). So you rarely get an empty row—you get at least domain and often company name, title, or description.
+
+**For near-100% success on stubborn sites** (optional):
+
+Set `SCRAPER_API_KEY` in your environment (or in Streamlit Cloud secrets). The app will use [ScraperAPI](https://www.scraperapi.com/) as a last resort when direct fetch, Playwright, and caches fail. Free tier has a monthly quota.
+
+```bash
+# Windows PowerShell
+$env:SCRAPER_API_KEY = "your_api_key"
+
+# Or add to Streamlit Cloud: Settings → Secrets → SCRAPER_API_KEY = your_api_key
+```
+
 ---
 
 ## Step 4: Open the app in your browser

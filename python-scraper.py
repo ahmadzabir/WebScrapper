@@ -1831,56 +1831,39 @@ def build_company_summary_prompt(base_prompt: str, lead_data: dict | None, scrap
     Returns:
         Complete prompt string ready for AI
     """
-    # Default prompt structure - Commercial analysis focused
+    # Default prompt structure - Commercial analysis focused. Uses ALL lead columns and works when website was not scraped.
     default_base = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
 INPUT
-You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
+You receive: (1) LEAD INFORMATION — all available columns from the lead's row (URL, company name, industry, etc.); (2) WEBSITE CONTENT — scraped copy when available. When the site could not be scraped, WEBSITE CONTENT may be minimal verified data only (e.g. "Site unreachable. Verified: Domain X. Registrant: Y. Country: Z."). Use both to build intelligence.
+
+When WEBSITE CONTENT is missing or is only verified/fallback data (e.g. domain, registrant, SSL, country), base your SUMMARY and FACTS on LEAD INFORMATION and that verified data only. Do not invent facts. Output a short SUMMARY and a reduced FACTS/HYPOTHESES set using the lead's row data and verified info. When full webcopy is present, use it as the primary source.
 
 CORE JOB
-Turn messy webcopy into:
+Turn lead data and (when available) messy webcopy into:
 1) a sharp company intelligence SUMMARY
-2) a clean set of FACTS grounded in the text
+2) a clean set of FACTS grounded in the text or lead data
 3) commercially relevant HYPOTHESES inferred from signals, gaps, tone, and structure
 
 You are not writing outreach. You are building the intelligence layer that enables personalization later.
 
 NON NEGOTIABLE RULES
-1) Do not invent facts. If it is not explicitly supported by the webcopy, it is not a fact.
-2) Facts must be short and must include Evidence Quote… an exact snippet from the webcopy.
-3) Hypotheses must be explicitly labeled as hypotheses and must include:
-   • Signal… the specific wording or structural clue that triggered the inference
-   • Commercial implication… why it matters in a sales or growth context
-   • Confidence: High, Medium, or Low
-4) Never mention any external tools or data sources (Apollo, LinkedIn, Crunchbase, funding, headcount, etc.). You only have webcopy.
-5) If the company name is unclear, write "Company: Not explicitly stated" and proceed.
-6) Avoid cringe adjectives like great, amazing, innovative. Be surgical.
-7) Avoid criticism. Frame gaps neutrally as "signals" or "absence suggests".
-8) Keep it concise. No fluff. No extra sections.
+1) Do not invent facts. Facts must be supported by webcopy or by LEAD INFORMATION / verified data.
+2) Facts must be short and must include Evidence Quote (exact snippet from webcopy, or "From lead data" / "From verified WHOIS/SSL" when no webcopy).
+3) Hypotheses must be explicitly labeled and include Signal, Commercial implication, Confidence (High/Medium/Low).
+4) Never mention external tools (Apollo, LinkedIn, etc.). Use only the provided inputs.
+5) If company name is unclear, use LEAD INFORMATION or write "Company: Not explicitly stated."
+6) Avoid cringe adjectives. Be surgical. No fluff.
 
 ANALYSIS GUIDELINES
-When extracting facts, prioritize:
-• What they do (offer categories, deliverables)
-• Who they serve (industries, segments, buyer language)
-• How they sell (engagement models, pricing mentions, process)
-• Proof (case studies, client names, testimonials, quantified claims)
-• Differentiators (positioning phrases, guarantees, compliance, security)
-• Operational signals (hiring, support hours, global language, locations)
-• Technology signals (stacks, platforms, integrations) only if stated
-
-When generating hypotheses, prioritize:
-• Likely buying triggers (growth, hiring, new initiatives, modernization)
-• Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
-• Likely maturity level (specialist vs generalist, product vs services)
-• Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
-• Contradictions or gaps between claims and proof
-Each hypothesis must connect to a commercial implication.
+When full webcopy is present: prioritize what they do, who they serve, how they sell, proof, differentiators, operational/technology signals.
+When only lead data and verified info: summarize from domain, registrant, country, and any LEAD INFORMATION columns (industry, employees, etc.); keep FACTS and HYPOTHESES minimal and grounded.
 
 LEAD INFORMATION:
-- Website URL: {url}
+- Url: {url}
 - Company Name: {company_name}
 
-WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
+WEBSITE CONTENT (scraped when available; when site unreachable may be only verified domain/registrant/country):
 {scraped_content}
 
 OUTPUT FORMAT (STRICT - NO MARKDOWN, NO TRUNCATION)
@@ -1919,7 +1902,7 @@ CRITICAL:
 - Keep facts grounded (from webcopy), hypotheses inferred (from signals)"""
     
     # Use user prompt if provided, otherwise use default
-    prompt_template = base_prompt if base_prompt.strip() else default_base
+    prompt_template = base_prompt if (base_prompt and base_prompt.strip()) else default_base
     
     lead_data = dict(lead_data or {})
     # Ensure company_name (default from URL if missing)
@@ -1934,10 +1917,13 @@ CRITICAL:
     def _humanize_key(k):
         return k.replace('_', ' ').title()
 
-    # LEAD INFORMATION block: only URL and company name by default (no auto-dump of all CSV columns).
-    # Other variables (employees, city, etc.) only appear if the user puts {employees}, {city}, etc. in their prompt.
+    # LEAD INFORMATION: include ALL variables from the user's CSV (url, company_name, and every other column) so the AI can use them, especially when website was not scraped.
     lead_info_parts = []
-    for k in ("url", "company_name"):
+    preferred_order = ("url", "company_name")
+    rest_keys = [k for k in sorted(lead_data.keys()) if k not in preferred_order and k != "scraped_content"]
+    for k in preferred_order + tuple(rest_keys):
+        if k == "scraped_content":
+            continue
         v = _format_var_value(lead_data.get(k))
         if v:
             lead_info_parts.append(f"- {_humanize_key(k)}: {v}")
@@ -2554,11 +2540,12 @@ async def generate_ai_summary(
     if not api_key or not api_key.strip():
         return "❌ No API key provided"
     
-    if not scraped_content or scraped_content.startswith("❌"):
+    if not scraped_content:
         return "❌ No valid scraped content available"
-    
-    # Validate scraped content has meaningful content before sending to AI
-    if len(scraped_content.strip()) < 50:
+    # When content is verified fallback (e.g. "Site unreachable. Verified: Domain X...") or full scrape, allow it
+    if scraped_content.startswith("❌"):
+        return "❌ No valid scraped content available"
+    if len(scraped_content.strip()) < 20 and not scraped_content.strip().startswith("Site unreachable"):
         return "❌ Insufficient content scraped. Content too short to generate meaningful summary."
     
     # Build complete prompt with STRICT formatting requirements
@@ -3130,13 +3117,14 @@ async def _fetch_from_cache_fallbacks(
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     max_chars = 50000  # for validation only
 
-    # Try Playwright first when we know it's Cloudflare/challenge (real browser bypasses it)
+    # Try Playwright first when we know it's Cloudflare/challenge (desktop then mobile)
     if try_playwright_first and use_playwright_fallback:
-        result = await _fetch_via_playwright(url, timeout, quick_mode=False)
-        if isinstance(result, tuple):
-            page_url, html = result
-            if _cache_result_acceptable(page_url, html, max_chars):
-                return result
+        for mobile in (False, True):
+            result = await _fetch_via_playwright(url, timeout, quick_mode=False, use_mobile=mobile)
+            if isinstance(result, tuple):
+                page_url, html = result
+                if _cache_result_acceptable(page_url, html, max_chars):
+                    return result
 
     # 1. Try archive.org — most reliable when site is down or blocked
     # quick_mode: 2 snapshots only; normal: 4 snapshots
@@ -3161,9 +3149,30 @@ async def _fetch_from_cache_fallbacks(
         except Exception:
             pass
 
-    # 2. Try Playwright — gets real page for Cloudflare/bot-blocked sites (playwright_full_time=use full 45s for timeout recovery)
+    # 1b. Archive.ph / archive.today — different snapshots than Wayback, often has blocked sites
+    try:
+        for base in ("https://archive.ph/", "https://archive.today/"):
+            try:
+                arch_url = base + quote(url, safe="")
+                async with session.get(arch_url, timeout=cache_timeout, headers=headers, allow_redirects=True) as resp:
+                    if resp.status < 400:
+                        html = await resp.text(errors="replace")
+                        if html and len(html.strip()) > 500 and ("<html" in html.lower() or "<!doctype" in html.lower()):
+                            if _cache_result_acceptable(url, html, max_chars):
+                                return (url, html)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2. Try Playwright (desktop, then mobile) — bypasses Cloudflare; mobile often allowed when desktop is blocked
     if use_playwright_fallback:
-        result = await _fetch_via_playwright(url, timeout, quick_mode=quick_mode and not playwright_full_time)
+        result = await _fetch_via_playwright(url, timeout, quick_mode=quick_mode and not playwright_full_time, use_mobile=False)
+        if isinstance(result, tuple):
+            page_url, html = result
+            if _cache_result_acceptable(page_url, html, max_chars):
+                return result
+        result = await _fetch_via_playwright(url, timeout, quick_mode=quick_mode and not playwright_full_time, use_mobile=True)
         if isinstance(result, tuple):
             page_url, html = result
             if _cache_result_acceptable(page_url, html, max_chars):
@@ -3189,13 +3198,40 @@ async def _fetch_from_cache_fallbacks(
             page_url, html = result
             if _cache_result_acceptable(page_url, html, max_chars):
                 return result
+
+    # 5. Optional ScraperAPI — last resort; set SCRAPER_API_KEY in env or Streamlit secrets for near-100% success
+    try:
+        api_key = os.environ.get("SCRAPER_API_KEY") or (getattr(st, "secrets", {}).get("SCRAPER_API_KEY") or getattr(st, "secrets", {}).get("scraper_api_key"))
+        if api_key and api_key.strip():
+            api_url = f"http://api.scraperapi.com?api_key={api_key.strip()}&url={quote(url, safe='')}"
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status < 400:
+                    html = await resp.text(errors="replace")
+                    if html and len(html.strip()) > 200 and _cache_result_acceptable(url, html, max_chars):
+                        return (url, html)
+    except Exception:
+        pass
     return ""
 
 
-async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False) -> tuple | str:
+def _playwright_launch_args() -> list:
+    """Args to reduce headless/automation detection (Cloudflare, etc.)."""
+    return [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-infobars",
+        "--window-size=1920,1080",
+        "--disable-web-security",
+        "--disable-features=IsolateOrigins,site-per-process",
+    ]
+
+
+async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False, use_mobile: bool = False) -> tuple | str:
     """
     Headless browser fallback — bypasses Cloudflare and bot protection. Uses Playwright/Chromium.
-    Cloudflare needs 5–10s to pass; we use 45s goto + 6s wait for reliable success.
+    use_mobile=True: mobile viewport + UA (many sites allow mobile when desktop is blocked).
     Returns (url, html) or "".
     """
     try:
@@ -3203,7 +3239,6 @@ async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False
     except ImportError:
         return ""
     sem = _get_playwright_semaphore()
-    # Cloudflare needs time: 45s load + 6s wait for challenge to pass (was 25s+4s)
     goto_timeout = 30000 if quick_mode else 45000
     sleep_after = 4 if quick_mode else 6
     urls_to_try = [url]
@@ -3215,15 +3250,27 @@ async def _fetch_via_playwright(url: str, timeout: int, quick_mode: bool = False
         try:
             async with sem:
                 async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True)
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=_playwright_launch_args(),
+                    )
                     try:
                         page = await browser.new_page()
-                        await page.goto(try_url, wait_until="domcontentloaded", timeout=goto_timeout)
+                        if use_mobile:
+                            await page.set_viewport_size({"width": 390, "height": 844})
+                            await page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"})
+                        else:
+                            await page.set_viewport_size({"width": 1920, "height": 1080})
+                            await page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+                        await page.goto(try_url, wait_until="load", timeout=goto_timeout)
                         await asyncio.sleep(sleep_after)
                         html = await page.content()
                         if html and _is_challenge_or_verification_page(html):
-                            await asyncio.sleep(5 if quick_mode else 8)  # Cloudflare often needs 5–8s
+                            await asyncio.sleep(8 if quick_mode else 12)
                             html = await page.content()
+                            if html and _is_challenge_or_verification_page(html):
+                                await asyncio.sleep(10)
+                                html = await page.content()
                         if html and len(html.strip()) > 200 and not _is_challenge_or_verification_page(html):
                             return (try_url, html)
                     finally:
@@ -3287,6 +3334,230 @@ def _process_cached_html_to_text(url: str, html: str, max_chars: int = 50000) ->
     page_header = f"\n--- PAGE: {url} ---\n\n"
     content = page_header + cleaned[:max_chars]
     return content
+
+
+def _extract_domain_for_fallback(url: str) -> str:
+    """Extract hostname (domain) from URL for verified fallback. Always 100% accurate from the URL we have."""
+    if not url or not isinstance(url, str):
+        return ""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url.strip())
+        netloc = (parsed.netloc or "").strip()
+        if not netloc and parsed.path:
+            netloc = parsed.path.split("/")[0].split(":")[0]
+        if netloc:
+            return netloc.replace("www.", "").lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _get_whois_fallback_sync(domain: str) -> Optional[Dict]:
+    """Run WHOIS lookup on domain; return dict with registrant_org, registrant_country, creation_date or None. 100% accurate (public registry)."""
+    if not domain or len(domain) < 3:
+        return None
+    try:
+        import whois  # optional: python-whois; domain-only fallback if not installed
+    except ImportError:
+        return None
+    try:
+        w = whois.whois(domain)
+        if not w:
+            return None
+        org = None
+        country = None
+        creation = None
+        if getattr(w, "org", None):
+            org = w.org if isinstance(w.org, str) else (w.org[0] if isinstance(w.org, (list, tuple)) and w.org else None)
+        if getattr(w, "country", None):
+            country = w.country if isinstance(w.country, str) else (w.country[0] if isinstance(w.country, (list, tuple)) and w.country else None)
+        if getattr(w, "creation_date", None):
+            d = w.creation_date
+            creation = d[0] if isinstance(d, (list, tuple)) and d else d
+        if org is None and country is None and creation is None:
+            return None
+        return {"registrant_org": org or "", "registrant_country": country or "", "creation_date": creation}
+    except Exception:
+        return None
+
+
+def _get_ssl_cert_fallback_sync(domain: str) -> Optional[Dict]:
+    """Get organization (O=) and common name (CN=) from SSL certificate. Free, no API key. 100% from site's own cert."""
+    if not domain or len(domain) < 3:
+        return None
+    import ssl
+    import socket
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with ctx.wrap_socket(socket.socket(), server_hostname=domain) as sock:
+            sock.settimeout(3)
+            sock.connect((domain, 443))
+            cert = sock.getpeercert()
+        if not cert or not isinstance(cert, dict):
+            return None
+        # subject is sequence of ((attr, value),) e.g. ((('organizationName', 'Acme Inc'),),)
+        subject = cert.get("subject") or ()
+        o = None
+        cn = None
+        for elem in subject:
+            if isinstance(elem, (list, tuple)) and len(elem) >= 1:
+                pair = elem[0] if isinstance(elem[0], (list, tuple)) and len(elem[0]) >= 2 else elem
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    k, v = pair[0], pair[1]
+                    if k in ("organizationName", "O"):
+                        o = v
+                    if k in ("commonName", "CN"):
+                        cn = v
+        return {"org": (o or "").strip(), "cn": (cn or "").strip()}
+    except Exception:
+        return None
+
+
+async def _get_lightweight_title_meta(session: aiohttp.ClientSession, url: str) -> Optional[Dict]:
+    """Quick GET, first 32KB only; extract <title> and meta description. Often works when full scrape is blocked. Free."""
+    if not session or not url:
+        return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=5, connect=3, sock_read=4)
+        async with session.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (compatible; fallback/1.0)"}) as resp:
+            if resp.status >= 400:
+                return None
+            body = await resp.content.read(32768)
+    except Exception:
+        return None
+    if not body:
+        return None
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    title = None
+    desc = None
+    # <title>...</title>
+    m = re.search(r"<title[^>]*>\s*([^<]+?)\s*</title>", text, re.I | re.DOTALL)
+    if m:
+        title = m.group(1).strip()
+    # <meta name="description" content="...">
+    m = re.search(r'<meta\s+name=["\']description["\']\s+content=["\']([^"\']*?)["\']', text, re.I)
+    if not m:
+        m = re.search(r'<meta\s+content=["\']([^"\']*?)["\']\s+name=["\']description["\']', text, re.I)
+    if m:
+        desc = m.group(1).strip()
+    if title is None and desc is None:
+        return None
+    return {"title": title or "", "description": desc or ""}
+
+
+async def _get_archive_org_title(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    """Fetch one Wayback snapshot of URL, extract <title> from first 32KB. Free."""
+    if not session or not url:
+        return None
+    from urllib.parse import quote
+    wayback_urls = [
+        f"https://web.archive.org/web/20240101000000/{url}",
+        f"https://web.archive.org/web/20230601000000/{url}",
+        f"https://web.archive.org/web/20220101000000/{url}",
+    ]
+    for wayback_url in wayback_urls:
+        try:
+            timeout = aiohttp.ClientTimeout(total=5, connect=2, sock_read=3)
+            async with session.get(wayback_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (compatible; fallback/1.0)"}) as resp:
+                if resp.status >= 400:
+                    continue
+                body = await resp.content.read(32768)
+        except Exception:
+            continue
+        if not body:
+            continue
+        try:
+            text = body.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        m = re.search(r"<title[^>]*>\s*([^<]+?)\s*</title>", text, re.I | re.DOTALL)
+        if m:
+            t = re.sub(r"[\r\n\t]+", " ", m.group(1).strip())
+            if t and len(t) > 1 and "wayback" not in t.lower()[:30]:
+                return t[:500]
+    return None
+
+
+async def _get_verified_fallback_summary(original_url: str, session: Optional[aiohttp.ClientSession] = None) -> str:
+    """When scraping failed: return summary with 100% accurate info from free fallbacks (domain, WHOIS, SSL cert, page title/meta, archive)."""
+    domain = _extract_domain_for_fallback(original_url)
+    if not domain:
+        return "Site unreachable. No domain could be verified from the URL."
+    parts = [f"Site unreachable. Verified: Domain {domain}."]
+    loop = asyncio.get_event_loop()
+
+    # WHOIS (registrant, country)
+    try:
+        whois_data = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _get_whois_fallback_sync(domain)),
+            timeout=5.0
+        )
+        if whois_data:
+            org = (whois_data.get("registrant_org") or "").strip()
+            country = (whois_data.get("registrant_country") or "").strip()
+            if org and org.lower() not in ("privacy", "whoisguard", "redacted", "domain privacy"):
+                parts.append(f" Registrant: {org}.")
+                if country:
+                    parts.append(f" Country: {country}.")
+            elif country:
+                parts.append(f" Country: {country}.")
+    except (asyncio.TimeoutError, Exception):
+        pass
+
+    # SSL certificate (organization / common name from site's cert)
+    try:
+        ssl_data = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _get_ssl_cert_fallback_sync(domain)),
+            timeout=4.0
+        )
+        if ssl_data:
+            o = (ssl_data.get("org") or "").strip()
+            cn = (ssl_data.get("cn") or "").strip()
+            if o and o.lower() not in ("privacy", "unknown", "*"):
+                parts.append(f" SSL cert: {o}.")
+            elif cn and "*" not in cn and cn.lower() != domain.lower():
+                parts.append(f" SSL CN: {cn}.")
+    except (asyncio.TimeoutError, Exception):
+        pass
+
+    # Lightweight fetch: first 32KB, <title> and meta description (often works when full scrape blocked)
+    if session:
+        try:
+            # Try original URL first, then https://domain
+            for try_url in (original_url, f"https://{domain}", f"http://{domain}"):
+                page_data = await asyncio.wait_for(_get_lightweight_title_meta(session, try_url), timeout=6.0)
+                if page_data and (page_data.get("title") or page_data.get("description")):
+                    title = re.sub(r"[\r\n\t]+", " ", (page_data.get("title") or "").strip())[:300]
+                    desc = re.sub(r"[\r\n\t]+", " ", (page_data.get("description") or "").strip())[:400]
+                    if title:
+                        parts.append(f" From page: Title: {title}.")
+                    if desc and desc != title:
+                        parts.append(f" Description: {desc}.")
+                    if title or desc:
+                        break
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    # Archive.org snapshot title if we still have no title from page
+    if session and not any("From page:" in p for p in parts):
+        try:
+            archive_title = await asyncio.wait_for(_get_archive_org_title(session, original_url), timeout=8.0)
+            if archive_title:
+                parts.append(f" From archive: Title: {archive_title}.")
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    result = "".join(parts)
+    # Sanitize for CSV: no newlines
+    if result:
+        result = re.sub(r"[\r\n]+", " ", result).strip()
+    return result
 
 
 async def fetch(session: aiohttp.ClientSession, url: str, timeout: int, retries: int, fast_mode: bool = False):
@@ -3539,14 +3810,18 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             if isinstance(cache_result, tuple):
                 homepage = cache_result
             else:
+                if "challenge" in homepage.lower() or "cloudflare" in homepage.lower():
+                    return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
+                if "timeout" in homepage.lower():
+                    return "❌ Timeout. Likely anti-bot. Tip: Playwright (playwright install chromium)."
                 return f"❌ {homepage}"
 
     page_url, html = homepage
-    # Reject Google error/captcha pages — try archive/Playwright/Common Crawl only (skip Google cache)
+    # Reject Google error/captcha pages — try Playwright first (real site), then archive/Common Crawl
     if _is_google_error_or_captcha_page(html):
         cache_result = await _fetch_from_cache_fallbacks(
             session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback,
-            skip_google_cache=True,
+            skip_google_cache=True, try_playwright_first=True,
         )
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
@@ -3556,30 +3831,30 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
             await asyncio.sleep(1)
             cache_result = await _fetch_from_cache_fallbacks(
                 session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback,
-                skip_google_cache=True,
+                skip_google_cache=True, try_playwright_first=True,
             )
             if isinstance(cache_result, tuple):
                 page_url, html = cache_result
                 if _is_google_error_or_captcha_page(html):
                     return "❌ Google cache returned an error page; content unavailable. Try again later."
             else:
-                return "❌ Content was a Google error page; cache fallback had no better result. Try again later."
+                return "❌ Google error page. Tip: Playwright (playwright install chromium)."
     # Reject Cloudflare/challenge pages so we try archive and other fallbacks instead
     if _is_challenge_or_verification_page(html):
         cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=True)
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
-                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+                return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
         else:
             await asyncio.sleep(1)
             cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=True)
             if isinstance(cache_result, tuple):
                 page_url, html = cache_result
                 if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
-                    return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+                    return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
             else:
-                return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
+                return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
     
     # STRICT validation: Verify we're on the correct domain
     from urllib.parse import urlparse
@@ -3662,21 +3937,21 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             if _is_challenge_or_verification_page(html) or _is_google_error_or_captcha_page(html):
-                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+                return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
             cleaned = cleanup_html(html)
             if cleaned and _cleaned_text_is_challenge(cleaned):
-                return "❌ Challenge/verification page; cache fallback had no better result. Try again later."
+                return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
         else:
-            return "❌ Challenge/verification page (e.g. Cloudflare); cache fallback had no better result. Try again later."
+            return "❌ Blocked (Cloudflare/challenge). Tip: Playwright (playwright install chromium)."
     
-    # No content or insufficient (under 200 chars) = try fallbacks once, then error
+    # No content or insufficient (under 200 chars) = try Playwright first (JS-only/blocked), then other fallbacks
     if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
-        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback)
+        cache_result = await _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, try_playwright_first=True)
         if isinstance(cache_result, tuple):
             page_url, html = cache_result
             cleaned = cleanup_html(html)
         if not cleaned or len(cleaned.strip()) < _MIN_CONTENT_LEN:
-            return "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+            return "❌ Insufficient content or blocked. Tip: Playwright (playwright install chromium)."
     
     # Validate cleaned content (require meaningful length and reject challenge/verification pages)
     if cleaned and len(cleaned.strip()) >= _MIN_CONTENT_LEN and not _cleaned_text_is_challenge(cleaned):
@@ -3774,7 +4049,7 @@ async def scrape_site(session, url: str, depth: int, keywords, max_chars: int, r
     final_text = separator.join(results)
     # Final guard: if total content is still under minimum, treat as bad result
     if len(final_text.strip()) < _MIN_CONTENT_LEN:
-        return errors[0] if errors else f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters); likely error or blocked page. Try again later."
+        return errors[0] if errors else "❌ Insufficient content or blocked. Tip: Playwright (playwright install chromium)."
     
     # Add errors at the end if there's space (errors are usually short)
     if errors and len(final_text) + len("\n".join(errors)) + 20 <= max_chars:
@@ -3923,7 +4198,11 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             # Only reject obviously invalid URLs (empty or completely malformed)
             if not normalized_url or len(normalized_url.strip()) < 4:
                 scraped_text = "❌ Invalid URL: URL is empty or too short"
-                ai_summary = "❌ Invalid URL: URL is empty or too short"
+                # Still try verified fallback so we get company info from original_url when it has a domain (e.g. "example.com")
+                if _extract_domain_for_fallback(original_url):
+                    ai_summary = await _get_verified_fallback_summary(original_url, session)
+                else:
+                    ai_summary = scraped_text
                 email_copy = ""
                 _scrape_status("error", scraped_text)
             else:
@@ -3940,16 +4219,12 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                     )
                 except asyncio.TimeoutError:
                     url_short = normalized_url[:70] + ("…" if len(normalized_url) > 70 else "")
-                    err_msg = (
-                        f"❌ Timeout: full scrape for {url_short} exceeded {max_total_time}s. "
-                        f"Site works in browser but not scraper — often blocked by anti-bot. "
-                        f"Tip: 1) Increase Timeout in Step 2 Settings, 2) Install Playwright (pip install playwright && playwright install chromium) for browser fallback."
-                    )
+                    err_msg = f"❌ Timeout ({max_total_time}s). Likely anti-bot. Tip: Playwright (playwright install chromium)."
                     _scrape_status("error", err_msg)
                     try:
                         cache_result = await asyncio.wait_for(
                             _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True, playwright_full_time=True),
-                            timeout=90
+                            timeout=120
                         )
                     except asyncio.TimeoutError:
                         cache_result = ""
@@ -3978,10 +4253,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                                 )
                             except asyncio.TimeoutError:
                                 url_short = fallback_url[:70] + ("…" if len(fallback_url) > 70 else "")
-                                scraped_text = (
-                                    f"❌ Timeout: scrape for {url_short} exceeded {max_total_time}s. "
-                                    f"Tip: increase Timeout in Step 2 Settings."
-                                )
+                                scraped_text = f"❌ Timeout ({max_total_time}s). Likely anti-bot. Tip: Playwright (playwright install chromium)."
                         else:
                             scraped_text = f"❌ Error scraping {normalized_url}: {str(e)}"
                     except Exception as e2:
@@ -3991,7 +4263,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                         try:
                             cache_result = await asyncio.wait_for(
                                 _fetch_from_cache_fallbacks(session, normalized_url, timeout, use_playwright_fallback, use_common_crawl_fallback, quick_mode=True, playwright_full_time=True),
-                                timeout=90
+                                timeout=120
                             )
                         except asyncio.TimeoutError:
                             cache_result = ""
@@ -4006,7 +4278,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 
                 # Single gate: never treat bad content as success (short, challenge, or error-like)
                 if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
-                    scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+                    scraped_text = "❌ Insufficient content or blocked. Tip: Playwright (playwright install chromium)."
                     _scrape_status("error", scraped_text)
                 
                 # RELAXED VALIDATION: Only flag obvious mismatches
@@ -4040,11 +4312,43 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 if scraped_text and not scraped_text.startswith("❌"):
                     _scrape_status("scraped", f"{len(scraped_text):,} chars scraped")
                 
-                # Generate AI summary if enabled (skip when scraping already failed or insufficient content)
-                if ai_enabled and ai_api_key and ai_provider and ai_model:
-                    if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
-                        ai_summary = "❌ Summary skipped: site unreachable or insufficient content"
+                # When scrape failed: get verified fallback (domain, WHOIS, etc.); still run AI if enabled so summary uses lead data + verified info
+                scrape_failed = not scraped_text or scraped_text.startswith("❌") or len((scraped_text or "").strip()) < _MIN_CONTENT_LEN
+                if scrape_failed:
+                    fallback_text = await _get_verified_fallback_summary(original_url, session)
+                    if ai_enabled and ai_api_key and ai_provider and ai_model:
+                        _scrape_status("ai_summarizing", "Generating AI summary from lead data + verified info...")
+                        def url_status_callback(msg):
+                            if scrape_status_callback:
+                                try:
+                                    scrape_status_callback(original_url, "ai_summarizing", msg)
+                                except Exception:
+                                    pass
+                            if ai_status_callback:
+                                ai_status_callback(original_url, msg)
+                        try:
+                            ai_summary = await asyncio.wait_for(
+                                generate_ai_summary(
+                                    ai_api_key, ai_provider, ai_model, ai_prompt or "",
+                                    lead_data, fallback_text, status_callback=url_status_callback
+                                ),
+                                timeout=120
+                            )
+                        except asyncio.TimeoutError:
+                            ai_summary = "❌ AI Summary timeout: Generation exceeded 2 minutes"
+                            _scrape_status("error", ai_summary)
+                        except Exception as e:
+                            ai_summary = f"❌ AI Summary error: {str(e)}"
+                            _scrape_status("error", ai_summary)
+                        else:
+                            if ai_summary and ai_summary.startswith("❌"):
+                                _scrape_status("error", ai_summary)
+                            if not ai_summary or ai_summary.startswith("❌"):
+                                ai_summary = fallback_text
                     else:
+                        ai_summary = fallback_text
+                # When scrape succeeded: generate AI summary if enabled
+                elif ai_enabled and ai_api_key and ai_provider and ai_model:
                         _scrape_status("ai_summarizing", "Generating AI summary...")
                         def url_status_callback(msg):
                             if scrape_status_callback:
@@ -4076,7 +4380,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 # Generate email copy if enabled (skip when scraping already failed or insufficient content)
                 if email_copy_enabled and email_copy_api_key and email_copy_provider and email_copy_model:
                     if not scraped_text or scraped_text.startswith("❌") or len(scraped_text.strip()) < _MIN_CONTENT_LEN:
-                        email_copy = "❌ Email skipped: site unreachable or insufficient content"
+                        email_copy = "Email skipped: site unreachable (see Company Summary for verified domain/registrant info)"
                     else:
                         _scrape_status("email_copy", "Generating email copy...")
                         def email_status_callback(msg):
@@ -4108,7 +4412,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             
             # Reject bad results (short or challenge pages) so they never get written as success
             if scraped_text and _scraped_result_is_bad(scraped_text):
-                scraped_text = f"❌ Insufficient content (under {_MIN_CONTENT_LEN} characters) or blocked/verification page. Try again later."
+                scraped_text = "❌ Insufficient content or blocked. Tip: Playwright (playwright install chromium)."
                 _scrape_status("error", scraped_text)
 
             # PERFECT CSV CLEANING - Zero tolerance for formatting errors
@@ -4155,7 +4459,22 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             
             # Final gate: never enqueue bad content as success (defense in depth)
             if scraped_text and not scraped_text.startswith("❌") and _scraped_result_is_bad(scraped_text):
-                scraped_text = "❌ Insufficient content (under 200 characters); likely error or blocked page. Try again later."
+                    scraped_text = "❌ Insufficient content or blocked. Tip: Playwright (playwright install chromium)."
+            # For failed leads: append 100% accurate fallback so ScrapedText always has verified domain
+            if scraped_text and scraped_text.startswith("❌"):
+                fallback_domain = _extract_domain_for_fallback(original_url)
+                if fallback_domain:
+                    scraped_text = scraped_text.rstrip()
+                    if not scraped_text.endswith("."):
+                        scraped_text += "."
+                    scraped_text += f" [Verified: Domain {fallback_domain}.]"
+            # Safety net: ensure Company Summary is never empty when we can get any company info (domain/WHOIS/SSL)
+            if (not ai_summary or ai_summary.startswith("❌")) and _extract_domain_for_fallback(original_url):
+                try:
+                    ai_summary = await _get_verified_fallback_summary(original_url, session)
+                except Exception:
+                    if not ai_summary:
+                        ai_summary = "Site unreachable. No summary available."
             # Clean all fields perfectly; normalize AI/email errors for clearer CSV display
             ai_for_csv = _normalize_ai_error_for_display(ai_summary, "Summary")
             email_for_csv = _normalize_ai_error_for_display(email_copy, "Email") if email_copy else ""
@@ -4172,7 +4491,7 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, row_idx)
             await result_queue.put(out)
         except Exception as e:
-            # If anything goes wrong, still output an error row
+            # If anything goes wrong, still output an error row with at least verified fallback when possible
             try:
                 # Helper function for cleaning (defined here since it might not be in scope)
                 def clean_csv_field(field_value):
@@ -4197,7 +4516,16 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
                 error_msg = f"❌ Worker error processing {original_url_val}: {str(e)}"
                 cleaned_url = clean_csv_field(original_url_val)
                 cleaned_scraped_text = clean_csv_field(error_msg)
-                cleaned_ai_summary = clean_csv_field("")
+                # Still try to get company info from domain/WHOIS so we never leave Company Summary empty
+                fallback_ai = ""
+                try:
+                    if _extract_domain_for_fallback(original_url_val):
+                        fallback_ai = await _get_verified_fallback_summary(original_url_val, session)
+                except Exception:
+                    pass
+                if fallback_ai:
+                    cleaned_scraped_text = clean_csv_field(error_msg.rstrip() + ("" if error_msg.endswith(".") else ".") + f" [Verified: Domain {_extract_domain_for_fallback(original_url_val)}.]")
+                cleaned_ai_summary = clean_csv_field(fallback_ai)
                 cleaned_email_copy = clean_csv_field("")
                 if email_copy_enabled:
                     out = (cleaned_url, cleaned_scraped_text, cleaned_ai_summary, cleaned_email_copy, row_idx)
@@ -4207,10 +4535,14 @@ async def worker_coroutine(name, session, url_queue: asyncio.Queue, result_queue
             except:
                 try:
                     row_idx = url_index if 'url_index' in locals() and url_index is not None else -1
+                    url_for_row = original_url if 'original_url' in locals() and original_url else ""
+                    err_text = f"❌ Critical worker error: {str(e)}"
+                    if url_for_row and _extract_domain_for_fallback(url_for_row):
+                        err_text += f" [Verified: Domain {_extract_domain_for_fallback(url_for_row)}.]"
                     if email_copy_enabled:
-                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", "", row_idx))
+                        await result_queue.put((url_for_row, err_text, err_text[:200] if len(err_text) > 200 else err_text, "", row_idx))
                     else:
-                        await result_queue.put(("", f"❌ Critical worker error: {str(e)}", "", row_idx))
+                        await result_queue.put((url_for_row, err_text, err_text[:200] if len(err_text) > 200 else err_text, row_idx))
                 except:
                     pass  # If even this fails, just continue
         finally:
@@ -6437,88 +6769,42 @@ if ai_enabled:
     default_prompt_template = """You are Hypothesis Bot… an advanced commercial analysis agent.
 
 INPUT
-You will receive ONLY one input: raw website copy scraped from a company's website (may include multiple pages).
+You receive: (1) LEAD INFORMATION — all available columns from the lead's row (URL, company name, industry, etc.); (2) WEBSITE CONTENT — scraped copy when available. When the site could not be scraped, WEBSITE CONTENT may be minimal verified data only (e.g. "Site unreachable. Verified: Domain X. Registrant: Y. Country: Z."). Use both to build intelligence.
+
+When WEBSITE CONTENT is missing or is only verified/fallback data, base your SUMMARY and FACTS on LEAD INFORMATION and that verified data only. Do not invent facts. Output a short SUMMARY and a reduced FACTS/HYPOTHESES set using the lead's row data and verified info. When full webcopy is present, use it as the primary source.
 
 CORE JOB
-Turn messy webcopy into:
+Turn lead data and (when available) messy webcopy into:
 1) a sharp company intelligence SUMMARY
-2) a clean set of FACTS grounded in the text
+2) a clean set of FACTS grounded in the text or lead data
 3) commercially relevant HYPOTHESES inferred from signals, gaps, tone, and structure
 
-You are not writing outreach. You are building the intelligence layer that enables personalization later.
-
 NON NEGOTIABLE RULES
-1) Do not invent facts. If it is not explicitly supported by the webcopy, it is not a fact.
-2) Facts must be short and must include Evidence Quote… an exact snippet from the webcopy.
-3) Hypotheses must be explicitly labeled as hypotheses and must include:
-   • Signal… the specific wording or structural clue that triggered the inference
-   • Commercial implication… why it matters in a sales or growth context
-   • Confidence: High, Medium, or Low
-4) Never mention any external tools or data sources (Apollo, LinkedIn, Crunchbase, funding, headcount, etc.). You only have webcopy.
-5) If the company name is unclear, write "Company: Not explicitly stated" and proceed.
-6) Avoid cringe adjectives like great, amazing, innovative. Be surgical.
-7) Avoid criticism. Frame gaps neutrally as "signals" or "absence suggests".
-8) Keep it concise. No fluff. No extra sections.
-
-ANALYSIS GUIDELINES
-When extracting facts, prioritize:
-• What they do (offer categories, deliverables)
-• Who they serve (industries, segments, buyer language)
-• How they sell (engagement models, pricing mentions, process)
-• Proof (case studies, client names, testimonials, quantified claims)
-• Differentiators (positioning phrases, guarantees, compliance, security)
-• Operational signals (hiring, support hours, global language, locations)
-• Technology signals (stacks, platforms, integrations) only if stated
-
-When generating hypotheses, prioritize:
-• Likely buying triggers (growth, hiring, new initiatives, modernization)
-• Likely pain points (capacity, speed, differentiation, trust, compliance, delivery)
-• Likely maturity level (specialist vs generalist, product vs services)
-• Likely stakeholder priorities (risk reduction, outcomes, speed, cost certainty)
-• Contradictions or gaps between claims and proof
-Each hypothesis must connect to a commercial implication.
+1) Do not invent facts. Facts must be supported by webcopy or by LEAD INFORMATION / verified data.
+2) Facts must include Evidence Quote (exact snippet from webcopy, or "From lead data" / "From verified WHOIS/SSL" when no webcopy).
+3) Hypotheses must include Signal, Commercial implication, Confidence (High/Medium/Low).
+4) Use only the provided inputs. No fluff.
 
 LEAD INFORMATION:
-- Website URL: {url}
+- Url: {url}
 - Company Name: {company_name}
 
-WEBSITE CONTENT (ONLY SOURCE OF INFORMATION):
+WEBSITE CONTENT (scraped when available; when site unreachable may be only verified domain/registrant/country):
 {scraped_content}
 
-OUTPUT FORMAT (STRICT - NO MARKDOWN, NO TRUNCATION)
+OUTPUT FORMAT (STRICT - NO MARKDOWN)
 Return exactly these 3 sections with EXACT headers:
 
 ===SUMMARY===
-Write 3 to 5 sentences in one paragraph describing:
-• what the company appears to do
-• who it appears to serve
-• how it positions itself
-• one notable proof element (only if present)
-Mark inferences with (obs).
-Do NOT use markdown (**, __, #). Use plain text only.
+3 to 5 sentences. When only lead data/verified info: short summary from domain, registrant, and lead columns.
 
 ===FACTS===
-Provide 10 to 18 facts.
-Format each EXACTLY as:
-Fact: [statement]
-Evidence Quote: "[COMPLETE quote from webcopy - do NOT truncate with ...]"
-Source: [Page name if present, otherwise "Webcopy"]
-
-CRITICAL: Evidence quotes must be COMPLETE sentences from the webcopy. Do NOT truncate mid-word or mid-sentence.
+10 to 18 facts (or fewer when content is minimal). Evidence Quote from webcopy or "From lead data" / "From verified data".
 
 ===HYPOTHESES===
-Provide 6 to 12 hypotheses.
-Format each EXACTLY as:
-Hypothesis: [inference statement] (obs)
-Signal: "[specific wording or structural clue from webcopy]"
-Commercial implication: [why it matters in sales/growth context]
-Confidence: High or Medium or Low
+6 to 12 hypotheses. Signal, Commercial implication, Confidence: High or Medium or Low.
 
-CRITICAL: 
-- Do NOT use markdown formatting (**, __, #)
-- Do NOT truncate words mid-word
-- Do NOT mix facts into hypotheses section
-- Keep facts grounded (from webcopy), hypotheses inferred (from signals)"""
+CRITICAL: Do NOT use markdown (**, __, #). Keep facts grounded (from webcopy or lead/verified data)."""
     
     if 'master_prompt' not in st.session_state:
         st.session_state['master_prompt'] = default_prompt_template
@@ -7829,7 +8115,16 @@ if st.session_state.get('scraping_complete', False) or has_download_data:
                         st.info("ZIP file not available on disk")
             except Exception as e:
                 st.error(f"Could not read ZIP file: {e}")
-        st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
+        # When run used single combined output (enriched mode), there are no part files — show row count instead
+        if csv_files or excel_files:
+            st.caption(f"Contains {len(csv_files)} CSV + {len(excel_files)} Excel files")
+        else:
+            _combined = st.session_state.get('combined_df')
+            _n = len(_combined) if _combined is not None and hasattr(_combined, '__len__') else 0
+            if _n > 0:
+                st.caption(f"No part files (single combined output). {_n:,} rows — use Combined Excel/CSV below.")
+            else:
+                st.caption("Contains 0 CSV + 0 Excel files")
     
     with col_dl2:
         st.subheader("📊 Combined Excel")
